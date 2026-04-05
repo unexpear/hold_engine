@@ -38,6 +38,31 @@ pub struct Texture {
     pub data:   Vec<u8>,
 }
 
+/// GPU-side texture handle returned by the OpenGL renderer after uploading a
+/// [`Texture`].
+///
+/// Stores the OpenGL texture ID.  Created via
+/// [`OpenGLRenderer::upload_texture()`](crate::renderer::opengl::OpenGLRenderer::upload_texture)
+/// and freed via
+/// [`OpenGLRenderer::free_texture()`](crate::renderer::opengl::OpenGLRenderer::free_texture).
+pub struct GpuTexture {
+    /// OpenGL texture object name.
+    pub id: u32,
+    pub width:  u32,
+    pub height: u32,
+}
+
+
+/// GPU-side texture handle returned by the OpenGL renderer after uploading a
+/// [`Texture`].
+///
+/// Stores the OpenGL texture ID.  Created via
+/// [`OpenGLRenderer::upload_texture()`](crate::renderer::opengl::OpenGLRenderer::upload_texture)
+/// and freed via
+/// [`OpenGLRenderer::free_texture()`](crate::renderer::opengl::OpenGLRenderer::free_texture).
+
+
+
 // ---------------------------------------------------------------------------
 // Shader
 // ---------------------------------------------------------------------------

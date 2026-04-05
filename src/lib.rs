@@ -13,7 +13,8 @@ pub mod skybox;
 pub mod terrain;
 
 // Convenient re-exports at the crate root.
-pub use assets::{AssetStore, GpuMesh, Handle, MeshData, ObjError, Vertex};
+pub use assets::{AssetStore, GpuMesh, GpuTexture, Handle, MeshData, ObjError, TexError, Texture, TextureFormat, Vertex,
+              load_bmp, load_tga, load_texture};
 pub use ecs::{ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Children,
               DialogueChoice, DialogueNode, DialogueTree, DirectionalLight, Entity,
               GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,

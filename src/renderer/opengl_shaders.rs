@@ -57,3 +57,42 @@ out vec4 frag_color;
 uniform vec4 u_color;
 void main() { frag_color = u_color; }
 "#;
+
+
+/// Textured mesh vertex shader.
+///
+/// Same vertex layout as [`MESH_VERT`] but passes UVs to the fragment stage.
+pub const TEXTURED_VERT: &str = r#"
+#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+uniform mat4 u_mvp;
+uniform mat4 u_model;
+out vec3 v_normal_world;
+out vec2 v_uv;
+void main() {
+    gl_Position    = u_mvp * vec4(a_pos, 1.0);
+    v_normal_world = mat3(transpose(inverse(u_model))) * a_normal;
+    v_uv           = a_uv;
+}
+"#;
+
+/// Textured mesh fragment shader — samples albedo texture, modulated by
+/// directional light (Blinn-Phong ambient + diffuse).
+pub const TEXTURED_FRAG: &str = r#"
+#version 330 core
+in  vec3 v_normal_world;
+in  vec2 v_uv;
+out vec4 frag_color;
+uniform sampler2D u_texture;
+uniform vec3      u_light_dir;
+uniform vec4      u_color;       // tint / multiplier
+void main() {
+    vec4  tex  = texture(u_texture, v_uv);
+    float diff = max(dot(normalize(v_normal_world), normalize(u_light_dir)), 0.0);
+    frag_color = tex * u_color * (0.15 + 0.85 * diff);
+}
+"#;
+
+

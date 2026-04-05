@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use crate::assets::mesh::Vertex;
-use crate::assets::types::GpuMesh;
+use crate::assets::types::{GpuMesh, GpuTexture, Texture, TextureFormat};
 use crate::assets::mesh::MeshData;
 use crate::platform::ffi::*;
 use crate::math::{Mat4, Vec3};
@@ -231,6 +231,7 @@ struct GlFns {
     // Uniforms
     get_uniform_location: GlGetUniformLocation,
     uniform_matrix4fv:    GlUniformMatrix4fv,
+    uniform1i:            GlUniform1i,
     uniform3fv:           GlUniform3fv,
     uniform4fv:           GlUniform4fv,
 
@@ -291,6 +292,7 @@ impl GlFns {
 
         let get_uniform_location = gl_fn!(opengl32, glGetUniformLocation, GlGetUniformLocation).unwrap();
         let uniform_matrix4fv    = gl_fn!(opengl32, glUniformMatrix4fv,   GlUniformMatrix4fv  ).unwrap();
+        let uniform1i            = gl_fn!(opengl32, glUniform1i,          GlUniform1i         ).unwrap();
         let uniform3fv           = gl_fn!(opengl32, glUniform3fv,         GlUniform3fv        ).unwrap();
         let uniform4fv           = gl_fn!(opengl32, glUniform4fv,         GlUniform4fv        ).unwrap();
 
@@ -314,7 +316,7 @@ impl GlFns {
             create_program, attach_shader, link_program,
             get_programiv, get_program_info_log, use_program, delete_program,
             draw_elements,
-            get_uniform_location, uniform_matrix4fv, uniform3fv, uniform4fv,
+            get_uniform_location, uniform_matrix4fv, uniform1i, uniform3fv, uniform4fv,
             gen_textures, delete_textures, bind_texture, tex_image2d, tex_parameteri,
             active_texture, generate_mipmap, pixel_storei,
         }
@@ -652,7 +654,125 @@ impl OpenGLRenderer {
 
     // ── Cleanup helpers ───────────────────────────────────────────────────────
 
-    /// Delete the GPU buffers and VAO for a mesh previously created by
+
+    /// Upload a [`Texture`] to the GPU and return a [`GpuTexture`].
+    ///
+    /// The texture is converted to RGBA8 if it is not already.
+    pub fn upload_texture(&self, tex: &Texture) -> GpuTexture {
+        // Convert to RGBA8 if needed.
+        let rgba: std::borrow::Cow<'_, [u8]> = match tex.format {
+            TextureFormat::Rgba8 => std::borrow::Cow::Borrowed(&tex.data),
+            TextureFormat::Rgb8  => {
+                let mut out = Vec::with_capacity((tex.width * tex.height * 4) as usize);
+                for chunk in tex.data.chunks_exact(3) {
+                    out.push(chunk[0]);
+                    out.push(chunk[1]);
+                    out.push(chunk[2]);
+                    out.push(255);
+                }
+                std::borrow::Cow::Owned(out)
+            }
+            TextureFormat::R8 => {
+                let mut out = Vec::with_capacity((tex.width * tex.height * 4) as usize);
+                for &b in &tex.data {
+                    out.push(b);
+                    out.push(b);
+                    out.push(b);
+                    out.push(255);
+                }
+                std::borrow::Cow::Owned(out)
+            }
+        };
+        let id = self.upload_texture_rgba8(tex.width, tex.height, &rgba);
+        GpuTexture { id, width: tex.width, height: tex.height }
+    }
+
+    /// Draw a textured mesh.
+    ///
+    /// Binds `texture` to texture unit 0, sets the `u_texture` sampler uniform,
+    /// then issues the same draw call as [`Self::draw_vao`].
+    pub fn draw_mesh_textured(
+        &self,
+        mesh:      &GpuMesh,
+        texture:   &GpuTexture,
+        program:   u32,
+        mvp:       &Mat4,
+        model:     &Mat4,
+        color:     Color,
+        light_dir: Vec3,
+    ) {
+        unsafe {
+            let gl = &self.gl;
+
+            (gl.use_program)(program);
+
+            // Bind texture to unit 0.
+            (gl.active_texture)(GL_TEXTURE0);
+            (gl.bind_texture)(GL_TEXTURE_2D, texture.id);
+
+            macro_rules! loc {
+                ($name:expr) => {{
+                    let cname: &[u8] = $name;
+                    (gl.get_uniform_location)(program, cname.as_ptr() as *const GLchar)
+                }};
+            }
+
+            // u_texture = sampler unit 0
+            let loc_tex = loc!(b"u_texture\0");
+            if loc_tex >= 0 {
+                (gl.uniform1i)(loc_tex, 0);
+            }
+
+            // u_mvp
+            let loc_mvp = loc!(b"u_mvp\0");
+            if loc_mvp >= 0 {
+                (gl.uniform_matrix4fv)(
+                    loc_mvp, 1, GL_FALSE,
+                    mvp.cols.as_ptr() as *const GLfloat,
+                );
+            }
+
+            // u_model
+            let loc_model = loc!(b"u_model\0");
+            if loc_model >= 0 {
+                (gl.uniform_matrix4fv)(
+                    loc_model, 1, GL_FALSE,
+                    model.cols.as_ptr() as *const GLfloat,
+                );
+            }
+
+            // u_color (tint)
+            let loc_color = loc!(b"u_color\0");
+            if loc_color >= 0 {
+                let rgba = [color.r, color.g, color.b, color.a];
+                (gl.uniform4fv)(loc_color, 1, rgba.as_ptr());
+            }
+
+            // u_light_dir
+            let loc_light = loc!(b"u_light_dir\0");
+            if loc_light >= 0 {
+                let dir = [light_dir.x, light_dir.y, light_dir.z];
+                (gl.uniform3fv)(loc_light, 1, dir.as_ptr());
+            }
+
+            (gl.bind_vertex_array)(mesh.vao);
+            (gl.draw_elements)(
+                GL_TRIANGLES,
+                mesh.index_count as GLsizei,
+                GL_UNSIGNED_INT,
+                null_mut(),
+            );
+            (gl.bind_vertex_array)(0);
+            (gl.bind_texture)(GL_TEXTURE_2D, 0);
+        }
+    }
+
+    /// Free a GPU texture previously created by [`Self::upload_texture`].
+    pub fn free_texture(&self, tex: GpuTexture) {
+        self.delete_texture(tex.id);
+    }
+
+        /// Delete the GPU buffers and VAO for a mesh previously created by
     /// [`Self::upload_mesh_raw`].
     pub fn delete_vao(&self, vao: u32, vbo: u32, ebo: u32) {
         unsafe {

@@ -29,7 +29,9 @@ pub use crate::{
     engine::{App, Engine},
 
     // Assets
-    MeshData, Vertex, GpuMesh, Handle, AssetStore,
+    MeshData, Vertex, GpuMesh, GpuTexture, Handle, AssetStore,
+    Texture, TextureFormat, TexError,
+    load_bmp, load_tga, load_texture,
 
     // Gameplay components
     Stats, Inventory, ItemId, ItemStack,
