@@ -6,6 +6,7 @@ pub mod input;
 pub mod math;
 pub mod platform;
 pub mod renderer;
+pub mod terrain;
 
 // Convenient re-exports at the crate root.
 pub use assets::{AssetStore, GpuMesh, Handle, MeshData, ObjError, Vertex};
@@ -16,3 +17,4 @@ pub use events::{AppExit, EventBus, EventQueue, WindowResized};
 pub use input::{InputState, MouseButton};
 pub use math::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use renderer::{BackendKind, Color, Renderer};
+pub use terrain::{Heightmap, Terrain, TerrainChunk};
