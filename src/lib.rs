@@ -7,6 +7,7 @@ pub mod math;
 pub mod platform;
 pub mod player;
 pub mod renderer;
+pub mod skybox;
 pub mod terrain;
 
 // Convenient re-exports at the crate root.
@@ -19,4 +20,5 @@ pub use input::{InputState, MouseButton};
 pub use math::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use player::PlayerController;
 pub use renderer::{BackendKind, Color, Renderer};
+pub use skybox::Skybox;
 pub use terrain::{Heightmap, Terrain, TerrainChunk};

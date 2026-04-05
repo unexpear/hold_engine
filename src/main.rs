@@ -14,7 +14,7 @@
 
 use forge::{
     ActiveCamera, Camera, CameraMode, CameraSystem, DirectionalLight,
-    Heightmap, PlayerController, Terrain,
+    Heightmap, PlayerController, Skybox, Terrain,
     ecs::System,
     engine::Engine,
     input::{vk, MouseButton},
@@ -194,6 +194,10 @@ fn main() {
     // -- Player controller --------------------
     let mut player = PlayerController::new(Vec3::new(0.0, 20.0, 0.0));
 
+    // -- Skybox --------------------------------
+    let skybox = Skybox::day(Vec3::new(0.4, 0.8, 0.3));
+
+
     engine.run(renderer, move |world, renderer, input, dt| {
         if input.key_pressed(vk::ESCAPE) { std::process::exit(0); }
 
@@ -266,12 +270,15 @@ fn main() {
         // -- Update terrain chunks around the player --
         terrain.update(player.position);
 
-        renderer.clear(Color::rgb(0.45, 0.65, 0.85));
+        renderer.clear(Color::BLACK);
 
         let (view, proj) = world
             .get::<Camera>(cam_entity)
             .map(|c| (c.view, c.proj))
             .unwrap_or((Mat4::IDENTITY, Mat4::IDENTITY));
+
+        // -- Draw skybox (before geometry, writes only colour, no depth) --
+        skybox.draw(renderer, &view, &proj);
 
         let mvp = proj * view;
 
