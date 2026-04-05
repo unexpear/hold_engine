@@ -49,4 +49,8 @@ pub use crate::{
 
     // Hierarchy
     Parent, Children,
+
+    // Scene
+    SceneData, SceneError, EntityDef,
+    load_scene, parse_scene, spawn_scene, serialize_scene, save_scene,
 };

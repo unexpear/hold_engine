@@ -10,6 +10,7 @@ pub mod platform;
 pub mod player;
 pub mod renderer;
 pub mod skybox;
+pub mod scene;
 pub mod terrain;
 
 // Convenient re-exports at the crate root.
@@ -29,3 +30,5 @@ pub use player::PlayerController;
 pub use renderer::{BackendKind, Color, Renderer};
 pub use skybox::Skybox;
 pub use terrain::{Heightmap, Terrain, TerrainChunk};
+pub use scene::{SceneData, SceneError, EntityDef, TransformDef, CameraDef, LightDef, StatsDef,
+              load_scene, parse_scene, spawn_scene, serialize_scene, save_scene};
