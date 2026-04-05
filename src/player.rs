@@ -1,7 +1,7 @@
 //! Player controller -- capsule movement, gravity, terrain collision.
 
 use crate::math::Vec3;
-use crate::terrain::Terrain;
+use crate::lod::LodTerrain;
 
 /// First-person player with capsule collision against the heightmap terrain.
 pub struct PlayerController {
@@ -67,7 +67,7 @@ impl PlayerController {
         look_delta: (f32, f32),
         jump: bool,
         sprint: bool,
-        terrain: &Terrain,
+        terrain: &LodTerrain,
     ) {
         let half_pi = std::f32::consts::FRAC_PI_2 - 0.01;
 
@@ -116,7 +116,7 @@ impl PlayerController {
 
     /// Sample terrain at five points under the capsule footprint and return
     /// the maximum height so slopes and ridges do not let us clip through.
-    fn sample_ground(&self, terrain: &Terrain) -> f32 {
+    fn sample_ground(&self, terrain: &LodTerrain) -> f32 {
         let x = self.position.x;
         let z = self.position.z;
         let r = self.radius;

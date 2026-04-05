@@ -14,7 +14,7 @@
 
 use forge::{
     ActiveCamera, Camera, CameraMode, CameraSystem, DirectionalLight,
-    Heightmap, PlayerController, Skybox, Terrain,
+    Heightmap, LodTerrain, PlayerController, Skybox,
     ecs::System,
     engine::Engine,
     input::{vk, MouseButton},
@@ -185,7 +185,7 @@ fn main() {
     let obj_color = Color::rgb(0.7, 0.75, 0.85);
 
     // -- Terrain ------------------------------
-    let mut terrain = Terrain::new(
+    let mut terrain = LodTerrain::new(
         Heightmap::default(),
         3,
         Color::rgb(0.3, 0.55, 0.25),
@@ -288,14 +288,16 @@ fn main() {
             .next()
             .unwrap_or((Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 0.15));
 
-        // -- Draw terrain --
+        // -- Draw terrain (LOD: pick resolution tier per chunk) --
         let terrain_col = terrain.color;
         for chunk in &terrain.chunks {
-            for face in &chunk.faces {
+            let dist = LodTerrain::chunk_distance(player.position, chunk.cx, chunk.cz);
+            let tier = chunk.tier_for_dist(dist);
+            for face in &tier.faces {
                 let &[a, b, c] = face;
                 renderer.draw_triangle_3d_lit(
-                    chunk.verts[a], chunk.verts[b], chunk.verts[c],
-                    chunk.normals[a], chunk.normals[b], chunk.normals[c],
+                    tier.verts[a], tier.verts[b], tier.verts[c],
+                    tier.normals[a], tier.normals[b], tier.normals[c],
                     terrain_col,
                     light_dir,
                     light_color,

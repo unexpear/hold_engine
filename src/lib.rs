@@ -3,6 +3,7 @@ pub mod ecs;
 pub mod engine;
 pub mod events;
 pub mod input;
+pub mod lod;
 pub mod math;
 pub mod platform;
 pub mod player;
@@ -17,6 +18,7 @@ pub use ecs::{ActiveCamera, Camera, CameraMode, CameraSystem, Children, Directio
 pub use engine::Engine;
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};
 pub use input::{InputState, MouseButton};
+pub use lod::{LodLevel, LodMesh, LodChunk, ChunkTier, LodTerrain};
 pub use math::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use player::PlayerController;
 pub use renderer::{BackendKind, Color, Renderer};
