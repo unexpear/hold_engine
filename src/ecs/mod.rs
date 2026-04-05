@@ -6,7 +6,8 @@ pub mod schedule;
 pub mod systems;
 pub mod world;
 
-pub use components::{ActiveCamera, Camera, CameraMode, Children, DirectionalLight, GlobalTransform, Parent, Transform};
+pub use components::{ActiveCamera, Camera, CameraMode, Children, DirectionalLight, GlobalTransform,
+                     Inventory, ItemId, ItemStack, Parent, Stats, Transform};
 pub use entity::Entity;
 pub use schedule::SystemSchedule;
 pub use system::System;
