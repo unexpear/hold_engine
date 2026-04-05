@@ -7,6 +7,34 @@ use crate::platform::Window;
 use crate::renderer::Renderer;
 use crate::platform::ffi::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
+
+/// Trait for structured game applications.
+///
+/// Implement this instead of using a raw closure with `Engine::run`.
+///
+/// ```rust,no_run
+/// use hold::prelude::*;
+/// use hold::engine::App;
+///
+/// struct MyGame;
+///
+/// impl App for MyGame {
+///     fn setup(&mut self, world: &mut World) {
+///         // Spawn entities, add components, etc.
+///     }
+///     fn update(&mut self, world: &mut World, renderer: &mut dyn Renderer, input: &InputState, dt: f32) {
+///         // Game logic and rendering each frame.
+///     }
+/// }
+/// ```
+pub trait App {
+    /// Called once before the first frame.
+    fn setup(&mut self, _world: &mut World) {}
+    /// Called every frame.
+    fn update(&mut self, world: &mut World, renderer: &mut dyn Renderer, input: &InputState, dt: f32);
+}
+
+
 pub struct Engine {
     pub world:    World,
     pub schedule: SystemSchedule,
@@ -60,7 +88,7 @@ impl Engine {
             self.fps_timer += dt;
             if self.fps_timer >= 1.0 && dt > 0.0 {
                 let fps = (1.0 / dt) as u32;
-                self.window.set_title(&format!("Forge — {} FPS", fps));
+                self.window.set_title(&format!("Hold — {} FPS", fps));
                 self.fps_timer = 0.0;
             }
 
@@ -84,4 +112,20 @@ impl Engine {
             }
         }
     }
+
+    /// Run a game loop driven by an [`App`] implementor.
+    pub fn run_app<R, A>(mut self, renderer: R, mut app: A)
+    where
+        R: Renderer,
+        A: App,
+    {
+        app.setup(&mut self.world);
+        self.run(renderer, move |world, renderer, input, dt| {
+            app.update(world, renderer, input, dt);
+        });
+    }
+
+
+    
+
 }

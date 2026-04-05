@@ -1,3 +1,4 @@
+pub mod prelude;
 pub mod assets;
 pub mod ecs;
 pub mod engine;
@@ -18,7 +19,7 @@ pub use ecs::{ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Ch
               GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,
               Quest, QuestId, QuestLog, QuestObjective, QuestState,
               Stats, System, SystemSchedule, Transform, TransformPropagateSystem, World};
-pub use engine::Engine;
+pub use engine::{App, Engine};
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};
 pub use input::{InputState, MouseButton};
 pub use lod::{LodLevel, LodMesh, LodChunk, ChunkTier, LodTerrain};

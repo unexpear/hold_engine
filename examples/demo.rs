@@ -1,8 +1,8 @@
 //! Demo: spinning model on procedural terrain with player controller.
 //!
 //! Usage:
-//!   cargo run                         -- procedural tetrahedron (default)
-//!   cargo run -- path/to/model.obj    -- load a Wavefront OBJ file
+//!   cargo run --example demo           -- procedural tetrahedron (default)
+//!   cargo run --example demo -- path/to/model.obj
 //!
 //! Controls:
 //!   WASD       -- move
@@ -12,17 +12,7 @@
 //!   F5         -- toggle first-person / third-person camera
 //!   Esc        -- quit
 
-use hold::{
-    ActiveCamera, Camera, CameraMode, CameraSystem, DirectionalLight,
-    Heightmap, LodTerrain, PlayerController, Skybox,
-    ecs::System,
-    engine::Engine,
-    input::{vk, MouseButton},
-    math::{Mat4, Quat, Vec3},
-    renderer::{Color, Renderer},
-    renderer::software::SoftwareRenderer,
-    Entity, GlobalTransform, MeshData, Transform, TransformPropagateSystem, World,
-};
+use hold::prelude::*;
 
 // -- Components ---------------------------------------------------------------
 
@@ -110,7 +100,7 @@ fn main() {
         }
     });
 
-    let mut engine = Engine::new("Forge Engine — Demo", 960, 540);
+    let mut engine = Engine::new("Hold Engine — Demo", 960, 540);
     let aspect = 960.0 / 540.0_f32;
 
     // -- Model entity (spinning landmark) -----

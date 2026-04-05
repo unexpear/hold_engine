@@ -3,9 +3,9 @@ name = "hold_engine"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
+[[example]]
 name = "demo"
-path = "src/main.rs"
+path = "examples/demo.rs"
 
 [lib]
 name = "hold"
