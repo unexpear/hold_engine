@@ -6,9 +6,9 @@ pub mod schedule;
 pub mod systems;
 pub mod world;
 
-pub use components::{Children, GlobalTransform, Parent, Transform};
+pub use components::{ActiveCamera, Camera, CameraMode, Children, GlobalTransform, Parent, Transform};
 pub use entity::Entity;
 pub use schedule::SystemSchedule;
 pub use system::System;
-pub use systems::TransformPropagateSystem;
+pub use systems::{CameraSystem, TransformPropagateSystem};
 pub use world::World;

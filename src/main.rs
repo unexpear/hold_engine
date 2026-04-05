@@ -1,33 +1,25 @@
-//! Demo: spinning Gouraud-shaded tetrahedron rendered by the software backend.
+//! Demo: spinning tetrahedron with an ECS camera.
 //!
-//! Shows:
-//!  • Engine + ECS setup
-//!  • Transform and Velocity components
-//!  • SpinSystem (runs via world.update each frame)
-//!  • Software renderer with 3D perspective + depth buffer
-//!  • Input: Escape to quit, WASD/arrows to tumble the camera
+//! Camera is now a first-class ECS entity:
+//!   • Camera       — fov / near / far / aspect + computed view & proj
+//!   • CameraMode   — ThirdPerson orbit around the tetrahedron
+//!   • ActiveCamera — marks it as the current render camera
+//!   • CameraSystem — runs each frame, recomputes view matrix
 
 use forge::{
-    ecs::{System, World},
+    ActiveCamera, Camera, CameraMode, CameraSystem,
+    ecs::System,
     engine::Engine,
     input::vk,
-    math::{deg_to_rad, Mat4, Vec3},
+    math::{Mat4, Quat, Vec3, Vec4},
     renderer::{Color, Renderer},
     renderer::software::SoftwareRenderer,
-    Entity,
+    Entity, GlobalTransform, Transform, TransformPropagateSystem, World,
 };
 
 // ── Components ────────────────────────────────────────────────────────────────
 
-struct Transform {
-    rotation_y: f32,
-    rotation_x: f32,
-}
-
-struct AngularVelocity {
-    y: f32, // radians/sec
-    x: f32,
-}
+struct AngularVelocity { y: f32, x: f32 }
 
 // ── Systems ───────────────────────────────────────────────────────────────────
 
@@ -35,25 +27,20 @@ struct SpinSystem;
 
 impl System for SpinSystem {
     fn update(&mut self, world: &mut World, dt: f32) {
-        // Collect entity IDs first to avoid borrow conflict.
         let entities: Vec<Entity> = world
             .query::<Transform>()
-            .map(|(entity, _)| entity)
+            .map(|(e, _)| e)
             .collect();
 
         for entity in entities {
-            // Read velocity
-            let (vy, vx) = {
-                let vel = world.get::<AngularVelocity>(entity);
-                match vel {
-                    Some(v) => (v.y, v.x),
-                    None    => continue,
-                }
+            let (vy, vx) = match world.get::<AngularVelocity>(entity) {
+                Some(v) => (v.y, v.x),
+                None    => continue,
             };
-            // Update transform
             if let Some(t) = world.get_mut::<Transform>(entity) {
-                t.rotation_y += vy * dt;
-                t.rotation_x += vx * dt;
+                // Accumulate rotation via euler increments each frame.
+                let delta = Quat::from_euler_xyz(vx * dt, vy * dt, 0.0);
+                t.rotation = (delta * t.rotation).normalize();
             }
         }
     }
@@ -62,38 +49,49 @@ impl System for SpinSystem {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let mut engine = Engine::new("Forge Engine — Software Demo", 960, 540);
+    let mut engine = Engine::new("Forge Engine — Camera Demo", 960, 540);
+    let aspect = 960.0 / 540.0_f32;
 
-    // Spawn the tetrahedron entity.
+    // ── Tetrahedron entity ─────────────────────────────────────────────────────
     let tetra = engine.world.spawn();
-    engine.world.add_component(tetra, Transform { rotation_y: 0.0, rotation_x: 0.2 });
+    engine.world.add_component(tetra, Transform {
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale:    Vec3::ONE,
+    });
+    engine.world.add_component(tetra, GlobalTransform { matrix: Mat4::IDENTITY });
     engine.world.add_component(tetra, AngularVelocity { y: 1.2, x: 0.4 });
 
-    // Register the spin system so it runs automatically each frame.
-    engine.schedule.add_system(SpinSystem);
+    // ── Camera entity — third-person orbiting the tetrahedron ──────────────────
+    let cam_entity = engine.world.spawn();
+    engine.world.add_component(cam_entity, Camera::perspective(60.0, aspect, 0.1, 1000.0));
+    engine.world.add_component(cam_entity, CameraMode::ThirdPerson {
+        target:   tetra,
+        distance: 3.0,
+        yaw:      0.0,
+        pitch:    0.3,
+    });
+    engine.world.add_component(cam_entity, ActiveCamera);
+    engine.world.add_component(cam_entity, GlobalTransform { matrix: Mat4::IDENTITY });
 
-    // Build the software renderer using the window handle.
+    // ── Systems: spin → propagate → camera (order matters) ────────────────────
+    engine.schedule.add_system(SpinSystem);
+    engine.schedule.add_system(TransformPropagateSystem);
+    engine.schedule.add_system(CameraSystem);
+
+    // ── Renderer ───────────────────────────────────────────────────────────────
     let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
     let renderer = SoftwareRenderer::new(hwnd, w, h);
 
-    // Camera: sits back a bit, looks at origin.
-    let eye    = Vec3::new(0.0, 0.5, 3.0);
-    let center = Vec3::ZERO;
-    let up     = Vec3::Y;
-
-    // Tetrahedron geometry (unit tetrahedron centred at origin).
+    // Tetrahedron geometry.
     let verts: [Vec3; 4] = [
-        Vec3::new( 0.0,  1.0,  0.0),   // apex
-        Vec3::new(-0.866, -0.5,  0.0), // left-front
-        Vec3::new( 0.866, -0.5,  0.0), // right-front
-        Vec3::new( 0.0,  -0.5, -1.0),  // back
+        Vec3::new( 0.0,   1.0,  0.0),
+        Vec3::new(-0.866,-0.5,  0.0),
+        Vec3::new( 0.866,-0.5,  0.0),
+        Vec3::new( 0.0,  -0.5, -1.0),
     ];
-    // Faces (indices), wound counter-clockwise from outside.
     let faces: [[usize; 3]; 4] = [
-        [0, 1, 2], // bottom (facing down, front)
-        [0, 2, 3], // right
-        [0, 3, 1], // left
-        [1, 3, 2], // base
+        [0,1,2], [0,2,3], [0,3,1], [1,3,2],
     ];
     let face_colors: [Color; 4] = [
         Color::rgb(1.0, 0.2, 0.2),
@@ -103,56 +101,40 @@ fn main() {
     ];
 
     engine.run(renderer, move |world, renderer, input, _dt| {
-        // Quit on Escape.
         if input.key_pressed(vk::ESCAPE) { std::process::exit(0); }
 
-        // Clear to a dark background.
         renderer.clear(Color::rgb(0.05, 0.05, 0.12));
 
-        // Read current transform (if the entity still exists).
-        let (ry, rx) = world
-            .get::<Transform>(tetra)
-            .map(|transform| (transform.rotation_y, transform.rotation_x))
-            .unwrap_or((0.0, 0.0));
+        // Read the view + proj matrices computed by CameraSystem this frame.
+        let (view, proj) = world
+            .get::<Camera>(cam_entity)
+            .map(|c| (c.view, c.proj))
+            .unwrap_or((Mat4::IDENTITY, Mat4::IDENTITY));
 
-        // Build MVP.
-        let aspect = renderer.width() as f32 / renderer.height() as f32;
-        let proj   = Mat4::perspective_gl(deg_to_rad(60.0), aspect, 0.1, 100.0);
-        let view   = Mat4::look_at(eye, center, up);
-        let model  = Mat4::rotate_y(ry) * Mat4::rotate_x(rx);
-        let mvp    = proj * view * model;
+        let mvp = proj * view; // tetrahedron is at world origin (model = identity)
 
-        // Draw each face as a shaded triangle.
-        for (face_idx, &[a, b, c]) in faces.iter().enumerate() {
-            let col = face_colors[face_idx];
-            // Simple lighting: slightly darker shade for variation.
-            let shaded = Color::rgb(
-                col.r * 0.85,
-                col.g * 0.85,
-                col.b * 0.85,
-            );
+        for (fi, &[a, b, c]) in faces.iter().enumerate() {
+            let col = face_colors[fi];
             renderer.draw_triangle_3d_shaded(
                 verts[a], verts[b], verts[c],
-                col, shaded, col,
+                col,
+                Color::rgb(col.r * 0.6, col.g * 0.6, col.b * 0.6),
+                col,
                 &mvp,
             );
         }
 
-        // Draw a simple floor grid for spatial reference.
         draw_grid(renderer, &mvp);
     });
 }
 
 fn draw_grid(r: &mut SoftwareRenderer, mvp: &Mat4) {
-    let grid_color = Color::rgb(0.25, 0.25, 0.35);
-    let y = -0.55_f32;
-    let range = 5;
-    for i in -range..=range {
+    let col = Color::rgb(0.25, 0.25, 0.35);
+    let y   = -0.55_f32;
+    for i in -5_i32..=5 {
         let fi = i as f32;
-        // Lines along Z.
-        project_line(r, mvp, Vec3::new(fi, y, -range as f32), Vec3::new(fi, y, range as f32), grid_color);
-        // Lines along X.
-        project_line(r, mvp, Vec3::new(-range as f32, y, fi), Vec3::new(range as f32, y, fi), grid_color);
+        project_line(r, mvp, Vec3::new(fi, y, -5.0), Vec3::new(fi, y,  5.0), col);
+        project_line(r, mvp, Vec3::new(-5.0, y, fi), Vec3::new(5.0, y, fi),  col);
     }
 }
 
@@ -160,16 +142,9 @@ fn project_line(r: &mut SoftwareRenderer, mvp: &Mat4, a: Vec3, b: Vec3, color: C
     let ca = mvp.transform_point(a);
     let cb = mvp.transform_point(b);
     if ca.w <= 0.0 || cb.w <= 0.0 { return; }
-
-    let w = r.width() as f32;
-    let h = r.height() as f32;
-
-    let sx = |v: forge::math::Vec4| ((v.x / v.w) * 0.5 + 0.5) * w;
-    let sy = |v: forge::math::Vec4| (1.0 - ((v.y / v.w) * 0.5 + 0.5)) * h;
-
-    r.draw_line(
-        sx(ca) as i32, sy(ca) as i32,
-        sx(cb) as i32, sy(cb) as i32,
-        color,
-    );
+    let w  = r.width()  as f32;
+    let h  = r.height() as f32;
+    let sx = |v: Vec4| ((v.x / v.w) * 0.5 + 0.5) * w;
+    let sy = |v: Vec4| (1.0 - ((v.y / v.w) * 0.5 + 0.5)) * h;
+    r.draw_line(sx(ca) as i32, sy(ca) as i32, sx(cb) as i32, sy(cb) as i32, color);
 }

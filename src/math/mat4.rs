@@ -154,6 +154,33 @@ impl Mat4 {
         self.mul_vec4(Vec4::from_vec3(v, 0.0)).truncate()
     }
 
+    /// Inverse for rigid-body matrices (rotation + translation only, no scale).
+    /// O(1) and numerically stable — use this for camera view matrices.
+    pub fn inverse_rigid(&self) -> Self {
+        let tx = self.cols[3][0];
+        let ty = self.cols[3][1];
+        let tz = self.cols[3][2];
+        Self {
+            cols: [
+                [self.cols[0][0], self.cols[1][0], self.cols[2][0], 0.0],
+                [self.cols[0][1], self.cols[1][1], self.cols[2][1], 0.0],
+                [self.cols[0][2], self.cols[1][2], self.cols[2][2], 0.0],
+                [
+                    -(self.cols[0][0]*tx + self.cols[1][0]*ty + self.cols[2][0]*tz),
+                    -(self.cols[0][1]*tx + self.cols[1][1]*ty + self.cols[2][1]*tz),
+                    -(self.cols[0][2]*tx + self.cols[1][2]*ty + self.cols[2][2]*tz),
+                    1.0,
+                ],
+            ],
+        }
+    }
+
+    /// Extract the translation component of a TRS matrix.
+    #[inline]
+    pub fn extract_position(&self) -> Vec3 {
+        Vec3::new(self.cols[3][0], self.cols[3][1], self.cols[3][2])
+    }
+
     pub fn transpose(&self) -> Self {
         let c = &self.cols;
         Self {
