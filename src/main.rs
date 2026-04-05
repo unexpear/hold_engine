@@ -1,14 +1,21 @@
-//! Demo: spinning model with an ECS camera.
+//! Demo: spinning model with an ECS camera and directional sun light.
 //!
 //! Usage:
 //!   cargo run                         — procedural tetrahedron (default)
 //!   cargo run -- path/to/model.obj    — load a Wavefront OBJ file
+//!
+//! Controls:
+//!   F5      — toggle between first-person and third-person camera
+//!   WASD    — move (first-person)
+//!   Mouse   — look around (first-person, hold right-click)
+//!   Space/Ctrl — fly up / down (first-person)
+//!   Esc     — quit
 
 use forge::{
-    ActiveCamera, Camera, CameraMode, CameraSystem,
+    ActiveCamera, Camera, CameraMode, CameraSystem, DirectionalLight,
     ecs::System,
     engine::Engine,
-    input::vk,
+    input::{vk, MouseButton},
     math::{Mat4, Quat, Vec3, Vec4},
     renderer::{Color, Renderer},
     renderer::software::SoftwareRenderer,
@@ -63,15 +70,26 @@ fn builtin_tetrahedron() -> (Vec<Vec3>, Vec<[usize; 3]>, Vec<Color>) {
     (verts, faces, colors)
 }
 
+/// Compute a face normal (flat shading) for a triangle.
+fn face_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let e1 = Vec3::new(b.x - a.x, b.y - a.y, b.z - a.z);
+    let e2 = Vec3::new(c.x - a.x, c.y - a.y, c.z - a.z);
+    e1.cross(e2).normalize()
+}
+
 /// Convert a MeshData (from OBJ) into software-renderer-friendly arrays.
-fn mesh_to_tris(mesh: &MeshData) -> (Vec<Vec3>, Vec<[usize; 3]>) {
+/// Returns (positions, per-vertex normals, faces).
+fn mesh_to_tris(mesh: &MeshData) -> (Vec<Vec3>, Vec<Vec3>, Vec<[usize; 3]>) {
     let verts: Vec<Vec3> = mesh.vertices.iter()
         .map(|v| Vec3::new(v.pos[0], v.pos[1], v.pos[2]))
+        .collect();
+    let normals: Vec<Vec3> = mesh.vertices.iter()
+        .map(|v| Vec3::new(v.normal[0], v.normal[1], v.normal[2]))
         .collect();
     let faces: Vec<[usize; 3]> = mesh.indices.chunks_exact(3)
         .map(|tri| [tri[0] as usize, tri[1] as usize, tri[2] as usize])
         .collect();
-    (verts, faces)
+    (verts, normals, faces)
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -108,6 +126,13 @@ fn main() {
     engine.world.add_component(model_entity, GlobalTransform { matrix: Mat4::IDENTITY });
     engine.world.add_component(model_entity, AngularVelocity { y: 1.2, x: 0.4 });
 
+    // ── Sun (directional light) ───────────────────────────────────────────────
+    let sun = engine.world.spawn();
+    engine.world.add_component(sun, DirectionalLight::sun(
+        Vec3::new(0.4, 0.8, 0.3),   // upper-right, slightly forward
+        Color::WHITE,
+    ));
+
     // ── Camera entity ─────────────────────────────────────────────────────────
     let cam_entity = engine.world.spawn();
     engine.world.add_component(cam_entity, Camera::perspective(60.0, aspect, 0.1, 1000.0));
@@ -118,6 +143,7 @@ fn main() {
         pitch:    0.3,
     });
     engine.world.add_component(cam_entity, ActiveCamera);
+    engine.world.add_component(cam_entity, Transform::from_position(Vec3::new(0.0, 1.0, 5.0)));
     engine.world.add_component(cam_entity, GlobalTransform { matrix: Mat4::IDENTITY });
 
     // ── Systems ───────────────────────────────────────────────────────────────
@@ -130,26 +156,102 @@ fn main() {
     let renderer = SoftwareRenderer::new(hwnd, w, h);
 
     // Prepare geometry for software renderer.
-    let (obj_verts, obj_faces) = match &loaded_mesh {
-        Some(mesh) => mesh_to_tris(mesh),
-        None => {
-            let (v, f, _) = builtin_tetrahedron();
-            (v, f)
-        }
-    };
-    let face_colors_builtin;
-    let face_colors: &[Color] = match &loaded_mesh {
-        None => {
-            let (_, _, c) = builtin_tetrahedron();
-            face_colors_builtin = c;
-            &face_colors_builtin
-        }
-        Some(_) => &[], // OBJ models use a single colour below
-    };
-    let obj_color = Color::rgb(0.7, 0.75, 0.85);
+    let (obj_verts, obj_normals, obj_faces, face_colors_builtin);
 
-    engine.run(renderer, move |world, renderer, input, _dt| {
+    match &loaded_mesh {
+        Some(mesh) => {
+            let (v, n, f) = mesh_to_tris(mesh);
+            obj_verts   = v;
+            obj_normals = n;
+            obj_faces   = f;
+            face_colors_builtin = vec![];   // OBJ uses single colour
+        }
+        None => {
+            let (v, f, c) = builtin_tetrahedron();
+            let mut normals = vec![Vec3::ZERO; v.len()];
+            for face in &f {
+                let n = face_normal(v[face[0]], v[face[1]], v[face[2]]);
+                normals[face[0]] = Vec3::new(normals[face[0]].x + n.x, normals[face[0]].y + n.y, normals[face[0]].z + n.z);
+                normals[face[1]] = Vec3::new(normals[face[1]].x + n.x, normals[face[1]].y + n.y, normals[face[1]].z + n.z);
+                normals[face[2]] = Vec3::new(normals[face[2]].x + n.x, normals[face[2]].y + n.y, normals[face[2]].z + n.z);
+            }
+            for n in &mut normals {
+                *n = n.normalize();
+            }
+            obj_verts   = v;
+            obj_normals = normals;
+            obj_faces   = f;
+            face_colors_builtin = c;
+        }
+    };
+
+    let obj_color = Color::rgb(0.7, 0.75, 0.85);
+    let half_pi = std::f32::consts::FRAC_PI_2 - 0.01;
+
+    engine.run(renderer, move |world, renderer, input, dt| {
         if input.key_pressed(vk::ESCAPE) { std::process::exit(0); }
+
+        // ── Toggle camera mode with F5 ────────────────────────────────────
+        if input.key_pressed(vk::F5) {
+            let mode = world.get::<CameraMode>(cam_entity).cloned();
+            if let Some(current) = mode {
+                let new_mode = match current {
+                    CameraMode::ThirdPerson { .. } => {
+                        CameraMode::first_person()
+                    }
+                    CameraMode::FirstPerson { .. } => {
+                        CameraMode::ThirdPerson {
+                            target:   model_entity,
+                            distance: 3.0,
+                            yaw:      0.0,
+                            pitch:    0.3,
+                        }
+                    }
+                };
+                world.add_component(cam_entity, new_mode);
+            }
+        }
+
+        // ── First-person controls ─────────────────────────────────────────
+        {
+            let mode = world.get::<CameraMode>(cam_entity).cloned();
+            if let Some(CameraMode::FirstPerson { mut yaw, mut pitch, move_speed, look_sensitivity }) = mode {
+                // Mouse look — active while right mouse button is held.
+                if input.mouse_button(MouseButton::Right) {
+                    let (dx, dy) = input.mouse_delta();
+                    yaw   += dx as f32 * look_sensitivity;
+                    pitch -= dy as f32 * look_sensitivity;   // inverted Y
+                    pitch  = pitch.clamp(-half_pi, half_pi);
+                }
+
+                // Forward/right vectors on the XZ plane (no fly-tilt).
+                let forward = Vec3::new(yaw.sin(), 0.0, -yaw.cos());
+                let right   = Vec3::new(yaw.cos(), 0.0,  yaw.sin());
+
+                let mut move_dir = Vec3::ZERO;
+                if input.key(vk::W) { move_dir = move_dir + forward; }
+                if input.key(vk::S) { move_dir = move_dir - forward; }
+                if input.key(vk::D) { move_dir = move_dir + right; }
+                if input.key(vk::A) { move_dir = move_dir - right; }
+                if input.key(vk::SPACE) { move_dir.y += 1.0; }
+                if input.key(vk::CTRL)  { move_dir.y -= 1.0; }
+
+                // Normalize so diagonals aren't faster.
+                let len = move_dir.length();
+                if len > 0.0 {
+                    let speed = if input.key(vk::SHIFT) { move_speed * 2.5 } else { move_speed };
+                    let delta = move_dir * (speed * dt / len);
+                    if let Some(t) = world.get_mut::<Transform>(cam_entity) {
+                        t.position = t.position + delta;
+                    }
+                }
+
+                // Write updated yaw/pitch back.
+                world.add_component(cam_entity, CameraMode::FirstPerson {
+                    yaw, pitch, move_speed, look_sensitivity,
+                });
+            }
+        }
 
         renderer.clear(Color::rgb(0.05, 0.05, 0.12));
 
@@ -160,14 +262,23 @@ fn main() {
 
         let mvp = proj * view;
 
+        // Fetch the sun light (first DirectionalLight entity).
+        let (light_dir, light_color, ambient) = world
+            .query::<DirectionalLight>()
+            .map(|(_, l)| (l.direction, l.color, l.ambient))
+            .next()
+            .unwrap_or((Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 0.15));
+
         for (fi, face) in obj_faces.iter().enumerate() {
             let &[a, b, c] = face;
-            let col = if face_colors.is_empty() { obj_color } else { face_colors[fi] };
-            renderer.draw_triangle_3d_shaded(
+            let col = if face_colors_builtin.is_empty() { obj_color } else { face_colors_builtin[fi] };
+            renderer.draw_triangle_3d_lit(
                 obj_verts[a], obj_verts[b], obj_verts[c],
+                obj_normals[a], obj_normals[b], obj_normals[c],
                 col,
-                Color::rgb(col.r * 0.6, col.g * 0.6, col.b * 0.6),
-                col,
+                light_dir,
+                light_color,
+                ambient,
                 &mvp,
             );
         }

@@ -3,17 +3,17 @@ use crate::math::{deg_to_rad, Mat4};
 
 /// Perspective camera component.
 ///
-/// Attach to an entity alongside [`CameraMode`] and [`ActiveCamera`].
-/// [`CameraSystem`] recomputes `view` and `proj` every frame — renderers
-/// just read `cam.view` and `cam.proj`.
+/// Attach to an entity alongside [\CameraMode\] and [\ActiveCamera\].  
+/// [\CameraSystem\] recomputes \iew\ and \proj\ every frame — renderers
+/// just read \cam.view\ and \cam.proj\.
 pub struct Camera {
     pub fov:    f32,   // vertical FOV in radians
     pub near:   f32,
     pub far:    f32,
     pub aspect: f32,   // width / height — call set_aspect on window resize
-    /// World-to-camera matrix. Written by CameraSystem each frame.
+    /// World-to-camera matrix. Written by CameraSystem each frame.     
     pub view:   Mat4,
-    /// Projection matrix. Rebuilt when fov/aspect/near/far change.
+    /// Projection matrix. Rebuilt when fov/aspect/near/far change.     
     pub proj:   Mat4,
 }
 
@@ -27,7 +27,7 @@ impl Camera {
         }
     }
 
-    /// Recompute the projection matrix after the window is resized.
+    /// Recompute the projection matrix after the window is resized.    
     pub fn set_aspect(&mut self, aspect: f32) {
         self.aspect = aspect;
         self.proj   = Mat4::perspective_gl(self.fov, aspect, self.near, self.far);
@@ -37,19 +37,42 @@ impl Camera {
 /// How the camera derives its view matrix each frame.
 #[derive(Clone)]
 pub enum CameraMode {
-    /// Eye sits at the entity's GlobalTransform; looks along local −Z.
-    FirstPerson,
-
-    /// Eye orbits `target` at `distance` metres, steered by `yaw`/`pitch`.
+    /// FPS camera: position comes from the entity's Transform, orientation
+    /// from yaw/pitch.
     ///
-    /// * `yaw`   — horizontal angle in radians (0 = behind the target on +Z axis)
-    /// * `pitch` — vertical angle in radians   (0 = level, clamped to avoid flip)
+    /// * \yaw\   — horizontal angle in radians (0 = looking along −Z)
+    /// * \pitch\ — vertical angle in radians   (clamped ±89°)
+    /// * \move_speed\       — units per second for WASD movement
+    /// * \look_sensitivity\ — radians per pixel of mouse delta
+    FirstPerson {
+        yaw:              f32,
+        pitch:            f32,
+        move_speed:       f32,
+        look_sensitivity: f32,
+    },
+
+    /// Eye orbits \	arget\ at \distance\ metres, steered by \yaw\/\pitch\.
+    ///
+    /// * \yaw\   — horizontal angle in radians (0 = behind the target on +Z axis)
+    /// * \pitch\ — vertical angle in radians   (0 = level, clamped to avoid flip)
     ThirdPerson {
         target:   Entity,
         distance: f32,
         yaw:      f32,
         pitch:    f32,
     },
+}
+
+impl CameraMode {
+    /// Convenient constructor for a first-person camera with sensible defaults.
+    pub fn first_person() -> Self {
+        Self::FirstPerson {
+            yaw:              0.0,
+            pitch:            0.0,
+            move_speed:       5.0,
+            look_sensitivity: 0.003,
+        }
+    }
 }
 
 /// Marker component — the entity carrying this is the active render camera.

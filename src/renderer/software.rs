@@ -1,5 +1,5 @@
 //! CPU software renderer with a barycentric triangle rasterizer.
-//! Blits each frame to the window via Win32 StretchDIBits — no GPU required.
+//! Blits each frame to the window via Win32 StretchDIBits -- no GPU required.
 
 use std::ptr::null_mut;
 use crate::platform::ffi::*;
@@ -11,8 +11,8 @@ pub struct SoftwareRenderer {
     hdc:    HDC,
     width:  u32,
     height: u32,
-    pixels: Vec<u32>,   // BGRA, 32bpp, row-major top→bottom
-    depth:  Vec<f32>,   // depth buffer (0=near, 1=far)
+    pixels: Vec<u32>,
+    depth:  Vec<f32>,
 }
 
 impl SoftwareRenderer {
@@ -23,7 +23,6 @@ impl SoftwareRenderer {
         Self { hwnd, hdc, width, height, pixels: vec![0; n], depth: vec![f32::INFINITY; n] }
     }
 
-    /// Transform a clip-space Vec4 into screen-space (x, y, depth).
     #[inline]
     fn clip_to_screen(&self, clip: Vec4) -> (f32, f32, f32) {
         let inv_w = 1.0 / clip.w;
@@ -39,17 +38,12 @@ impl SoftwareRenderer {
         )
     }
 
-    // ── Direct pixel access ───────────────────────────────────────────────────
-
     #[inline]
     pub fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 { return; }
         self.pixels[y as usize * self.width as usize + x as usize] = color.to_bgra_u32();
     }
 
-    // ── 2D primitives ─────────────────────────────────────────────────────────
-
-    /// Bresenham line.
     pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32, color: Color) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -86,8 +80,6 @@ impl SoftwareRenderer {
         }
     }
 
-    // ── 2D filled triangle (screen-space, no depth) ───────────────────────────
-
     pub fn fill_triangle_2d(
         &mut self,
         v0: (f32, f32), v1: (f32, f32), v2: (f32, f32),
@@ -111,10 +103,6 @@ impl SoftwareRenderer {
         }
     }
 
-    // ── 3D filled triangle (with depth buffer) ────────────────────────────────
-
-    /// Transform `v0/v1/v2` by `mvp`, rasterize with depth test.
-    /// Vertices are in model space; mvp = projection * view * model.
     pub fn draw_triangle_3d(
         &mut self,
         v0: Vec3, v1: Vec3, v2: Vec3,
@@ -124,30 +112,20 @@ impl SoftwareRenderer {
         let c0 = mvp.transform_point(v0);
         let c1 = mvp.transform_point(v1);
         let c2 = mvp.transform_point(v2);
-
-        // Clip triangles where any vertex is behind the near plane.
         if c0.w <= 0.0 || c1.w <= 0.0 || c2.w <= 0.0 { return; }
-
-        // Perspective divide → NDC (-1..1 in X/Y, -1..1 in Z for OpenGL convention).
         let n0 = ndc(c0);
         let n1 = ndc(c1);
         let n2 = ndc(c2);
-
-        // Coarse frustum cull (all three vertices outside the same plane).
         if n0.x < -1.0 && n1.x < -1.0 && n2.x < -1.0 { return; }
         if n0.x >  1.0 && n1.x >  1.0 && n2.x >  1.0 { return; }
         if n0.y < -1.0 && n1.y < -1.0 && n2.y < -1.0 { return; }
         if n0.y >  1.0 && n1.y >  1.0 && n2.y >  1.0 { return; }
-
-        // Viewport transform → screen space.
         let s0 = self.clip_to_screen(c0);
         let s1 = self.clip_to_screen(c1);
         let s2 = self.clip_to_screen(c2);
-
         self.rasterize(s0, s1, s2, color);
     }
 
-    /// Gouraud-shaded 3D triangle (one colour per vertex, interpolated).
     pub fn draw_triangle_3d_shaded(
         &mut self,
         v0: Vec3, v1: Vec3, v2: Vec3,
@@ -158,19 +136,15 @@ impl SoftwareRenderer {
         let clip1 = mvp.transform_point(v1);
         let clip2 = mvp.transform_point(v2);
         if clip0.w <= 0.0 || clip1.w <= 0.0 || clip2.w <= 0.0 { return; }
-
         let s0 = self.clip_to_screen(clip0);
         let s1 = self.clip_to_screen(clip1);
         let s2 = self.clip_to_screen(clip2);
-
         let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
         let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width  as i32 - 1);
         let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
         let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
-
         let area = edge2d((s0.0,s0.1), (s1.0,s1.1), (s2.0,s2.1));
         if area <= 0.0 { return; }
-
         for y in min_y..=max_y {
             for x in min_x..=max_x {
                 let p = (x as f32 + 0.5, y as f32 + 0.5);
@@ -195,7 +169,64 @@ impl SoftwareRenderer {
         }
     }
 
-    // ── Internal rasterizer ───────────────────────────────────────────────────
+    /// Lit 3D triangle with per-pixel normal interpolation and directional light.
+    pub fn draw_triangle_3d_lit(
+        &mut self,
+        v0: Vec3, v1: Vec3, v2: Vec3,
+        n0: Vec3, n1: Vec3, n2: Vec3,
+        base_color: Color,
+        light_dir:  Vec3,
+        light_color: Color,
+        ambient:    f32,
+        mvp: &Mat4,
+    ) {
+        let clip0 = mvp.transform_point(v0);
+        let clip1 = mvp.transform_point(v1);
+        let clip2 = mvp.transform_point(v2);
+        if clip0.w <= 0.0 || clip1.w <= 0.0 || clip2.w <= 0.0 { return; }
+        let s0 = self.clip_to_screen(clip0);
+        let s1 = self.clip_to_screen(clip1);
+        let s2 = self.clip_to_screen(clip2);
+        let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
+        let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width  as i32 - 1);
+        let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
+        let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
+        let area = edge2d((s0.0,s0.1), (s1.0,s1.1), (s2.0,s2.1));
+        if area <= 0.0 { return; }
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let p = (x as f32 + 0.5, y as f32 + 0.5);
+                let b0 = edge2d((s1.0,s1.1), (s2.0,s2.1), p);
+                let b1 = edge2d((s2.0,s2.1), (s0.0,s0.1), p);
+                let b2 = edge2d((s0.0,s0.1), (s1.0,s1.1), p);
+                if b0 < 0.0 || b1 < 0.0 || b2 < 0.0 { continue; }
+                let (u, v, w_b) = (b0/area, b1/area, b2/area);
+                let depth = u*s0.2 + v*s1.2 + w_b*s2.2;
+                let idx = y as usize * self.width as usize + x as usize;
+                if depth < self.depth[idx] {
+                    self.depth[idx] = depth;
+                    let nx = u*n0.x + v*n1.x + w_b*n2.x;
+                    let ny = u*n0.y + v*n1.y + w_b*n2.y;
+                    let nz = u*n0.z + v*n1.z + w_b*n2.z;
+                    let len = (nx*nx + ny*ny + nz*nz).sqrt();
+                    let (nx, ny, nz) = if len > 1e-8 {
+                        (nx/len, ny/len, nz/len)
+                    } else {
+                        (0.0, 1.0, 0.0)
+                    };
+                    let n_dot_l = (nx*light_dir.x + ny*light_dir.y + nz*light_dir.z).max(0.0);
+                    let total = (ambient + (1.0 - ambient) * n_dot_l).min(1.0);
+                    let color = Color {
+                        r: (base_color.r * light_color.r * total).min(1.0),
+                        g: (base_color.g * light_color.g * total).min(1.0),
+                        b: (base_color.b * light_color.b * total).min(1.0),
+                        a: 1.0,
+                    };
+                    self.pixels[idx] = color.to_bgra_u32();
+                }
+            }
+        }
+    }
 
     fn rasterize(
         &mut self,
@@ -208,12 +239,9 @@ impl SoftwareRenderer {
         let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width  as i32 - 1);
         let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
         let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
-
         let area = edge2d((s0.0,s0.1), (s1.0,s1.1), (s2.0,s2.1));
-        if area <= 0.0 { return; } // back-face or degenerate
-
+        if area <= 0.0 { return; }
         let packed = color.to_bgra_u32();
-
         for y in min_y..=max_y {
             for x in min_x..=max_x {
                 let p = (x as f32 + 0.5, y as f32 + 0.5);
@@ -256,15 +284,13 @@ impl Renderer for SoftwareRenderer {
     }
 
     fn end_frame(&mut self) {
-        // Blit pixel buffer to the window via StretchDIBits.
         unsafe {
             let hdc = self.hdc;
-
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize:          std::mem::size_of::<BITMAPINFOHEADER>() as DWORD,
                     biWidth:         self.width  as LONG,
-                    biHeight:        -(self.height as LONG), // negative = top-down
+                    biHeight:        -(self.height as LONG),
                     biPlanes:        1,
                     biBitCount:      32,
                     biCompression:   BI_RGB,
@@ -276,7 +302,6 @@ impl Renderer for SoftwareRenderer {
                 },
                 bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }],
             };
-
             StretchDIBits(
                 hdc,
                 0, 0, self.width as i32, self.height as i32,
@@ -296,21 +321,16 @@ impl Drop for SoftwareRenderer {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// 2D edge function (sign = winding side).
 #[inline]
 fn edge(a: (f32,f32), b: (f32,f32), p: (f32,f32)) -> f32 {
     (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
 }
 
-/// Edge function for (x,y) tuples.
 #[inline]
 fn edge2d(a: (f32,f32), b: (f32,f32), p: (f32,f32)) -> f32 {
     edge(a, b, p)
 }
 
-/// Perspective divide a clip-space Vec4 → NDC Vec3.
 #[inline]
 fn ndc(v: Vec4) -> Vec3 {
     Vec3::new(v.x / v.w, v.y / v.w, v.z / v.w)
