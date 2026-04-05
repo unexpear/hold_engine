@@ -13,9 +13,11 @@ pub mod terrain;
 
 // Convenient re-exports at the crate root.
 pub use assets::{AssetStore, GpuMesh, Handle, MeshData, ObjError, Vertex};
-pub use ecs::{ActiveCamera, Camera, CameraMode, CameraSystem, Children, DirectionalLight, Entity,
-              GlobalTransform, Inventory, ItemId, ItemStack, Parent, Stats, System, SystemSchedule,
-              Transform, TransformPropagateSystem, World};
+pub use ecs::{ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Children,
+              DialogueChoice, DialogueNode, DialogueTree, DirectionalLight, Entity,
+              GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,
+              Quest, QuestId, QuestLog, QuestObjective, QuestState,
+              Stats, System, SystemSchedule, Transform, TransformPropagateSystem, World};
 pub use engine::Engine;
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};
 pub use input::{InputState, MouseButton};
