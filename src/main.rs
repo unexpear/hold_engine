@@ -12,7 +12,7 @@
 //!   F5         -- toggle first-person / third-person camera
 //!   Esc        -- quit
 
-use forge::{
+use hold::{
     ActiveCamera, Camera, CameraMode, CameraSystem, DirectionalLight,
     Heightmap, LodTerrain, PlayerController, Skybox,
     ecs::System,

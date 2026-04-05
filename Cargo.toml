@@ -1,5 +1,5 @@
 [package]
-name = "forge_engine"
+name = "hold_engine"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ name = "demo"
 path = "src/main.rs"
 
 [lib]
-name = "forge"
+name = "hold"
 path = "src/lib.rs"
 
 [profile.dev]
