@@ -3,6 +3,11 @@ use super::entity::Entity;
 /// Sentinel value stored in `sparse` when an entity has no component.
 const ABSENT: u32 = u32::MAX;
 
+/// Hard cap on entity indices to prevent accidental gigabyte allocations.
+/// 4 million entities is well above any practical usage while keeping the
+/// sparse array under 16 MB.
+const MAX_ENTITY_INDEX: usize = 4_000_000;
+
 /// A sparse-set storage for a single component type `T`.
 ///
 /// Layout
@@ -33,6 +38,7 @@ impl<T> SparseSet<T> {
     /// Insert (or overwrite) a component for `entity`.
     pub fn insert(&mut self, entity: Entity, value: T) {
         let idx = entity.index as usize;
+        assert!(idx < MAX_ENTITY_INDEX, "entity index {} exceeds MAX_ENTITY_INDEX", idx);
 
         // Grow sparse array if needed, filling gaps with ABSENT.
         if idx >= self.sparse.len() {
@@ -129,9 +135,8 @@ impl<T> SparseSet<T> {
     /// Iterate all `(Entity, &mut T)` pairs in dense order.
     pub fn iter_mut(&mut self) -> SparseSetIterMut<'_, T> {
         SparseSetIterMut {
-            entities: &self.entities,
-            dense:    self.dense.as_mut_slice(),
-            pos:      0,
+            entities: self.entities.iter(),
+            dense:    self.dense.iter_mut(),
         }
     }
 
@@ -181,26 +186,16 @@ impl<'a, T> Iterator for SparseSetIter<'a, T> {
 }
 
 pub struct SparseSetIterMut<'a, T> {
-    entities: &'a [Entity],
-    dense:    &'a mut [T],
-    pos:      usize,
+    entities: std::slice::Iter<'a, Entity>,
+    dense:    std::slice::IterMut<'a, T>,
 }
 
 impl<'a, T> Iterator for SparseSetIterMut<'a, T> {
     type Item = (Entity, &'a mut T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.dense.len() {
-            return None;
-        }
-        let entity = self.entities[self.pos];
-        // SAFETY: we advance `pos` by 1 each call, so we never alias the same
-        // mutable slot.  The lifetime transmute is needed because Rust's borrow
-        // checker cannot see through the split-borrow here without unsafe.
-        let value: &'a mut T = unsafe {
-            &mut *(self.dense.as_mut_ptr().add(self.pos))
-        };
-        self.pos += 1;
+        let entity = *self.entities.next()?;
+        let value  = self.dense.next()?;
         Some((entity, value))
     }
 }

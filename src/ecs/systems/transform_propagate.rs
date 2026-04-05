@@ -35,14 +35,15 @@ impl System for TransformPropagateSystem {
             world.add_component(entity, GlobalTransform { matrix: world_matrix });
 
             // Push children onto stack.
-            if let Some(children) = world.get::<Children>(entity) {
-                let child_list = children.list.clone();
-                for child in child_list {
-                    let local = world.get::<Transform>(child)
-                        .map(|t| t.local_matrix())
-                        .unwrap_or(Mat4::IDENTITY);
-                    stack.push((child, world_matrix * local));
-                }
+            let child_list: Vec<_> = world
+                .get::<Children>(entity)
+                .map(|c| c.list.clone())
+                .unwrap_or_default();
+            for child in child_list {
+                let local = world.get::<Transform>(child)
+                    .map(|t| t.local_matrix())
+                    .unwrap_or(Mat4::IDENTITY);
+                stack.push((child, world_matrix * local));
             }
         }
     }

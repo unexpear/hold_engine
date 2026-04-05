@@ -63,7 +63,15 @@ impl World {
         if let Some(index) = self.free_list.pop() {
             let meta = &mut self.entities[index as usize];
             // Bump generation so old handles become invalid.
-            meta.generation += 1;
+            // Saturate at u32::MAX — slot becomes permanently dead rather than
+            // silently wrapping and aliasing a generation-0 handle.
+            meta.generation = meta.generation.saturating_add(1);
+            if meta.generation == u32::MAX {
+                // Slot exhausted; leave it dead and fall through to allocating a new one.
+                self.entities.push(EntityMeta { generation: 0, alive: true });
+                let new_index = (self.entities.len() - 1) as u32;
+                return Entity::new(new_index, 0);
+            }
             meta.alive = true;
             Entity::new(index, meta.generation)
         } else {
@@ -164,6 +172,9 @@ impl World {
     /// Attach `child` to `parent`, maintaining both Parent and Children components.
     pub fn set_parent(&mut self, child: Entity, parent: Entity) {
         use super::components::{Children, Parent};
+        if child == parent || !self.is_alive(child) || !self.is_alive(parent) {
+            return;
+        }
         // Remove from old parent if any.
         if let Some(old_parent) = self.get::<Parent>(child).map(|p| p.entity) {
             if let Some(children) = self.get_mut::<Children>(old_parent) {

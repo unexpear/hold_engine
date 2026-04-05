@@ -365,6 +365,7 @@ pub struct VkCommandBufferBeginInfo {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkClearColorValue { pub float32: [f32; 4] }
 
 #[repr(C)]

@@ -168,7 +168,7 @@ impl SoftwareRenderer {
         let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
         let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
 
-        let area = edge2d(s0, s1, s2);
+        let area = edge2d((s0.0,s0.1), (s1.0,s1.1), (s2.0,s2.1));
         if area <= 0.0 { return; }
 
         for y in min_y..=max_y {
@@ -209,7 +209,7 @@ impl SoftwareRenderer {
         let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
         let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
 
-        let area = edge2d(s0, s1, s2);
+        let area = edge2d((s0.0,s0.1), (s1.0,s1.1), (s2.0,s2.1));
         if area <= 0.0 { return; } // back-face or degenerate
 
         let packed = color.to_bgra_u32();
@@ -304,10 +304,10 @@ fn edge(a: (f32,f32), b: (f32,f32), p: (f32,f32)) -> f32 {
     (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
 }
 
-/// Edge function for (x,y,z) tuples — ignores z.
+/// Edge function for (x,y) tuples.
 #[inline]
-fn edge2d(a: (f32,f32,f32), b: (f32,f32,f32), p: (f32,f32)) -> f32 {
-    edge((a.0,a.1), (b.0,b.1), p)
+fn edge2d(a: (f32,f32), b: (f32,f32), p: (f32,f32)) -> f32 {
+    edge(a, b, p)
 }
 
 /// Perspective divide a clip-space Vec4 → NDC Vec3.
