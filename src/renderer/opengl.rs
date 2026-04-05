@@ -8,6 +8,9 @@
 
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use crate::assets::mesh::Vertex;
+use crate::assets::types::GpuMesh;
+use crate::assets::mesh::MeshData;
 use crate::platform::ffi::*;
 use crate::math::{Mat4, Vec3};
 use super::{Color, Renderer};
@@ -81,15 +84,6 @@ const GL_CLAMP_TO_EDGE:        GLint  = 0x812F;
 #[allow(dead_code)]
 const GL_LEQUAL:               GLenum = 0x0203;
 
-// ── Vertex layout ─────────────────────────────────────────────────────────────
-
-/// Interleaved vertex: 3 floats pos + 3 floats normal + 2 floats uv = 32 bytes.
-#[repr(C)]
-pub struct Vertex {
-    pub pos:    [f32; 3],   // layout location 0  — byte offset  0
-    pub normal: [f32; 3],   // layout location 1  — byte offset 12
-    pub uv:     [f32; 2],   // layout location 2  — byte offset 24
-}
 
 // ── Function pointer types ────────────────────────────────────────────────────
 
@@ -398,7 +392,7 @@ impl OpenGLRenderer {
     ///
     /// The caller is responsible for storing these IDs (e.g. in a [`GpuMesh`])
     /// and passing them to [`Self::draw_vao`] and [`Self::delete_vao`].
-    pub fn upload_mesh_raw(&self, vertices: &[Vertex], indices: &[u16]) -> (u32, u32, u32) {
+    pub fn upload_mesh_raw(&self, vertices: &[Vertex], indices: &[u32]) -> (u32, u32, u32) {
         unsafe {
             let gl = &self.gl;
 
@@ -424,7 +418,7 @@ impl OpenGLRenderer {
             (gl.bind_buffer)(GL_ELEMENT_ARRAY_BUFFER, ebo);
             (gl.buffer_data)(
                 GL_ELEMENT_ARRAY_BUFFER,
-                (indices.len() * std::mem::size_of::<u16>()) as GLsizeiptr,
+                (indices.len() * std::mem::size_of::<u32>()) as GLsizeiptr,
                 indices.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
@@ -649,7 +643,7 @@ impl OpenGLRenderer {
             (gl.draw_elements)(
                 GL_TRIANGLES,
                 index_count as GLsizei,
-                GL_UNSIGNED_SHORT,
+                GL_UNSIGNED_INT,
                 null_mut(),
             );
             (gl.bind_vertex_array)(0);
@@ -677,6 +671,37 @@ impl OpenGLRenderer {
     /// Delete a texture previously created by [`Self::upload_texture_rgba8`].
     pub fn delete_texture(&self, tex_id: u32) {
         unsafe { (self.gl.delete_textures)(1, &tex_id); }
+    }
+
+    // ---- MeshData convenience methods ------------------------------------
+
+    /// Upload a MeshData (from OBJ or procedural) and return a drawable GpuMesh.
+    pub fn upload_mesh(&self, mesh: &MeshData) -> GpuMesh {
+        let (vao, vbo, ebo) = self.upload_mesh_raw(&mesh.vertices, &mesh.indices);
+        GpuMesh {
+            vao,
+            vbo,
+            ebo,
+            index_count: mesh.indices.len() as u32,
+        }
+    }
+
+    /// Draw a GpuMesh with a compiled shader program.
+    pub fn draw_mesh(
+        &self,
+        mesh:      &GpuMesh,
+        program:   u32,
+        mvp:       &Mat4,
+        model:     &Mat4,
+        color:     Color,
+        light_dir: Vec3,
+    ) {
+        self.draw_vao(mesh.vao, mesh.index_count, program, mvp, model, color, light_dir);
+    }
+
+    /// Free all GPU resources owned by a GpuMesh.
+    pub fn free_mesh(&self, mesh: GpuMesh) {
+        self.delete_vao(mesh.vao, mesh.vbo, mesh.ebo);
     }
 }
 

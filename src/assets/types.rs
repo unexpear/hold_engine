@@ -1,22 +1,27 @@
 use crate::assets::Handle;
 
-/// Placeholder GPU mesh asset.
+/// GPU-side mesh handle returned by the OpenGL renderer after uploading a
+/// [MeshData](super::MeshData).
 ///
-/// Actual backend-specific buffer handles (VAO/VBO ids for OpenGL,
-/// `VkBuffer` for Vulkan, etc.) will live in `_gpu_data` until the
-/// respective backend is wired up.
+/// Stores the OpenGL buffer IDs needed to draw and clean up the mesh.
+/// Created via [OpenGLRenderer::upload_mesh()](crate::renderer::opengl::OpenGLRenderer::upload_mesh)
+/// and freed via [OpenGLRenderer::free_mesh()](crate::renderer::opengl::OpenGLRenderer::free_mesh).
 pub struct GpuMesh {
-    pub vertex_count: u32,
-    pub index_count:  u32,
-    /// Raw, backend-specific GPU data.  Placeholder until backends populate it.
-    pub _gpu_data:    Vec<u8>,
+    /// Vertex Array Object — encapsulates the vertex attribute state.
+    pub vao:         u32,
+    /// Vertex Buffer Object.
+    pub vbo:         u32,
+    /// Element Buffer Object (index buffer).
+    pub ebo:         u32,
+    /// Number of indices to pass to glDrawElements.
+    pub index_count: u32,
 }
 
 // ---------------------------------------------------------------------------
 // Texture
 // ---------------------------------------------------------------------------
 
-/// Pixel format descriptor for a [`Texture`].
+/// Pixel format descriptor for a [\Texture\].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextureFormat {
     Rgba8,
@@ -29,7 +34,7 @@ pub struct Texture {
     pub width:  u32,
     pub height: u32,
     pub format: TextureFormat,
-    /// Raw pixel bytes in the layout described by `format`.
+    /// Raw pixel bytes in the layout described by \ormat\.
     pub data:   Vec<u8>,
 }
 
