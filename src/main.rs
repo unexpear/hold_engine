@@ -1,34 +1,34 @@
-//! Demo: spinning model on procedural terrain with FPS/orbit camera.
+//! Demo: spinning model on procedural terrain with player controller.
 //!
 //! Usage:
-//!   cargo run                         — procedural tetrahedron (default)
-//!   cargo run -- path/to/model.obj    — load a Wavefront OBJ file
+//!   cargo run                         -- procedural tetrahedron (default)
+//!   cargo run -- path/to/model.obj    -- load a Wavefront OBJ file
 //!
 //! Controls:
-//!   F5         — toggle first-person / third-person camera
-//!   WASD       — move (first-person)
-//!   Mouse      — look around (first-person, hold right-click)
-//!   Space/Ctrl — fly up / down (first-person)
-//!   Shift      — sprint (2.5×)
-//!   Esc        — quit
+//!   WASD       -- move
+//!   Mouse      -- look around (hold right-click)
+//!   Space      -- jump
+//!   Shift      -- sprint (2.5x)
+//!   F5         -- toggle first-person / third-person camera
+//!   Esc        -- quit
 
 use forge::{
     ActiveCamera, Camera, CameraMode, CameraSystem, DirectionalLight,
-    Heightmap, Terrain,
+    Heightmap, PlayerController, Terrain,
     ecs::System,
     engine::Engine,
     input::{vk, MouseButton},
-    math::{Mat4, Quat, Vec3, Vec4},
+    math::{Mat4, Quat, Vec3},
     renderer::{Color, Renderer},
     renderer::software::SoftwareRenderer,
     Entity, GlobalTransform, MeshData, Transform, TransformPropagateSystem, World,
 };
 
-// ── Components ────────────────────────────────────────────────────────────────────────
+// -- Components ---------------------------------------------------------------
 
 struct AngularVelocity { y: f32, x: f32 }
 
-// ── Systems ───────────────────────────────────────────────────────────────────────────
+// -- Systems ------------------------------------------------------------------
 
 struct SpinSystem;
 
@@ -52,7 +52,7 @@ impl System for SpinSystem {
     }
 }
 
-// ── Geometry helpers ──────────────────────────────────────────────────────────────────
+// -- Geometry helpers ---------------------------------------------------------
 
 fn builtin_tetrahedron() -> (Vec<Vec3>, Vec<[usize; 3]>, Vec<Color>) {
     let verts = vec![
@@ -90,7 +90,7 @@ fn mesh_to_tris(mesh: &MeshData) -> (Vec<Vec3>, Vec<Vec3>, Vec<[usize; 3]>) {
     (verts, normals, faces)
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────────
+// -- Main ---------------------------------------------------------------------
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -113,46 +113,46 @@ fn main() {
     let mut engine = Engine::new("Forge Engine — Demo", 960, 540);
     let aspect = 960.0 / 540.0_f32;
 
-    // ── Model entity ──────────────────────────────────────────────────────────────────
+    // -- Model entity (spinning landmark) -----
     let model_entity = engine.world.spawn();
     engine.world.add_component(model_entity, Transform {
-        position: Vec3::new(0.0, 8.0, 0.0),   // float above terrain
+        position: Vec3::new(0.0, 8.0, 0.0),
         rotation: Quat::IDENTITY,
         scale:    Vec3::ONE,
     });
     engine.world.add_component(model_entity, GlobalTransform { matrix: Mat4::IDENTITY });
     engine.world.add_component(model_entity, AngularVelocity { y: 1.2, x: 0.4 });
 
-    // ── Sun (directional light) ───────────────────────────────────────────────────────
+    // -- Sun ----------------------------------
     let sun = engine.world.spawn();
     engine.world.add_component(sun, DirectionalLight::sun(
         Vec3::new(0.4, 0.8, 0.3),
         Color::WHITE,
     ));
 
-    // ── Camera entity ─────────────────────────────────────────────────────────────────
+    // -- Player entity (third-person target) --
+    let player_entity = engine.world.spawn();
+    engine.world.add_component(player_entity, Transform::from_position(Vec3::new(0.0, 20.0, 0.0)));
+    engine.world.add_component(player_entity, GlobalTransform { matrix: Mat4::IDENTITY });
+
+    // -- Camera entity ------------------------
     let cam_entity = engine.world.spawn();
     engine.world.add_component(cam_entity, Camera::perspective(60.0, aspect, 0.1, 1000.0));
-    engine.world.add_component(cam_entity, CameraMode::ThirdPerson {
-        target:   model_entity,
-        distance: 5.0,
-        yaw:      0.0,
-        pitch:    0.4,
-    });
+    engine.world.add_component(cam_entity, CameraMode::first_person());
     engine.world.add_component(cam_entity, ActiveCamera);
-    engine.world.add_component(cam_entity, Transform::from_position(Vec3::new(0.0, 10.0, 15.0)));
+    engine.world.add_component(cam_entity, Transform::from_position(Vec3::new(0.0, 20.0, 0.0)));
     engine.world.add_component(cam_entity, GlobalTransform { matrix: Mat4::IDENTITY });
 
-    // ── Systems ─────────────────────────────────────────────────────────────────────────
+    // -- Systems ------------------------------
     engine.schedule.add_system(SpinSystem);
     engine.schedule.add_system(TransformPropagateSystem);
     engine.schedule.add_system(CameraSystem);
 
-    // ── Renderer ────────────────────────────────────────────────────────────────────────
+    // -- Renderer -----------------------------
     let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
     let renderer = SoftwareRenderer::new(hwnd, w, h);
 
-    // Prepare model geometry for software renderer.
+    // Prepare model geometry.
     let (obj_verts, obj_normals, obj_faces, face_colors_builtin);
 
     match &loaded_mesh {
@@ -183,19 +183,21 @@ fn main() {
     };
 
     let obj_color = Color::rgb(0.7, 0.75, 0.85);
-    let half_pi = std::f32::consts::FRAC_PI_2 - 0.01;
 
-    // ── Terrain ─────────────────────────────────────────────────────────────────────────
+    // -- Terrain ------------------------------
     let mut terrain = Terrain::new(
-        Heightmap::default(),           // procedural hills
-        3,                              // view radius = 3 chunks => 7×7 grid
-        Color::rgb(0.3, 0.55, 0.25),   // green-ish ground
+        Heightmap::default(),
+        3,
+        Color::rgb(0.3, 0.55, 0.25),
     );
+
+    // -- Player controller --------------------
+    let mut player = PlayerController::new(Vec3::new(0.0, 20.0, 0.0));
 
     engine.run(renderer, move |world, renderer, input, dt| {
         if input.key_pressed(vk::ESCAPE) { std::process::exit(0); }
 
-        // ── Toggle camera mode with F5 ────────────────────────────────────────────────
+        // -- Toggle camera mode with F5 --
         if input.key_pressed(vk::F5) {
             let mode = world.get::<CameraMode>(cam_entity).cloned();
             if let Some(current) = mode {
@@ -205,10 +207,10 @@ fn main() {
                     }
                     CameraMode::FirstPerson { .. } => {
                         CameraMode::ThirdPerson {
-                            target:   model_entity,
-                            distance: 5.0,
-                            yaw:      0.0,
-                            pitch:    0.4,
+                            target:   player_entity,
+                            distance: 8.0,
+                            yaw:      player.yaw,
+                            pitch:    0.5,
                         }
                     }
                 };
@@ -216,51 +218,55 @@ fn main() {
             }
         }
 
-        // ── First-person controls ─────────────────────────────────────────────────────
+        // -- Player input (active in all camera modes) --
+        {
+            let (dx, dy) = if input.mouse_button(MouseButton::Right) {
+                input.mouse_delta()
+            } else {
+                (0, 0)
+            };
+
+            let mut move_input = Vec3::ZERO;
+            if input.key(vk::W) { move_input.z += 1.0; }
+            if input.key(vk::S) { move_input.z -= 1.0; }
+            if input.key(vk::D) { move_input.x += 1.0; }
+            if input.key(vk::A) { move_input.x -= 1.0; }
+
+            player.update(
+                dt,
+                move_input,
+                (dx as f32, dy as f32),
+                input.key_pressed(vk::SPACE),
+                input.key(vk::SHIFT),
+                &terrain,
+            );
+
+            // Sync player entity transform (for third-person target).
+            if let Some(t) = world.get_mut::<Transform>(player_entity) {
+                t.position = player.position;
+            }
+        }
+
+        // -- Sync camera to player in first-person --
         {
             let mode = world.get::<CameraMode>(cam_entity).cloned();
-            if let Some(CameraMode::FirstPerson { mut yaw, mut pitch, move_speed, look_sensitivity }) = mode {
-                if input.mouse_button(MouseButton::Right) {
-                    let (dx, dy) = input.mouse_delta();
-                    yaw   += dx as f32 * look_sensitivity;
-                    pitch -= dy as f32 * look_sensitivity;
-                    pitch  = pitch.clamp(-half_pi, half_pi);
+            if let Some(CameraMode::FirstPerson { .. }) = mode {
+                if let Some(t) = world.get_mut::<Transform>(cam_entity) {
+                    t.position = player.eye_position();
                 }
-
-                let forward = Vec3::new(yaw.sin(), 0.0, -yaw.cos());
-                let right   = Vec3::new(yaw.cos(), 0.0,  yaw.sin());
-
-                let mut move_dir = Vec3::ZERO;
-                if input.key(vk::W) { move_dir = move_dir + forward; }
-                if input.key(vk::S) { move_dir = move_dir - forward; }
-                if input.key(vk::D) { move_dir = move_dir + right; }
-                if input.key(vk::A) { move_dir = move_dir - right; }
-                if input.key(vk::SPACE) { move_dir.y += 1.0; }
-                if input.key(vk::CTRL)  { move_dir.y -= 1.0; }
-
-                let len = move_dir.length();
-                if len > 0.0 {
-                    let speed = if input.key(vk::SHIFT) { move_speed * 2.5 } else { move_speed };
-                    let delta = move_dir * (speed * dt / len);
-                    if let Some(t) = world.get_mut::<Transform>(cam_entity) {
-                        t.position = t.position + delta;
-                    }
-                }
-
                 world.add_component(cam_entity, CameraMode::FirstPerson {
-                    yaw, pitch, move_speed, look_sensitivity,
+                    yaw: player.yaw,
+                    pitch: player.pitch,
+                    move_speed: player.move_speed,
+                    look_sensitivity: player.look_sensitivity,
                 });
             }
         }
 
-        // ── Update terrain chunks around the camera ───────────────────────────────────
-        let cam_pos = world
-            .get::<Transform>(cam_entity)
-            .map(|t| t.position)
-            .unwrap_or(Vec3::ZERO);
-        terrain.update(cam_pos);
+        // -- Update terrain chunks around the player --
+        terrain.update(player.position);
 
-        renderer.clear(Color::rgb(0.45, 0.65, 0.85));  // sky blue
+        renderer.clear(Color::rgb(0.45, 0.65, 0.85));
 
         let (view, proj) = world
             .get::<Camera>(cam_entity)
@@ -269,14 +275,13 @@ fn main() {
 
         let mvp = proj * view;
 
-        // Fetch the sun light.
         let (light_dir, light_color, ambient) = world
             .query::<DirectionalLight>()
             .map(|(_, l)| (l.direction, l.color, l.ambient))
             .next()
             .unwrap_or((Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 0.15));
 
-        // ── Draw terrain ────────────────────────────────────────────────────────────────
+        // -- Draw terrain --
         let terrain_col = terrain.color;
         for chunk in &terrain.chunks {
             for face in &chunk.faces {
@@ -293,7 +298,7 @@ fn main() {
             }
         }
 
-        // ── Draw model ─────────────────────────────────────────────────────────────────
+        // -- Draw model --
         for (fi, face) in obj_faces.iter().enumerate() {
             let &[a, b, c] = face;
             let col = if face_colors_builtin.is_empty() { obj_color } else { face_colors_builtin[fi] };
@@ -308,15 +313,4 @@ fn main() {
             );
         }
     });
-}
-
-fn project_line(r: &mut SoftwareRenderer, mvp: &Mat4, a: Vec3, b: Vec3, color: Color) {
-    let ca = mvp.transform_point(a);
-    let cb = mvp.transform_point(b);
-    if ca.w <= 0.0 || cb.w <= 0.0 { return; }
-    let w  = r.width()  as f32;
-    let h  = r.height() as f32;
-    let sx = |v: Vec4| ((v.x / v.w) * 0.5 + 0.5) * w;
-    let sy = |v: Vec4| (1.0 - ((v.y / v.w) * 0.5 + 0.5)) * h;
-    r.draw_line(sx(ca) as i32, sy(ca) as i32, sx(cb) as i32, sy(cb) as i32, color);
 }
