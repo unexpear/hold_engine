@@ -8,6 +8,7 @@ use super::{Color, Renderer};
 
 pub struct SoftwareRenderer {
     hwnd:   HWND,
+    hdc:    HDC,
     width:  u32,
     height: u32,
     pixels: Vec<u32>,   // BGRA, 32bpp, row-major top→bottom
@@ -16,8 +17,26 @@ pub struct SoftwareRenderer {
 
 impl SoftwareRenderer {
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
+        let hdc = unsafe { GetDC(hwnd) };
+        assert!(!hdc.is_null(), "GetDC failed");
         let n = (width * height) as usize;
-        Self { hwnd, width, height, pixels: vec![0; n], depth: vec![f32::INFINITY; n] }
+        Self { hwnd, hdc, width, height, pixels: vec![0; n], depth: vec![f32::INFINITY; n] }
+    }
+
+    /// Transform a clip-space Vec4 into screen-space (x, y, depth).
+    #[inline]
+    fn clip_to_screen(&self, clip: Vec4) -> (f32, f32, f32) {
+        let inv_w = 1.0 / clip.w;
+        let nx = clip.x * inv_w;
+        let ny = clip.y * inv_w;
+        let nz = clip.z * inv_w;
+        let w = self.width  as f32;
+        let h = self.height as f32;
+        (
+            (nx * 0.5 + 0.5) * w,
+            (1.0 - (ny * 0.5 + 0.5)) * h,
+            nz,
+        )
     }
 
     // ── Direct pixel access ───────────────────────────────────────────────────
@@ -121,11 +140,9 @@ impl SoftwareRenderer {
         if n0.y >  1.0 && n1.y >  1.0 && n2.y >  1.0 { return; }
 
         // Viewport transform → screen space.
-        let w = self.width  as f32;
-        let h = self.height as f32;
-        let s0 = ((n0.x * 0.5 + 0.5) * w, (1.0 - (n0.y * 0.5 + 0.5)) * h, n0.z);
-        let s1 = ((n1.x * 0.5 + 0.5) * w, (1.0 - (n1.y * 0.5 + 0.5)) * h, n1.z);
-        let s2 = ((n2.x * 0.5 + 0.5) * w, (1.0 - (n2.y * 0.5 + 0.5)) * h, n2.z);
+        let s0 = self.clip_to_screen(c0);
+        let s1 = self.clip_to_screen(c1);
+        let s2 = self.clip_to_screen(c2);
 
         self.rasterize(s0, s1, s2, color);
     }
@@ -142,11 +159,9 @@ impl SoftwareRenderer {
         let clip2 = mvp.transform_point(v2);
         if clip0.w <= 0.0 || clip1.w <= 0.0 || clip2.w <= 0.0 { return; }
 
-        let n0 = ndc(clip0); let n1 = ndc(clip1); let n2 = ndc(clip2);
-        let w = self.width as f32; let h = self.height as f32;
-        let s0 = ((n0.x*0.5+0.5)*w, (1.0-(n0.y*0.5+0.5))*h, n0.z);
-        let s1 = ((n1.x*0.5+0.5)*w, (1.0-(n1.y*0.5+0.5))*h, n1.z);
-        let s2 = ((n2.x*0.5+0.5)*w, (1.0-(n2.y*0.5+0.5))*h, n2.z);
+        let s0 = self.clip_to_screen(clip0);
+        let s1 = self.clip_to_screen(clip1);
+        let s2 = self.clip_to_screen(clip2);
 
         let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
         let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width  as i32 - 1);
@@ -234,14 +249,16 @@ impl Renderer for SoftwareRenderer {
 
     fn clear(&mut self, color: Color) {
         let packed = color.to_bgra_u32();
-        self.pixels.fill(packed);
-        self.depth.fill(f32::INFINITY);
+        self.pixels.iter_mut().zip(self.depth.iter_mut()).for_each(|(p, d)| {
+            *p = packed;
+            *d = f32::INFINITY;
+        });
     }
 
     fn end_frame(&mut self) {
         // Blit pixel buffer to the window via StretchDIBits.
         unsafe {
-            let hdc = GetDC(self.hwnd);
+            let hdc = self.hdc;
 
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -269,9 +286,13 @@ impl Renderer for SoftwareRenderer {
                 DIB_RGB_COLORS,
                 SRCCOPY,
             );
-
-            ReleaseDC(self.hwnd, hdc);
         }
+    }
+}
+
+impl Drop for SoftwareRenderer {
+    fn drop(&mut self) {
+        unsafe { ReleaseDC(self.hwnd, self.hdc); }
     }
 }
 

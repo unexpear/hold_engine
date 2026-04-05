@@ -1,32 +1,36 @@
-//! Core engine — owns the window, ECS world, and renderer.
+//! Core engine — owns the window, ECS world, system schedule, and renderer.
 //! The game loop is driven by a caller-supplied closure.
 
-use crate::ecs::World;
+use crate::ecs::{SystemSchedule, World};
 use crate::input::InputState;
 use crate::platform::Window;
 use crate::renderer::Renderer;
 use crate::platform::ffi::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 pub struct Engine {
-    pub world:  World,
-    pub window: Window,
-    input:  InputState,
+    pub world:    World,
+    pub schedule: SystemSchedule,
+    pub window:   Window,
+    input:        InputState,
+    fps_timer:    f32,   // seconds since last title update
 }
 
 impl Engine {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let window = Window::new(title, width, height);
         Self {
-            world:  World::new(),
+            world:    World::new(),
+            schedule: SystemSchedule::new(),
             window,
-            input:  InputState::new(),
+            input:    InputState::new(),
+            fps_timer: 0.0,
         }
     }
 
     /// Run the game loop.
     ///
     /// The closure receives:
-    ///   `world`    — ECS world (spawn/query/systems)
+    ///   `world`    — ECS world (spawn/query/components)
     ///   `renderer` — backend (clear, draw, present)
     ///   `input`    — keyboard/mouse snapshot
     ///   `dt`       — seconds since last frame (clamped to 0.1 s)
@@ -52,10 +56,12 @@ impl Engine {
             let dt = dt.min(0.1); // cap at 100 ms to avoid spiral of death
             last = now;
 
-            // Update window title with FPS.
-            if dt > 0.0 {
+            // Update window title with FPS — throttled to once per second.
+            self.fps_timer += dt;
+            if self.fps_timer >= 1.0 && dt > 0.0 {
                 let fps = (1.0 / dt) as u32;
                 self.window.set_title(&format!("Forge — {} FPS", fps));
+                self.fps_timer = 0.0;
             }
 
             // ── Events / Input ────────────────────────────────────────────
@@ -64,7 +70,7 @@ impl Engine {
             }
 
             // ── ECS systems ───────────────────────────────────────────────
-            self.world.update(dt);
+            self.schedule.run(&mut self.world, dt);
 
             // ── Render ────────────────────────────────────────────────────
             renderer.begin_frame();

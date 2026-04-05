@@ -10,7 +10,7 @@
 use forge::{
     ecs::{System, World},
     engine::Engine,
-    input::{vk, InputState},
+    input::vk,
     math::{deg_to_rad, Mat4, Vec3},
     renderer::{Color, Renderer},
     renderer::software::SoftwareRenderer,
@@ -38,8 +38,7 @@ impl System for SpinSystem {
         // Collect entity IDs first to avoid borrow conflict.
         let entities: Vec<Entity> = world
             .query::<Transform>()
-            .iter()
-            .map(|(e, _)| *e)
+            .map(|(entity, _)| entity)
             .collect();
 
         for entity in entities {
@@ -71,7 +70,7 @@ fn main() {
     engine.world.add_component(tetra, AngularVelocity { y: 1.2, x: 0.4 });
 
     // Register the spin system so it runs automatically each frame.
-    engine.world.add_system(SpinSystem);
+    engine.schedule.add_system(SpinSystem);
 
     // Build the software renderer using the window handle.
     let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
@@ -103,7 +102,7 @@ fn main() {
         Color::rgb(1.0, 0.9, 0.1),
     ];
 
-    engine.run(renderer, move |world, renderer, input, dt| {
+    engine.run(renderer, move |world, renderer, input, _dt| {
         // Quit on Escape.
         if input.key_pressed(vk::ESCAPE) { std::process::exit(0); }
 
@@ -111,13 +110,10 @@ fn main() {
         renderer.clear(Color::rgb(0.05, 0.05, 0.12));
 
         // Read current transform (if the entity still exists).
-        let (ry, rx) = {
-            let transforms = world.query::<Transform>();
-            match transforms.first() {
-                Some((_, t)) => (t.rotation_y, t.rotation_x),
-                None => (0.0, 0.0),
-            }
-        };
+        let (ry, rx) = world
+            .get::<Transform>(tetra)
+            .map(|transform| (transform.rotation_y, transform.rotation_x))
+            .unwrap_or((0.0, 0.0));
 
         // Build MVP.
         let aspect = renderer.width() as f32 / renderer.height() as f32;

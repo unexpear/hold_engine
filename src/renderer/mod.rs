@@ -1,5 +1,6 @@
 pub mod software;
 pub mod opengl;
+pub mod opengl_shaders;
 pub mod vulkan;
 
 pub use software::SoftwareRenderer;

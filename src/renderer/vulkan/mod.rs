@@ -101,6 +101,7 @@ pub struct VulkanRenderer {
     frames:        Vec<FrameSync>,
     current_frame: usize,
     current_image: u32,
+    pending_resize: bool,
 
     clear_color:   Color,
 }
@@ -439,6 +440,7 @@ impl VulkanRenderer {
                 frames,
                 current_frame: 0,
                 current_image: 0,
+                pending_resize: false,
                 clear_color: Color::BLACK,
             }
         }
@@ -447,30 +449,92 @@ impl VulkanRenderer {
     pub fn current_command_buffer(&self) -> VkCommandBuffer {
         self.frames[self.current_frame].cmd_buf
     }
+
+    fn recreate_swapchain(&mut self, width: u32, height: u32) {
+        unsafe {
+            (self.vk.device_wait_idle)(self.device);
+
+            for &framebuffer in &self.framebuffers {
+                (self.vk.destroy_framebuffer)(self.device, framebuffer, null_mut());
+            }
+            for &view in &self.sc_views {
+                (self.vk.destroy_image_view)(self.device, view, null_mut());
+            }
+            (self.vk.destroy_swapchain)(self.device, self.swapchain, null_mut());
+
+            let (swapchain, format, extent, images, views) = create_swapchain_objects(
+                &self.vk,
+                self.physical_device,
+                self.device,
+                self.surface,
+                self.graphics_family,
+                self.present_family,
+                width,
+                height,
+            );
+
+            self.swapchain = swapchain;
+            self.sc_format = format;
+            self.sc_extent = extent;
+            self.sc_images = images;
+            self.sc_views = views;
+            self.framebuffers = create_framebuffers_obj(
+                &self.vk,
+                self.device,
+                self.render_pass,
+                &self.sc_views,
+                self.sc_extent,
+            );
+        }
+    }
+
+    fn acquire_swapchain_image(&mut self, semaphore: VkSemaphore) -> (u32, bool) {
+        unsafe {
+            loop {
+                let mut image_index = 0u32;
+                let result = (self.vk.acquire_next_image)(
+                    self.device,
+                    self.swapchain,
+                    u64::MAX,
+                    semaphore,
+                    0,
+                    &mut image_index,
+                );
+
+                match result {
+                    VK_SUCCESS => return (image_index, false),
+                    VK_SUBOPTIMAL_KHR => return (image_index, true),
+                    VK_ERROR_OUT_OF_DATE_KHR => {
+                        self.recreate_swapchain(self.sc_extent.width, self.sc_extent.height);
+                    }
+                    _ => panic!("vkAcquireNextImageKHR failed: {}", result),
+                }
+            }
+        }
+    }
 }
 
 impl Renderer for VulkanRenderer {
     fn width(&self)  -> u32 { self.sc_extent.width }
     fn height(&self) -> u32 { self.sc_extent.height }
 
-    fn resize(&mut self, _width: u32, _height: u32) {
-        // TODO: recreate swapchain on resize.
+    fn resize(&mut self, width: u32, height: u32) {
+        self.recreate_swapchain(width, height);
+        self.pending_resize = false;
     }
 
     fn begin_frame(&mut self) {
         unsafe {
-            let f = &self.frames[self.current_frame];
+            let image_available = self.frames[self.current_frame].image_available;
+            let in_flight = self.frames[self.current_frame].in_flight;
 
             // Wait for this frame slot to be free.
-            (self.vk.wait_for_fences)(self.device, 1, &f.in_flight, VK_TRUE, u64::MAX);
-            (self.vk.reset_fences)(self.device, 1, &f.in_flight);
+            (self.vk.wait_for_fences)(self.device, 1, &in_flight, VK_TRUE, u64::MAX);
+            (self.vk.reset_fences)(self.device, 1, &in_flight);
 
             // Acquire the next swapchain image.
-            let mut image_index = 0u32;
-            (self.vk.acquire_next_image)(
-                self.device, self.swapchain, u64::MAX,
-                f.image_available, 0, &mut image_index,
-            );
+            let (image_index, needs_resize) = self.acquire_swapchain_image(image_available);
+            self.pending_resize = needs_resize;
             self.current_image = image_index;
 
             // Record: begin command buffer → begin render pass.
@@ -513,36 +577,48 @@ impl Renderer for VulkanRenderer {
 
     fn end_frame(&mut self) {
         unsafe {
-            let f = &self.frames[self.current_frame];
+            let frame = &self.frames[self.current_frame];
+            let image_available = frame.image_available;
+            let render_finished = frame.render_finished;
+            let in_flight = frame.in_flight;
+            let cmd_buf = frame.cmd_buf;
 
-            (self.vk.cmd_end_render_pass)(f.cmd_buf);
-            (self.vk.end_command_buffer)(f.cmd_buf);
+            (self.vk.cmd_end_render_pass)(cmd_buf);
+            (self.vk.end_command_buffer)(cmd_buf);
 
             let wait_stage: VkPipelineStageFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
             let submit = VkSubmitInfo {
                 sType:                VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 pNext:                null_mut(),
                 waitSemaphoreCount:   1,
-                pWaitSemaphores:      &f.image_available,
+                pWaitSemaphores:      &image_available,
                 pWaitDstStageMask:    &wait_stage,
                 commandBufferCount:   1,
-                pCommandBuffers:      &f.cmd_buf,
+                pCommandBuffers:      &cmd_buf,
                 signalSemaphoreCount: 1,
-                pSignalSemaphores:    &f.render_finished,
+                pSignalSemaphores:    &render_finished,
             };
-            (self.vk.queue_submit)(self.graphics_queue, 1, &submit, f.in_flight);
+            let submit_result = (self.vk.queue_submit)(self.graphics_queue, 1, &submit, in_flight);
+            assert_eq!(submit_result, VK_SUCCESS, "vkQueueSubmit failed: {}", submit_result);
 
             let present = VkPresentInfoKHR {
                 sType:              VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 pNext:              null_mut(),
                 waitSemaphoreCount: 1,
-                pWaitSemaphores:    &f.render_finished,
+                pWaitSemaphores:    &render_finished,
                 swapchainCount:     1,
                 pSwapchains:        &self.swapchain,
                 pImageIndices:      &self.current_image,
                 pResults:           null_mut(),
             };
-            (self.vk.queue_present)(self.present_queue, &present);
+            let present_result = (self.vk.queue_present)(self.present_queue, &present);
+
+            if present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR || self.pending_resize {
+                self.recreate_swapchain(self.sc_extent.width, self.sc_extent.height);
+                self.pending_resize = false;
+            } else {
+                assert_eq!(present_result, VK_SUCCESS, "vkQueuePresentKHR failed: {}", present_result);
+            }
 
             self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
         }
@@ -567,6 +643,7 @@ impl Drop for VulkanRenderer {
             (vk.destroy_surface)(self.instance, self.surface, null_mut());
             (vk.destroy_device)(self.device, null_mut());
             (vk.destroy_instance)(self.instance, null_mut());
+            win32::FreeLibrary(self._lib);
         }
     }
 }

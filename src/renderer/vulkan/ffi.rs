@@ -444,16 +444,30 @@ pub struct VkQueueFamilyProperties {
 pub struct VkExtent3D { pub width: u32, pub height: u32, pub depth: u32 }
 
 #[repr(C)] #[derive(Clone, Copy)]
+pub struct VkPhysicalDeviceLimits {
+    pub _data: [u8; 504],
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkPhysicalDeviceSparseProperties {
+    pub residencyStandard2DBlockShape: VkBool32,
+    pub residencyStandard2DMultisampleBlockShape: VkBool32,
+    pub residencyStandard3DBlockShape: VkBool32,
+    pub residencyAlignedMipSize: VkBool32,
+    pub residencyNonResidentStrict: VkBool32,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
 pub struct VkPhysicalDeviceProperties {
-    pub apiVersion:    u32,
+    pub apiVersion: u32,
     pub driverVersion: u32,
-    pub vendorID:      u32,
-    pub deviceID:      u32,
-    pub deviceType:    u32,
-    pub deviceName:    [i8; 256],
+    pub vendorID: u32,
+    pub deviceID: u32,
+    pub deviceType: u32,
+    pub deviceName: [i8; 256],
     pub pipelineCacheUUID: [u8; 16],
-    // Limits and sparse properties follow — we just allocate enough space.
-    pub _limits_and_rest: [u8; 504 + 36],
+    pub limits: VkPhysicalDeviceLimits,
+    pub sparseProperties: VkPhysicalDeviceSparseProperties,
 }
 impl VkPhysicalDeviceProperties {
     pub fn zeroed() -> Self { unsafe { std::mem::zeroed() } }
