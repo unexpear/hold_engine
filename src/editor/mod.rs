@@ -25,6 +25,52 @@ impl Project {
     pub fn project_file(&self) -> String {
         format!("{}/{}.hproj", self.root, self.name)
     }
+
+    /// Serialize project metadata into a minimal `.hproj` text format.
+    pub fn to_hproj_string(&self) -> String {
+        format!(
+            "HOLD_PROJECT_V1\nname={}\nroot={}\nassets_dir={}\nscenes_dir={}\n",
+            self.name, self.root, self.assets_dir, self.scenes_dir
+        )
+    }
+
+    /// Parse project metadata from a `.hproj` text payload.
+    pub fn from_hproj_str(src: &str) -> Result<Self, &'static str> {
+        let mut lines = src.lines();
+        if lines.next() != Some("HOLD_PROJECT_V1") {
+            return Err("invalid project header");
+        }
+
+        let mut name: Option<String> = None;
+        let mut root: Option<String> = None;
+        let mut assets_dir: Option<String> = None;
+        let mut scenes_dir: Option<String> = None;
+
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let (k, v) = line.split_once('=').ok_or("invalid project line")?;
+            match k {
+                "name" => name = Some(v.to_string()),
+                "root" => root = Some(v.to_string()),
+                "assets_dir" => assets_dir = Some(v.to_string()),
+                "scenes_dir" => scenes_dir = Some(v.to_string()),
+                _ => return Err("unknown project key"),
+            }
+        }
+
+        let name = name.ok_or("missing project name")?;
+        let root = root.ok_or("missing project root")?;
+        let assets_dir = assets_dir.unwrap_or_else(|| format!("{root}/assets"));
+        let scenes_dir = scenes_dir.unwrap_or_else(|| format!("{root}/scenes"));
+        Ok(Self {
+            name,
+            root,
+            assets_dir,
+            scenes_dir,
+        })
+    }
 }
 
 /// A scalar/vector value editable through an inspector.
@@ -156,6 +202,176 @@ impl SceneDocument {
 
         true
     }
+
+    /// Serialize the editor scene document to a stable line-based text format.
+    pub fn to_hscene_string(&self) -> String {
+        let mut out = String::new();
+        out.push_str("HOLD_SCENE_DOC_V1\n");
+        out.push_str(&format!("name|{}\n", self.name));
+        for entity in &self.entities {
+            out.push_str(&format!("entity|{}|{}\n", entity.id, entity.name));
+            for component in &entity.components {
+                out.push_str(&format!("component|{}\n", component.type_name));
+                for field in &component.fields {
+                    out.push_str(&encode_field(field));
+                    out.push('\n');
+                }
+                out.push_str("endcomponent\n");
+            }
+            out.push_str("endentity\n");
+        }
+        out
+    }
+
+    /// Parse the editor scene document from the line-based text format.
+    pub fn from_hscene_str(src: &str) -> Result<Self, &'static str> {
+        let mut lines = src.lines();
+        if lines.next() != Some("HOLD_SCENE_DOC_V1") {
+            return Err("invalid scene document header");
+        }
+
+        let name_line = lines.next().ok_or("missing scene name line")?;
+        let (_, name) = name_line.split_once('|').ok_or("invalid scene name line")?;
+        if !name_line.starts_with("name|") {
+            return Err("invalid scene name prefix");
+        }
+
+        let mut doc = Self {
+            name: name.to_string(),
+            entities: Vec::new(),
+        };
+
+        let mut current_entity: Option<EditorEntity> = None;
+        let mut current_component: Option<InspectorComponent> = None;
+
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+
+            if line == "endcomponent" {
+                let component = current_component
+                    .take()
+                    .ok_or("endcomponent without component")?;
+                let entity = current_entity
+                    .as_mut()
+                    .ok_or("component outside entity in scene doc")?;
+                entity.components.push(component);
+                continue;
+            }
+
+            if line == "endentity" {
+                if current_component.is_some() {
+                    return Err("entity ended before component closed");
+                }
+                let entity = current_entity.take().ok_or("endentity without entity")?;
+                doc.entities.push(entity);
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("entity|") {
+                if current_entity.is_some() {
+                    return Err("nested entity not allowed");
+                }
+                let mut parts = rest.splitn(2, '|');
+                let id = parts
+                    .next()
+                    .ok_or("missing entity id")?
+                    .parse::<u64>()
+                    .map_err(|_| "invalid entity id")?;
+                let name = parts.next().ok_or("missing entity name")?.to_string();
+                current_entity = Some(EditorEntity {
+                    id,
+                    name,
+                    components: Vec::new(),
+                });
+                continue;
+            }
+
+            if let Some(type_name) = line.strip_prefix("component|") {
+                if current_entity.is_none() {
+                    return Err("component outside entity");
+                }
+                if current_component.is_some() {
+                    return Err("nested component not allowed");
+                }
+                current_component = Some(InspectorComponent {
+                    type_name: type_name.to_string(),
+                    fields: Vec::new(),
+                });
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("field|") {
+                let component = current_component
+                    .as_mut()
+                    .ok_or("field outside component in scene doc")?;
+                component.fields.push(decode_field(rest)?);
+                continue;
+            }
+
+            return Err("unknown scene document line");
+        }
+
+        if current_component.is_some() {
+            return Err("unterminated component");
+        }
+        if current_entity.is_some() {
+            return Err("unterminated entity");
+        }
+
+        Ok(doc)
+    }
+}
+
+fn encode_field(field: &InspectorField) -> String {
+    match &field.value {
+        InspectorValue::Bool(v) => format!("field|{}|bool|{}", field.name, if *v { 1 } else { 0 }),
+        InspectorValue::Number(v) => format!("field|{}|number|{}", field.name, v),
+        InspectorValue::Text(v) => format!("field|{}|text|{}", field.name, v),
+        InspectorValue::Vec3(v) => {
+            format!("field|{}|vec3|{}|{}|{}", field.name, v[0], v[1], v[2])
+        }
+    }
+}
+
+fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
+    let mut parts = rest.split('|');
+    let name = parts.next().ok_or("missing field name")?.to_string();
+    let kind = parts.next().ok_or("missing field type")?;
+
+    let value = match kind {
+        "bool" => {
+            let raw = parts.next().ok_or("missing bool value")?;
+            InspectorValue::Bool(raw == "1")
+        }
+        "number" => {
+            let raw = parts.next().ok_or("missing number value")?;
+            InspectorValue::Number(raw.parse::<f32>().map_err(|_| "invalid number value")?)
+        }
+        "text" => InspectorValue::Text(parts.next().ok_or("missing text value")?.to_string()),
+        "vec3" => {
+            let x = parts
+                .next()
+                .ok_or("missing vec3 x")?
+                .parse::<f32>()
+                .map_err(|_| "invalid vec3 x")?;
+            let y = parts
+                .next()
+                .ok_or("missing vec3 y")?
+                .parse::<f32>()
+                .map_err(|_| "invalid vec3 y")?;
+            let z = parts
+                .next()
+                .ok_or("missing vec3 z")?
+                .parse::<f32>()
+                .map_err(|_| "invalid vec3 z")?;
+            InspectorValue::Vec3([x, y, z])
+        }
+        _ => return Err("unknown field type"),
+    };
+
+    Ok(InspectorField { name, value })
 }
 
 #[cfg(test)]
@@ -170,6 +386,13 @@ mod tests {
         assert_eq!(p.project_file(), "C:/games/demo/demo.hproj");
     }
 
+    #[test]
+    fn project_hproj_roundtrip() {
+        let p = Project::new("demo", "C:/games/demo");
+        let text = p.to_hproj_string();
+        let parsed = Project::from_hproj_str(&text).unwrap();
+        assert_eq!(parsed, p);
+    }
 
     #[test]
     fn scene_document_set_value_creates_missing_path() {
@@ -220,5 +443,46 @@ mod tests {
             doc.get_value(1, "Transform", "position"),
             Some(&InspectorValue::Vec3([3.0, 4.0, 5.0]))
         );
+    }
+
+    #[test]
+    fn scene_document_roundtrip() {
+        let doc = SceneDocument {
+            name: "Roundtrip".into(),
+            entities: vec![EditorEntity {
+                id: 7,
+                name: "Hero".into(),
+                components: vec![
+                    InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([1.0, 2.0, 3.0]),
+                        }],
+                    },
+                    InspectorComponent {
+                        type_name: "Stats".into(),
+                        fields: vec![
+                            InspectorField {
+                                name: "health".into(),
+                                value: InspectorValue::Number(100.0),
+                            },
+                            InspectorField {
+                                name: "alive".into(),
+                                value: InspectorValue::Bool(true),
+                            },
+                            InspectorField {
+                                name: "title".into(),
+                                value: InspectorValue::Text("Knight".into()),
+                            },
+                        ],
+                    },
+                ],
+            }],
+        };
+
+        let text = doc.to_hscene_string();
+        let parsed = SceneDocument::from_hscene_str(&text).unwrap();
+        assert_eq!(parsed, doc);
     }
 }
