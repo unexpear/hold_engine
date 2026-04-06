@@ -1,10 +1,10 @@
-pub mod software;
 pub mod opengl;
 pub mod opengl_shaders;
+pub mod software;
 pub mod vulkan;
 
-pub use software::SoftwareRenderer;
 pub use opengl::OpenGLRenderer;
+pub use software::SoftwareRenderer;
 pub use vulkan::VulkanRenderer;
 
 // ── Color ─────────────────────────────────────────────────────────────────────
@@ -18,21 +18,28 @@ pub struct Color {
 }
 
 impl Color {
-    pub const BLACK:   Self = Self::new(0.0, 0.0, 0.0, 1.0);
-    pub const WHITE:   Self = Self::new(1.0, 1.0, 1.0, 1.0);
-    pub const RED:     Self = Self::new(1.0, 0.0, 0.0, 1.0);
-    pub const GREEN:   Self = Self::new(0.0, 1.0, 0.0, 1.0);
-    pub const BLUE:    Self = Self::new(0.0, 0.0, 1.0, 1.0);
-    pub const YELLOW:  Self = Self::new(1.0, 1.0, 0.0, 1.0);
-    pub const CYAN:    Self = Self::new(0.0, 1.0, 1.0, 1.0);
+    pub const BLACK: Self = Self::new(0.0, 0.0, 0.0, 1.0);
+    pub const WHITE: Self = Self::new(1.0, 1.0, 1.0, 1.0);
+    pub const RED: Self = Self::new(1.0, 0.0, 0.0, 1.0);
+    pub const GREEN: Self = Self::new(0.0, 1.0, 0.0, 1.0);
+    pub const BLUE: Self = Self::new(0.0, 0.0, 1.0, 1.0);
+    pub const YELLOW: Self = Self::new(1.0, 1.0, 0.0, 1.0);
+    pub const CYAN: Self = Self::new(0.0, 1.0, 1.0, 1.0);
     pub const MAGENTA: Self = Self::new(1.0, 0.0, 1.0, 1.0);
     pub const TRANSPARENT: Self = Self::new(0.0, 0.0, 0.0, 0.0);
 
-    #[inline] pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self { Self { r, g, b, a } }
-    #[inline] pub fn rgb(r: f32, g: f32, b: f32) -> Self { Self { r, g, b, a: 1.0 } }
+    #[inline]
+    pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+    #[inline]
+    pub fn rgb(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
 
     /// Pack to 0x00RRGGBB (format expected by GDI DIB with BI_RGB, 32bpp, little-endian).
-    #[inline] pub fn to_bgra_u32(self) -> u32 {
+    #[inline]
+    pub fn to_bgra_u32(self) -> u32 {
         let r = (self.r.clamp(0.0, 1.0) * 255.0) as u32;
         let g = (self.g.clamp(0.0, 1.0) * 255.0) as u32;
         let b = (self.b.clamp(0.0, 1.0) * 255.0) as u32;
@@ -53,7 +60,7 @@ impl Color {
 
 /// All rendering backends implement this trait.
 pub trait Renderer {
-    fn width(&self)  -> u32;
+    fn width(&self) -> u32;
     fn height(&self) -> u32;
 
     /// Called when the window is resized.

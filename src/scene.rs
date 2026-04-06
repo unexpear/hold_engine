@@ -855,6 +855,8 @@ entity "crate" {
 
         let crate_e = map["crate"];
         assert!(world.has_component::<Parent>(crate_e));
+        let parent = world.get::<Parent>(crate_e).unwrap();
+        assert_eq!(parent.entity, player);
     }
 
     #[test]

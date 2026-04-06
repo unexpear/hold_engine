@@ -154,8 +154,9 @@ impl World {
     /// world.query::<A>()
     ///      .filter_map(|(e, a)| world.get::<B>(e).map(|b| (e, a, b)))
     /// ```
-    /// This is O(|A| × log(|B|)) rather than O(|A| ∩ |B|).  Archetype tables
-    /// are the correct long-term fix.
+    /// This is still O(|A|) with O(1) sparse lookups into `B`, but it does extra
+    /// random-access probing compared with dedicated join queries.
+    /// Archetype/table-style joins are the correct long-term fix.
     pub fn query<C: 'static>(&self) -> SparseSetIter<'_, C> {
         match self.storage_ref::<C>() {
             Some(set) => set.iter(),

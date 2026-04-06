@@ -2,7 +2,8 @@
 
 /// Core stats that any entity with "health" or combat properties can carry.
 ///
-/// All values are plain 32 so they play nicely with the existing
+/// All values are plain f32 so they play nicely with the existing
+32 so they play nicely with the existing
 /// ECS pipeline (no trait bounds beyond 'static).
 pub struct Stats {
     pub health:     f32,
@@ -35,12 +36,56 @@ impl Stats {
     }
 
     /// Simple constructor: health-only entity (e.g. a destructible barrel).
-    pub fn health_only(health: f32) -> Self {
-        Self::new(health, 0.0, 0.0, 0.0, 0.0)
+    /// Spend mana.  Returns true if there was enough.
+    /// Award XP.  Returns true if a level-up occurred.
+        let mut leveled = false;
+
+        while self.xp >= self.xp_next {
+            leveled = true;
+
+        leveled
+    }
+}
+
+
+        self.xp = self.xp.saturating_add(amount);
+            self.xp_next = self.xp_next.saturating_add(self.xp_next / 2); // 1.5x per level
+    use super::Stats;
+
+    #[test]
+    fn award_xp_returns_false_when_not_enough_for_level() {
+        let mut stats = Stats::new(100.0, 50.0, 10.0, 5.0, 3.0);
+
+        let leveled = stats.award_xp(99);
+
+        assert!(!leveled);
+        assert_eq!(stats.level, 1);
+        assert_eq!(stats.xp, 99);
+        assert_eq!(stats.xp_next, 100);
     }
 
-    /// Is the entity still alive?
-    #[inline]
+    #[test]
+    fn award_xp_single_level_with_remainder() {
+        let mut stats = Stats::new(100.0, 50.0, 10.0, 5.0, 3.0);
+
+        let leveled = stats.award_xp(150);
+
+        assert!(leveled);
+        assert_eq!(stats.level, 2);
+        assert_eq!(stats.xp, 50);
+        assert_eq!(stats.xp_next, 150);
+    }
+
+    #[test]
+    fn award_xp_can_level_multiple_times() {
+        let mut stats = Stats::new(100.0, 50.0, 10.0, 5.0, 3.0);
+
+        let leveled = stats.award_xp(260);
+
+        assert!(leveled);
+        assert_eq!(stats.level, 3);
+        assert_eq!(stats.xp, 10);
+        assert_eq!(stats.xp_next, 225);
     pub fn alive(&self) -> bool {
         self.health > 0.0
     }

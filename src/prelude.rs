@@ -5,53 +5,108 @@
 //! ```
 
 pub use crate::{
-    // ECS core
-    Entity, World, System, SystemSchedule,
-    Transform, GlobalTransform, TransformPropagateSystem,
-    Query2, Query2Mut, Query3, Query3Mut,
-
-    // Camera
-    Camera, CameraMode, CameraSystem, ActiveCamera,
-
-    // Lighting
-    DirectionalLight,
-
-    // Rendering
-    renderer::{Color, Renderer},
-    renderer::software::SoftwareRenderer,
-
-    // Math
-    math::{Mat4, Quat, Vec2, Vec3, Vec4},
-
-    // Input
-    input::{self, InputState, MouseButton, vk},
-
     // Engine core
     engine::{App, Engine},
 
-    // Assets
-    MeshData, Vertex, GpuMesh, GpuTexture, Handle, AssetStore,
-    Texture, TextureFormat, TexError,
-    load_bmp, load_tga, load_texture,
+    // Input
+    input::{self, vk, InputState, MouseButton},
 
-    // Gameplay components
-    Stats, Inventory, ItemId, ItemStack,
-    DialogueTree, DialogueNode, DialogueChoice, ActiveDialogue, NodeId,
-    Quest, QuestId, QuestLog, QuestObjective, QuestState,
+    load_bmp,
+    load_scene,
+    load_texture,
 
-    // World
-    Heightmap, Terrain, TerrainChunk,
-    LodTerrain, LodChunk, LodMesh, LodLevel, ChunkTier,
-    PlayerController,
-    Skybox,
+    load_tga,
+    // Math
+    math::{Mat4, Quat, Vec2, Vec3, Vec4},
 
+    parse_scene,
+    renderer::software::SoftwareRenderer,
+
+    // Rendering
+    renderer::{Color, Renderer},
+    save_scene,
+
+    serialize_scene,
+    spawn_scene,
+    ActiveCamera,
+
+    ActiveDialogue,
+    AppExit,
+    AssetStore,
+    // Camera
+    Camera,
+    CameraMode,
+    CameraSystem,
+    Children,
+
+    ChunkTier,
+    DialogueChoice,
+    DialogueNode,
+    DialogueTree,
+    // Lighting
+    DirectionalLight,
+
+    EditorEntity,
+    // ECS core
+    Entity,
+    EntityDef,
     // Events
-    EventBus, EventQueue, AppExit, WindowResized,
-
+    EventBus,
+    EventQueue,
+    GlobalTransform,
+    GpuMesh,
+    GpuTexture,
+    Handle,
+    // World
+    Heightmap,
+    InspectorComponent,
+    InspectorField,
+    InspectorValue,
+    Inventory,
+    ItemId,
+    ItemStack,
+    LodChunk,
+    LodLevel,
+    LodMesh,
+    LodTerrain,
+    // Assets
+    MeshData,
+    NodeId,
     // Hierarchy
-    Parent, Children,
+    Parent,
+    PlayerController,
+    // Editor
+    Project,
+    Query2,
+    Query2Mut,
+    Query3,
+    Query3Mut,
+
+    Quest,
+    QuestId,
+    QuestLog,
+    QuestObjective,
+    QuestState,
 
     // Scene
-    SceneData, SceneError, EntityDef,
-    load_scene, parse_scene, spawn_scene, serialize_scene, save_scene,
+    SceneData,
+    SceneDocument,
+    SceneError,
+    Skybox,
+
+    // Gameplay components
+    Stats,
+    System,
+    SystemSchedule,
+    Terrain,
+    TerrainChunk,
+    TexError,
+    Texture,
+    TextureFormat,
+    Transform,
+    TransformPropagateSystem,
+    Vertex,
+    WindowResized,
+
+    World,
 };
