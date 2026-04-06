@@ -113,6 +113,8 @@ impl SceneDocument {
 
     /// Dynamic path-style setter:
     /// entity -> component -> field -> value
+    ///
+    /// If the target entity/component/field does not exist yet, it is created.
     pub fn set_value(
         &mut self,
         entity_id: u64,
@@ -120,12 +122,37 @@ impl SceneDocument {
         field: &str,
         value: InspectorValue,
     ) -> bool {
-        if let Some(e) = self.entities.iter_mut().find(|e| e.id == entity_id) {
-            if let Some(c) = e.component_mut(component) {
-                return c.set_field(field, value);
-            }
+        let entity = if let Some(existing) = self.entities.iter_mut().find(|e| e.id == entity_id) {
+            existing
+        } else {
+            self.entities.push(EditorEntity {
+                id: entity_id,
+                name: format!("Entity{entity_id}"),
+                components: Vec::new(),
+            });
+            self.entities.last_mut().expect("entity just pushed")
+        };
+
+        let component = if let Some(existing) = entity.component_mut(component) {
+            existing
+        } else {
+            entity.components.push(InspectorComponent {
+                type_name: component.to_string(),
+                fields: Vec::new(),
+            });
+            entity.components.last_mut().expect("component just pushed")
+        };
+
+        if let Some(existing_field) = component.fields.iter_mut().find(|f| f.name == field) {
+            existing_field.value = value;
+        } else {
+            component.fields.push(InspectorField {
+                name: field.to_string(),
+                value,
+            });
         }
-        false
+
+        true
     }
 }
 
@@ -141,6 +168,23 @@ mod tests {
         assert_eq!(p.project_file(), "C:/games/demo/demo.hproj");
     }
 
+
+    #[test]
+    fn scene_document_set_value_creates_missing_path() {
+        let mut doc = SceneDocument {
+            name: "Level02".into(),
+            entities: Vec::new(),
+        };
+
+        assert!(doc.set_value(42, "Stats", "health", InspectorValue::Number(100.0)));
+
+        assert_eq!(doc.entities.len(), 1);
+        assert_eq!(doc.entities[0].name, "Entity42");
+        assert_eq!(
+            doc.get_value(42, "Stats", "health"),
+            Some(&InspectorValue::Number(100.0))
+        );
+    }
     #[test]
     fn scene_document_dynamic_access() {
         let mut doc = SceneDocument {
