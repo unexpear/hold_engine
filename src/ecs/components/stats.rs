@@ -48,9 +48,21 @@ impl Stats {
 }
 
 
-#[cfg(test)]
-mod tests {
+        self.xp = self.xp.saturating_add(amount);
+            self.xp_next = self.xp_next.saturating_add(self.xp_next / 2); // 1.5x per level
     use super::Stats;
+
+    #[test]
+    fn award_xp_returns_false_when_not_enough_for_level() {
+        let mut stats = Stats::new(100.0, 50.0, 10.0, 5.0, 3.0);
+
+        let leveled = stats.award_xp(99);
+
+        assert!(!leveled);
+        assert_eq!(stats.level, 1);
+        assert_eq!(stats.xp, 99);
+        assert_eq!(stats.xp_next, 100);
+    }
 
     #[test]
     fn award_xp_single_level_with_remainder() {
