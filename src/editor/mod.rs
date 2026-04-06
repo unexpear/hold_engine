@@ -33,7 +33,10 @@ impl Project {
     pub fn to_hproj_string(&self) -> String {
         format!(
             "HOLD_PROJECT_V1\nname={}\nroot={}\nassets_dir={}\nscenes_dir={}\n",
-            self.name, self.root, self.assets_dir, self.scenes_dir
+            escape_text(&self.name),
+            escape_text(&self.root),
+            escape_text(&self.assets_dir),
+            escape_text(&self.scenes_dir)
         )
     }
 
@@ -55,10 +58,10 @@ impl Project {
             }
             let (k, v) = line.split_once('=').ok_or("invalid project line")?;
             match k {
-                "name" => name = Some(v.to_string()),
-                "root" => root = Some(v.to_string()),
-                "assets_dir" => assets_dir = Some(v.to_string()),
-                "scenes_dir" => scenes_dir = Some(v.to_string()),
+                "name" => name = Some(unescape_text(v)?),
+                "root" => root = Some(unescape_text(v)?),
+                "assets_dir" => assets_dir = Some(unescape_text(v)?),
+                "scenes_dir" => scenes_dir = Some(unescape_text(v)?),
                 _ => return Err("unknown project key"),
             }
         }
@@ -210,11 +213,11 @@ impl SceneDocument {
     pub fn to_hscene_string(&self) -> String {
         let mut out = String::new();
         out.push_str("HOLD_SCENE_DOC_V1\n");
-        out.push_str(&format!("name|{}\n", self.name));
+        out.push_str(&format!("name|{}\n", escape_text(&self.name)));
         for entity in &self.entities {
-            out.push_str(&format!("entity|{}|{}\n", entity.id, entity.name));
+            out.push_str(&format!("entity|{}|{}\n", entity.id, escape_text(&entity.name)));
             for component in &entity.components {
-                out.push_str(&format!("component|{}\n", component.type_name));
+                out.push_str(&format!("component|{}\n", escape_text(&component.type_name)));
                 for field in &component.fields {
                     out.push_str(&encode_field(field));
                     out.push('\n');
@@ -240,7 +243,7 @@ impl SceneDocument {
         }
 
         let mut doc = Self {
-            name: name.to_string(),
+            name: unescape_text(name)?,
             entities: Vec::new(),
         };
 
@@ -282,7 +285,7 @@ impl SceneDocument {
                     .ok_or("missing entity id")?
                     .parse::<u64>()
                     .map_err(|_| "invalid entity id")?;
-                let name = parts.next().ok_or("missing entity name")?.to_string();
+                let name = unescape_text(parts.next().ok_or("missing entity name")?)?;
                 current_entity = Some(EditorEntity {
                     id,
                     name,
@@ -299,7 +302,7 @@ impl SceneDocument {
                     return Err("nested component not allowed");
                 }
                 current_component = Some(InspectorComponent {
-                    type_name: type_name.to_string(),
+                    type_name: unescape_text(type_name)?,
                     fields: Vec::new(),
                 });
                 continue;
@@ -329,18 +332,22 @@ impl SceneDocument {
 
 fn encode_field(field: &InspectorField) -> String {
     match &field.value {
-        InspectorValue::Bool(v) => format!("field|{}|bool|{}", field.name, if *v { 1 } else { 0 }),
-        InspectorValue::Number(v) => format!("field|{}|number|{}", field.name, v),
-        InspectorValue::Text(v) => format!("field|{}|text|{}", field.name, v),
+        InspectorValue::Bool(v) => {
+            format!("field|{}|bool|{}", escape_text(&field.name), if *v { 1 } else { 0 })
+        }
+        InspectorValue::Number(v) => format!("field|{}|number|{}", escape_text(&field.name), v),
+        InspectorValue::Text(v) => {
+            format!("field|{}|text|{}", escape_text(&field.name), escape_text(v))
+        }
         InspectorValue::Vec3(v) => {
-            format!("field|{}|vec3|{}|{}|{}", field.name, v[0], v[1], v[2])
+            format!("field|{}|vec3|{}|{}|{}", escape_text(&field.name), v[0], v[1], v[2])
         }
     }
 }
 
 fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
     let mut parts = rest.split('|');
-    let name = parts.next().ok_or("missing field name")?.to_string();
+    let name = unescape_text(parts.next().ok_or("missing field name")?)?;
     let kind = parts.next().ok_or("missing field type")?;
 
     let value = match kind {
@@ -352,7 +359,7 @@ fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
             let raw = parts.next().ok_or("missing number value")?;
             InspectorValue::Number(raw.parse::<f32>().map_err(|_| "invalid number value")?)
         }
-        "text" => InspectorValue::Text(parts.next().ok_or("missing text value")?.to_string()),
+        "text" => InspectorValue::Text(unescape_text(parts.next().ok_or("missing text value")?)?),
         "vec3" => {
             let x = parts
                 .next()
@@ -375,6 +382,41 @@ fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
     };
 
     Ok(InspectorField { name, value })
+}
+
+fn escape_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '|' => out.push_str("\\p"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn unescape_text(input: &str) -> Result<String, &'static str> {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        let esc = chars.next().ok_or("dangling escape")?;
+        match esc {
+            '\\' => out.push('\\'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            'p' => out.push('|'),
+            _ => return Err("invalid escape sequence"),
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug)]
@@ -577,6 +619,38 @@ mod tests {
 
         save_scene_doc(&scene_path, &doc).unwrap();
         let loaded = load_scene_doc(&scene_path).unwrap();
+        assert_eq!(loaded, doc);
+    }
+
+    #[test]
+    fn serialization_escapes_reserved_characters() {
+        let project = Project {
+            name: "demo|name".into(),
+            root: "C:/games/demo\\test".into(),
+            assets_dir: "C:/games/demo/assets".into(),
+            scenes_dir: "C:/games/demo/scenes".into(),
+        };
+        let project_text = project.to_hproj_string();
+        let project_loaded = Project::from_hproj_str(&project_text).unwrap();
+        assert_eq!(project_loaded, project);
+
+        let doc = SceneDocument {
+            name: "Level|One".into(),
+            entities: vec![EditorEntity {
+                id: 9,
+                name: "Boss|Unit".into(),
+                components: vec![InspectorComponent {
+                    type_name: "Dialogue|State".into(),
+                    fields: vec![InspectorField {
+                        name: "line|1".into(),
+                        value: InspectorValue::Text("slash\\\\pipe|newline\nok".into()),
+                    }],
+                }],
+            }],
+        };
+
+        let text = doc.to_hscene_string();
+        let loaded = SceneDocument::from_hscene_str(&text).unwrap();
         assert_eq!(loaded, doc);
     }
 }
