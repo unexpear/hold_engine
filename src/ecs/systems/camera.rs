@@ -1,4 +1,4 @@
-use crate::ecs::{System, World};
+use crate::ecs::{Entity, System, World};
 use crate::ecs::components::{ActiveCamera, Camera, CameraMode, GlobalTransform};
 use crate::math::{Vec3, Mat4};
 
@@ -11,17 +11,16 @@ pub struct CameraSystem;
 
 impl System for CameraSystem {
     fn update(&mut self, world: &mut World, _dt: f32) {
-        // Collect active camera entities first so we release the borrow.
-        let cameras: Vec<_> = world
-            .query::<ActiveCamera>()
-            .map(|(e, _)| e)
+        // Collect active cameras together with their CameraMode in one pass,
+        // avoiding a separate world.get::<CameraMode> call inside the loop.
+        // query_with iterates CameraMode and filters to entities that also
+        // carry ActiveCamera — no extra collect step needed for filtering.
+        let cameras: Vec<(Entity, CameraMode)> = world
+            .query_with::<CameraMode, ActiveCamera>()
+            .map(|(e, mode)| (e, mode.clone()))
             .collect();
 
-        for entity in cameras {
-            let mode = match world.get::<CameraMode>(entity) {
-                Some(m) => m.clone(),
-                None    => continue,
-            };
+        for (entity, mode) in cameras {
 
             let view = match mode {
                 CameraMode::FirstPerson { yaw, pitch, .. } => {

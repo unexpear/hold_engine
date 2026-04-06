@@ -20,6 +20,7 @@ pub use ecs::{ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Ch
               DialogueChoice, DialogueNode, DialogueTree, DirectionalLight, Entity,
               GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,
               Quest, QuestId, QuestLog, QuestObjective, QuestState,
+              Query2, Query2Mut, Query3, Query3Mut,
               Stats, System, SystemSchedule, Transform, TransformPropagateSystem, World};
 pub use engine::{App, Engine};
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};

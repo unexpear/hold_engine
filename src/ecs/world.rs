@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use super::entity::Entity;
+use super::query::{Query2, Query2Mut, Query3, Query3Mut};
 use super::sparse_set::{SparseSet, SparseSetIter, SparseSetIterMut};
 
 // ── EntityMeta ────────────────────────────────────────────────────────────────
@@ -165,6 +166,158 @@ impl World {
     /// Mutable variant of [`query`].
     pub fn query_mut<C: 'static>(&mut self) -> SparseSetIterMut<'_, C> {
         self.storage_mut::<C>().iter_mut()
+    }
+
+    // ── Multi-component queries ───────────────────────────────────────────────
+
+    /// Borrow two component storages immutably for joint iteration.
+    ///
+    /// Returns `None` if either type has no storage yet (no entity carries it).
+    ///
+    /// ```ignore
+    /// if let Some(q) = world.query2::<Transform, Camera>() {
+    ///     for (entity, transform, camera) in q.iter() { ... }
+    /// }
+    /// ```
+    pub fn query2<A: 'static, B: 'static>(&self) -> Option<Query2<'_, A, B>> {
+        let a = self.storage_ref::<A>()?;
+        let b = self.storage_ref::<B>()?;
+        Some(Query2 { a, b })
+    }
+
+    /// Borrow three component storages immutably for joint iteration.
+    ///
+    /// Returns `None` if any of the three types has no storage yet.
+    pub fn query3<A: 'static, B: 'static, C: 'static>(&self) -> Option<Query3<'_, A, B, C>> {
+        let a = self.storage_ref::<A>()?;
+        let b = self.storage_ref::<B>()?;
+        let c = self.storage_ref::<C>()?;
+        Some(Query3 { a, b, c })
+    }
+
+    /// Borrow `A` mutably and `B` immutably for joint iteration.
+    ///
+    /// Returns `None` if either storage is absent.
+    ///
+    /// # Panics
+    /// Panics if `A` and `B` are the same type — a type cannot be borrowed
+    /// mutably and immutably at the same time.
+    ///
+    /// ```ignore
+    /// if let Some(mut q) = world.query2_mut::<Transform, Velocity>() {
+    ///     for (_e, transform, velocity) in q.iter_mut() {
+    ///         transform.position = transform.position + velocity.0 * dt;
+    ///     }
+    /// }
+    /// ```
+    pub fn query2_mut<A: 'static, B: 'static>(&mut self) -> Option<Query2Mut<'_, A, B>> {
+        assert!(
+            TypeId::of::<A>() != TypeId::of::<B>(),
+            "query2_mut: A and B must be distinct component types"
+        );
+
+        // We need &mut SparseSet<A> and &SparseSet<B> simultaneously.
+        // Since they live under different TypeId keys they are distinct heap
+        // allocations (each Box<dyn AnyStorage> is its own object).
+        // We acquire raw pointers sequentially — each HashMap borrow ends at
+        // the semicolon — then reconstruct typed references.
+        //
+        // SAFETY: a_ptr and b_ptr point to non-overlapping memory (different
+        // TypeIds → different HashMap entries → different Box allocations).
+        // The returned Query2Mut is lifetime-bound to `&mut self`, preventing
+        // the World from being accessed while the query lives.
+        let a_ptr = self.components
+            .get_mut(&TypeId::of::<A>())?
+            .as_any_mut()
+            .downcast_mut::<SparseSet<A>>()?
+            as *mut SparseSet<A>;
+
+        let b_ptr = self.components
+            .get(&TypeId::of::<B>())?
+            .as_any()
+            .downcast_ref::<SparseSet<B>>()?
+            as *const SparseSet<B>;
+
+        Some(Query2Mut {
+            a: unsafe { &mut *a_ptr },
+            b: unsafe { &*b_ptr },
+        })
+    }
+
+    /// Borrow `A` mutably and `B`, `C` immutably for joint iteration.
+    ///
+    /// Returns `None` if any storage is absent.
+    ///
+    /// # Panics
+    /// Panics if any two of `A`, `B`, `C` are the same type.
+    pub fn query3_mut<A: 'static, B: 'static, C: 'static>(
+        &mut self,
+    ) -> Option<Query3Mut<'_, A, B, C>> {
+        let a_tid = TypeId::of::<A>();
+        let b_tid = TypeId::of::<B>();
+        let c_tid = TypeId::of::<C>();
+        assert!(
+            a_tid != b_tid && a_tid != c_tid && b_tid != c_tid,
+            "query3_mut: A, B, and C must all be distinct component types"
+        );
+
+        // Same safety argument as query2_mut — three distinct TypeIds mean
+        // three non-overlapping Box allocations.
+        let a_ptr = self.components
+            .get_mut(&a_tid)?
+            .as_any_mut()
+            .downcast_mut::<SparseSet<A>>()?
+            as *mut SparseSet<A>;
+
+        let b_ptr = self.components
+            .get(&b_tid)?
+            .as_any()
+            .downcast_ref::<SparseSet<B>>()?
+            as *const SparseSet<B>;
+
+        let c_ptr = self.components
+            .get(&c_tid)?
+            .as_any()
+            .downcast_ref::<SparseSet<C>>()?
+            as *const SparseSet<C>;
+
+        Some(Query3Mut {
+            a: unsafe { &mut *a_ptr },
+            b: unsafe { &*b_ptr },
+            c: unsafe { &*c_ptr },
+        })
+    }
+
+    // ── Filter helpers ────────────────────────────────────────────────────────
+
+    /// Iterate entities that have `A` and **also** carry `B` (without reading `B`).
+    ///
+    /// ```ignore
+    /// // All entities that have both a Transform and an ActiveCamera marker.
+    /// for (entity, transform) in world.query_with::<Transform, ActiveCamera>() { ... }
+    /// ```
+    pub fn query_with<A: 'static, B: 'static>(
+        &self,
+    ) -> impl Iterator<Item = (Entity, &A)> + '_ {
+        let b_set = self.storage_ref::<B>();
+        self.query::<A>().filter(move |(e, _)| {
+            b_set.map_or(false, |s| s.contains(*e))
+        })
+    }
+
+    /// Iterate entities that have `A` but do **not** carry `B`.
+    ///
+    /// ```ignore
+    /// // Root entities: have Transform but no Parent.
+    /// for (entity, transform) in world.query_without::<Transform, Parent>() { ... }
+    /// ```
+    pub fn query_without<A: 'static, B: 'static>(
+        &self,
+    ) -> impl Iterator<Item = (Entity, &A)> + '_ {
+        let b_set = self.storage_ref::<B>();
+        self.query::<A>().filter(move |(e, _)| {
+            b_set.map_or(true, |s| !s.contains(*e))
+        })
     }
 
     // ── Hierarchy helpers ─────────────────────────────────────────────────────

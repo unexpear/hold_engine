@@ -8,6 +8,7 @@ pub use crate::{
     // ECS core
     Entity, World, System, SystemSchedule,
     Transform, GlobalTransform, TransformPropagateSystem,
+    Query2, Query2Mut, Query3, Query3Mut,
 
     // Camera
     Camera, CameraMode, CameraSystem, ActiveCamera,
