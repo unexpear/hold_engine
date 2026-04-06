@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Morphic Engine Demo</title>
+  <style>
+    body { background: #222; color: #eee; font-family: sans-serif; margin: 0; }
+    #demo-root { width: 100vw; height: 100vh; position: relative; }
+  </style>
+</head>
+<body>
+  <div id="demo-root"></div>
+  <script type="module">
+    import { MorphicObject } from './src/MorphicObject.js';
+    import { MorphicTree } from './src/MorphicTree.js';
+    import { MorphicRegistry } from './src/MorphicRegistry.js';
+    import { Renderer } from './src/Renderer.js';
+    import { ContextMenu } from './src/ContextMenu.js';
+    import { Inspector } from './src/Inspector.js';
+    import { ScriptingConsole } from './src/ScriptingConsole.js';
+
+    // Demo setup
+    const root = new MorphicObject({
+      position: { x: 100, y: 100 },
+      size: { width: 300, height: 200 },
+      style: { background: '#4a90e2', color: '#fff', border: '2px solid #fff', borderRadius: '12px' }
+    });
+    root.name = 'RootMorph';
+    const child = new MorphicObject({
+      position: { x: 40, y: 40 },
+      size: { width: 120, height: 80 },
+      style: { background: '#e94e77', color: '#fff', border: '2px solid #fff', borderRadius: '8px' }
+    });
+    child.name = 'ChildMorph';
+    root.addChild(child);
+    MorphicRegistry.instance.register(root);
+    MorphicRegistry.instance.register(child);
+    const tree = new MorphicTree(root);
+    const renderer = new Renderer(tree, document.getElementById('demo-root'));
+    renderer.render();
+    // Attach context menu, inspector, scripting console
+    new ContextMenu(renderer);
+    new Inspector(renderer);
+    new ScriptingConsole();
+  </script>
+</body>
+</html>
