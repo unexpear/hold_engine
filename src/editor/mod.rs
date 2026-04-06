@@ -130,7 +130,8 @@ impl SceneDocument {
                 name: format!("Entity{entity_id}"),
                 components: Vec::new(),
             });
-            self.entities.last_mut().expect("entity just pushed")
+            let idx = self.entities.len() - 1;
+            &mut self.entities[idx]
         };
 
         let component = if let Some(existing) = entity.component_mut(component) {
@@ -140,7 +141,8 @@ impl SceneDocument {
                 type_name: component.to_string(),
                 fields: Vec::new(),
             });
-            entity.components.last_mut().expect("component just pushed")
+            let idx = entity.components.len() - 1;
+            &mut entity.components[idx]
         };
 
         if let Some(existing_field) = component.fields.iter_mut().find(|f| f.name == field) {
