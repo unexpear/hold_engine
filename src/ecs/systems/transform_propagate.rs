@@ -6,28 +6,12 @@ pub struct TransformPropagateSystem;
 
 impl System for TransformPropagateSystem {
     fn update(&mut self, world: &mut World, _dt: f32) {
-        // Collect all entities that have a Transform component.
-        // We collect first so the borrow on `world` ends before we call `world.get`.
-        let with_transform: Vec<_> = world
-            .query::<Transform>()
-            .map(|(e, _)| e)
-            .collect();
-
-        // Filter down to roots: entities with Transform but no Parent.
-        let roots: Vec<_> = with_transform
-            .into_iter()
-            .filter(|&e| world.get::<Parent>(e).is_none())
-            .collect();
-
-        // Use an explicit stack to avoid recursion.
-        let mut stack: Vec<(crate::ecs::Entity, Mat4)> = roots
-            .into_iter()
-            .map(|e| {
-                let local = world.get::<Transform>(e)
-                    .map(|t| t.local_matrix())
-                    .unwrap_or(Mat4::IDENTITY);
-                (e, local)
-            })
+        // Root entities: have Transform but no Parent.
+        // query_without iterates the Transform storage and skips any entity
+        // that also has a Parent — no intermediate Vec needed for the filter.
+        let mut stack: Vec<(crate::ecs::Entity, Mat4)> = world
+            .query_without::<Transform, Parent>()
+            .map(|(e, t)| (e, t.local_matrix()))
             .collect();
 
         while let Some((entity, world_matrix)) = stack.pop() {

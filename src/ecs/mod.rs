@@ -1,4 +1,5 @@
 mod entity;
+pub mod query;
 mod sparse_set;
 mod system;
 pub mod components;
@@ -12,6 +13,7 @@ pub use components::{ActiveCamera, ActiveDialogue, Camera, CameraMode, Children,
                      Quest, QuestId, QuestLog, QuestObjective, QuestState,
                      Stats, Transform};
 pub use entity::Entity;
+pub use query::{Query2, Query2Mut, Query3, Query3Mut};
 pub use schedule::SystemSchedule;
 pub use system::System;
 pub use systems::{CameraSystem, TransformPropagateSystem};
