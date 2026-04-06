@@ -71,3 +71,6 @@ The project goal is a zero-dependency, Windows-only Rust engine + editor platfor
 - No external crates.
 - Windows-only runtime path.
 - Typed ECS remains source of truth; editor stores editable projections, not divergent runtime state.
+
+## Related
+- Project charter: `docs/PROJECT_CHARTER.md`
