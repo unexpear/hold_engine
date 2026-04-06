@@ -23,6 +23,7 @@ pub mod window {
 
     impl Window {
         pub fn new(_title: &str, width: u32, height: u32) -> Self {
+            eprintln!("[platform] Window is only implemented on Windows; using non-Windows shim");
             Self { hwnd: std::ptr::null_mut(), width, height }
         }
 
@@ -31,8 +32,8 @@ pub mod window {
         pub fn width(&self) -> u32 { self.width }
         pub fn height(&self) -> u32 { self.height }
 
-        /// Non-Windows shim: immediately returns `false` so `Engine::run`
-        /// exits cleanly if called on unsupported platforms.
+        /// Non-Windows shim: returns `false` immediately so `Engine::run`
+        /// exits without attempting unsupported Win32 message pumping.
         pub fn poll_events(&mut self, input: &mut InputState) -> bool {
             input.begin_frame();
             false

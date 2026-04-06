@@ -17,6 +17,7 @@ pub struct SoftwareRenderer {
 
 impl SoftwareRenderer {
     pub fn new(hwnd: *mut c_void, width: u32, height: u32) -> Self {
+        eprintln!("[renderer] SoftwareRenderer uses a non-Windows no-op shim");
         Self { width, height, _window: hwnd }
     }
 
