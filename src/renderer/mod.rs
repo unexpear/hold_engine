@@ -1,10 +1,19 @@
+#[cfg(target_os = "windows")]
 pub mod software;
+#[cfg(not(target_os = "windows"))]
+#[path = "software_stub.rs"]
+pub mod software;
+#[cfg(target_os = "windows")]
 pub mod opengl;
+#[cfg(target_os = "windows")]
 pub mod opengl_shaders;
+#[cfg(target_os = "windows")]
 pub mod vulkan;
 
 pub use software::SoftwareRenderer;
+#[cfg(target_os = "windows")]
 pub use opengl::OpenGLRenderer;
+#[cfg(target_os = "windows")]
 pub use vulkan::VulkanRenderer;
 
 // ── Color ─────────────────────────────────────────────────────────────────────

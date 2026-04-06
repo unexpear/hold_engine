@@ -5,7 +5,7 @@ use crate::ecs::{SystemSchedule, World};
 use crate::input::InputState;
 use crate::platform::Window;
 use crate::renderer::Renderer;
-use crate::platform::ffi::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use std::time::Instant;
 
 
 /// Trait for structured game applications.
@@ -69,19 +69,12 @@ impl Engine {
     {
         self.window.show();
 
-        let mut freq = 0i64;
-        let mut last = 0i64;
-        unsafe {
-            QueryPerformanceFrequency(&mut freq);
-            QueryPerformanceCounter(&mut last);
-        }
+        let mut last = Instant::now();
 
         loop {
             // ── Timing ────────────────────────────────────────────────────
-            let mut now = 0i64;
-            unsafe { QueryPerformanceCounter(&mut now); }
-            let dt = ((now - last) as f64 / freq as f64) as f32;
-            let dt = dt.min(0.1); // cap at 100 ms to avoid spiral of death
+            let now = Instant::now();
+            let dt = now.duration_since(last).as_secs_f32().min(0.1); // cap at 100 ms to avoid spiral of death
             last = now;
 
             // Update window title with FPS — throttled to once per second.
