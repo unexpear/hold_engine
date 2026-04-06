@@ -2,6 +2,9 @@
 //! This module is runtime-agnostic and keeps a dynamic editing layer on top
 //! of typed ECS/runtime data.
 
+use std::fs;
+use std::path::Path;
+
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -374,9 +377,62 @@ fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
     Ok(InspectorField { name, value })
 }
 
+#[derive(Debug)]
+pub enum EditorIoError {
+    Io(std::io::Error),
+    Parse(&'static str),
+}
+
+impl std::fmt::Display for EditorIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "editor io error: {e}"),
+            Self::Parse(msg) => write!(f, "editor parse error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for EditorIoError {}
+
+/// Save a project document to its `.hproj` location.
+pub fn save_project(project: &Project) -> Result<(), EditorIoError> {
+    fs::write(project.project_file(), project.to_hproj_string()).map_err(EditorIoError::Io)
+}
+
+/// Load a project document from a `.hproj` file path.
+pub fn load_project<P: AsRef<Path>>(path: P) -> Result<Project, EditorIoError> {
+    let src = fs::read_to_string(path).map_err(EditorIoError::Io)?;
+    Project::from_hproj_str(&src).map_err(EditorIoError::Parse)
+}
+
+/// Save an editor scene document to a file path.
+pub fn save_scene_doc<P: AsRef<Path>>(path: P, scene: &SceneDocument) -> Result<(), EditorIoError> {
+    fs::write(path, scene.to_hscene_string()).map_err(EditorIoError::Io)
+}
+
+/// Load an editor scene document from a file path.
+pub fn load_scene_doc<P: AsRef<Path>>(path: P) -> Result<SceneDocument, EditorIoError> {
+    let src = fs::read_to_string(path).map_err(EditorIoError::Io)?;
+    SceneDocument::from_hscene_str(&src).map_err(EditorIoError::Parse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(suffix: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!(
+            "{}/hold_engine_editor_tests_{}_{}",
+            std::env::temp_dir().display(),
+            suffix,
+            nanos
+        )
+    }
 
     #[test]
     fn project_layout_paths() {
@@ -484,5 +540,43 @@ mod tests {
         let text = doc.to_hscene_string();
         let parsed = SceneDocument::from_hscene_str(&text).unwrap();
         assert_eq!(parsed, doc);
+    }
+
+    #[test]
+    fn project_file_io_roundtrip() {
+        let root = unique_test_dir("project");
+        fs::create_dir_all(&root).unwrap();
+
+        let project = Project::new("demo", root.clone());
+        save_project(&project).unwrap();
+
+        let loaded = load_project(project.project_file()).unwrap();
+        assert_eq!(loaded, project);
+    }
+
+    #[test]
+    fn scene_document_file_io_roundtrip() {
+        let root = unique_test_dir("scene");
+        fs::create_dir_all(&root).unwrap();
+        let scene_path = format!("{root}/level01.hscene");
+
+        let doc = SceneDocument {
+            name: "Level01".into(),
+            entities: vec![EditorEntity {
+                id: 1,
+                name: "Player".into(),
+                components: vec![InspectorComponent {
+                    type_name: "Stats".into(),
+                    fields: vec![InspectorField {
+                        name: "health".into(),
+                        value: InspectorValue::Number(100.0),
+                    }],
+                }],
+            }],
+        };
+
+        save_scene_doc(&scene_path, &doc).unwrap();
+        let loaded = load_scene_doc(&scene_path).unwrap();
+        assert_eq!(loaded, doc);
     }
 }

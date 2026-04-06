@@ -41,5 +41,6 @@ pub use skybox::Skybox;
 pub use terrain::{Heightmap, Terrain, TerrainChunk};
 
 pub use editor::{
-    EditorEntity, InspectorComponent, InspectorField, InspectorValue, Project, SceneDocument,
+    load_project, load_scene_doc, save_project, save_scene_doc, EditorEntity, EditorIoError,
+    InspectorComponent, InspectorField, InspectorValue, Project, SceneDocument,
 };
