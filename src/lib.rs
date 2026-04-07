@@ -18,10 +18,11 @@ pub use assets::{AssetStore, GpuMesh, GpuTexture, Handle, MeshData, ObjError, Te
               load_bmp, load_tga, load_texture};
 pub use ecs::{ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Children,
               DialogueChoice, DialogueNode, DialogueTree, DirectionalLight, Entity,
-              GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,
+              GlobalTransform, Inventory, ItemId, ItemStack, Mut, NodeId, Parent,
               Quest, QuestId, QuestLog, QuestObjective, QuestState,
               Query2, Query2Mut, Query3, Query3Mut,
-              Stats, System, SystemSchedule, Transform, TransformPropagateSystem, World};
+              Stats, System, SystemAccess, SystemSchedule, Transform,
+              TransformPropagateSystem, World};
 pub use engine::{App, Engine};
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};
 pub use input::{InputState, MouseButton};

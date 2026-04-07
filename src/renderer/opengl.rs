@@ -6,6 +6,7 @@
 //! Supports uploading meshes (VAO/VBO/EBO), compiling GLSL shaders,
 //! uploading RGBA8 textures, and issuing indexed draw calls.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use crate::assets::mesh::Vertex;
@@ -323,16 +324,60 @@ impl GlFns {
     }
 }
 
+// ── Uniform location cache ────────────────────────────────────────────────────
+
+/// Cached `glGetUniformLocation` results for a single shader program.
+///
+/// Location queries are GL calls that can be slow; caching them per-program
+/// reduces per-draw overhead to a single `HashMap` lookup.
+///
+/// A location of `-1` means the uniform is not active in that program (the
+/// driver optimises it away or the shader doesn't use it) — callers must skip
+/// setting it.
+#[derive(Clone, Copy)]
+struct CachedUniforms {
+    mvp:       GLint,
+    model:     GLint,
+    color:     GLint,
+    light_dir: GLint,
+    view_pos:  GLint,
+    ambient:   GLint,
+    texture:   GLint,
+}
+
+impl CachedUniforms {
+    /// Query all known uniform locations from `program`.
+    unsafe fn load(gl: &GlFns, program: GLuint) -> Self {
+        macro_rules! loc {
+            ($name:expr) => {
+                (gl.get_uniform_location)(program, $name.as_ptr() as *const GLchar)
+            };
+        }
+        Self {
+            mvp:       loc!(b"u_mvp\0"),
+            model:     loc!(b"u_model\0"),
+            color:     loc!(b"u_color\0"),
+            light_dir: loc!(b"u_light_dir\0"),
+            view_pos:  loc!(b"u_view_pos\0"),
+            ambient:   loc!(b"u_ambient\0"),
+            texture:   loc!(b"u_texture\0"),
+        }
+    }
+}
+
 // ── OpenGLRenderer ────────────────────────────────────────────────────────────
 
 pub struct OpenGLRenderer {
-    hwnd:     HWND,
-    hdc:      HDC,
-    hglrc:    HGLRC,
-    opengl32: HMODULE,
-    width:    u32,
-    height:   u32,
-    gl:       GlFns,
+    hwnd:          HWND,
+    hdc:           HDC,
+    hglrc:         HGLRC,
+    opengl32:      HMODULE,
+    width:         u32,
+    height:        u32,
+    gl:            GlFns,
+    /// Uniform location cache keyed by GL program ID.
+    /// Populated lazily on first draw with each program.
+    uniform_cache: HashMap<u32, CachedUniforms>,
 }
 
 impl OpenGLRenderer {
@@ -379,7 +424,7 @@ impl OpenGLRenderer {
             // Enable depth test by default.
             (gl.enable)(GL_DEPTH_TEST);
 
-            Self { hwnd, hdc, hglrc, opengl32, width, height, gl }
+            Self { hwnd, hdc, hglrc, opengl32, width, height, gl, uniform_cache: HashMap::new() }
         }
     }
 
@@ -571,20 +616,26 @@ impl OpenGLRenderer {
         }
     }
 
-    // ── Draw call ─────────────────────────────────────────────────────────────
+    // ── Draw calls ────────────────────────────────────────────────────────────
 
     /// Draw a VAO with a compiled shader program.
+    ///
+    /// Uniform locations are looked up once per program and cached, so
+    /// repeated draws with the same program pay only a single `HashMap`
+    /// lookup instead of a GL call per uniform.
     ///
     /// # Parameters
     /// - `vao`         — vertex array object ID (from [`Self::upload_mesh_raw`])
     /// - `index_count` — number of indices to draw
     /// - `program`     — GL shader program ID (from [`Self::compile_shader_program`])
     /// - `mvp`         — combined model-view-projection matrix
-    /// - `model`       — model matrix (used for world-space normal transform)
-    /// - `color`       — RGBA base colour (maps to `u_color`)
-    /// - `light_dir`   — world-space light direction (maps to `u_light_dir`; ignored by flat shader)
+    /// - `model`       — model matrix (world-space normal transform)
+    /// - `color`       — RGBA base colour / tint
+    /// - `light_dir`   — world-space directional light direction
+    /// - `view_pos`    — camera world-space position (for specular; ignored by flat shaders)
+    /// - `ambient`     — ambient light intensity 0..1 (ignored by flat shaders)
     pub fn draw_vao(
-        &self,
+        &mut self,
         vao:         u32,
         index_count: u32,
         program:     u32,
@@ -592,64 +643,66 @@ impl OpenGLRenderer {
         model:       &Mat4,
         color:       Color,
         light_dir:   Vec3,
+        view_pos:    Vec3,
+        ambient:     f32,
     ) {
+        let uniforms = self.cached_uniforms(program);
         unsafe {
             let gl = &self.gl;
-
             (gl.use_program)(program);
 
-            // Helper: resolve a uniform location from a null-terminated byte string.
-            // Returns -1 if the uniform is not active (e.g. flat shader ignores u_model).
-            macro_rules! loc {
-                ($name:expr) => {{
-                    let cname: &[u8] = $name;
-                    (gl.get_uniform_location)(program, cname.as_ptr() as *const GLchar)
-                }};
+            if uniforms.mvp >= 0 {
+                (gl.uniform_matrix4fv)(uniforms.mvp, 1, GL_FALSE,
+                    mvp.cols.as_ptr() as *const GLfloat);
             }
-
-            // u_mvp
-            let loc_mvp = loc!(b"u_mvp\0");
-            if loc_mvp >= 0 {
-                // Mat4 cols is [[f32;4];4] — that's 16 contiguous f32s in column-major order,
-                // which is exactly what glUniformMatrix4fv expects.
-                (gl.uniform_matrix4fv)(
-                    loc_mvp, 1, GL_FALSE,
-                    mvp.cols.as_ptr() as *const GLfloat,
-                );
+            if uniforms.model >= 0 {
+                (gl.uniform_matrix4fv)(uniforms.model, 1, GL_FALSE,
+                    model.cols.as_ptr() as *const GLfloat);
             }
-
-            // u_model
-            let loc_model = loc!(b"u_model\0");
-            if loc_model >= 0 {
-                (gl.uniform_matrix4fv)(
-                    loc_model, 1, GL_FALSE,
-                    model.cols.as_ptr() as *const GLfloat,
-                );
+            if uniforms.color >= 0 {
+                (gl.uniform4fv)(uniforms.color, 1,
+                    [color.r, color.g, color.b, color.a].as_ptr());
             }
-
-            // u_color
-            let loc_color = loc!(b"u_color\0");
-            if loc_color >= 0 {
-                let rgba = [color.r, color.g, color.b, color.a];
-                (gl.uniform4fv)(loc_color, 1, rgba.as_ptr());
+            if uniforms.light_dir >= 0 {
+                (gl.uniform3fv)(uniforms.light_dir, 1,
+                    [light_dir.x, light_dir.y, light_dir.z].as_ptr());
             }
-
-            // u_light_dir
-            let loc_light = loc!(b"u_light_dir\0");
-            if loc_light >= 0 {
-                let dir = [light_dir.x, light_dir.y, light_dir.z];
-                (gl.uniform3fv)(loc_light, 1, dir.as_ptr());
+            if uniforms.view_pos >= 0 {
+                (gl.uniform3fv)(uniforms.view_pos, 1,
+                    [view_pos.x, view_pos.y, view_pos.z].as_ptr());
+            }
+            if uniforms.ambient >= 0 {
+                // glUniform1f — load the function pointer type inline
+                type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
+                let ptr = load_gl_fn("glUniform1f", self.opengl32);
+                if !ptr.is_null() {
+                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(ptr);
+                    f(uniforms.ambient, ambient);
+                }
             }
 
             (gl.bind_vertex_array)(vao);
-            (gl.draw_elements)(
-                GL_TRIANGLES,
-                index_count as GLsizei,
-                GL_UNSIGNED_INT,
-                null_mut(),
-            );
+            (gl.draw_elements)(GL_TRIANGLES, index_count as GLsizei,
+                GL_UNSIGNED_INT, null_mut());
             (gl.bind_vertex_array)(0);
         }
+    }
+
+    // ── Uniform cache helper ──────────────────────────────────────────────────
+
+    /// Return (and lazily populate) the cached uniform locations for `program`.
+    fn cached_uniforms(&mut self, program: u32) -> CachedUniforms {
+        if !self.uniform_cache.contains_key(&program) {
+            let cached = unsafe { CachedUniforms::load(&self.gl, program) };
+            self.uniform_cache.insert(program, cached);
+        }
+        self.uniform_cache[&program]
+    }
+
+    /// Evict a program's cached uniform locations.  Call after
+    /// [`delete_program`](Self::delete_program) so stale entries don't linger.
+    pub fn invalidate_uniform_cache(&mut self, program: u32) {
+        self.uniform_cache.remove(&program);
     }
 
     // ── Cleanup helpers ───────────────────────────────────────────────────────
@@ -687,12 +740,12 @@ impl OpenGLRenderer {
         GpuTexture { id, width: tex.width, height: tex.height }
     }
 
-    /// Draw a textured mesh.
+    /// Draw a textured mesh with Blinn-Phong lighting.
     ///
-    /// Binds `texture` to texture unit 0, sets the `u_texture` sampler uniform,
-    /// then issues the same draw call as [`Self::draw_vao`].
+    /// Binds `texture` to unit 0, sets `u_texture`, then sets the same
+    /// uniforms as [`draw_vao`](Self::draw_vao).  Uniform locations are cached.
     pub fn draw_mesh_textured(
-        &self,
+        &mut self,
         mesh:      &GpuMesh,
         texture:   &GpuTexture,
         program:   u32,
@@ -700,68 +753,50 @@ impl OpenGLRenderer {
         model:     &Mat4,
         color:     Color,
         light_dir: Vec3,
+        view_pos:  Vec3,
+        ambient:   f32,
     ) {
+        let uniforms = self.cached_uniforms(program);
         unsafe {
             let gl = &self.gl;
-
             (gl.use_program)(program);
 
-            // Bind texture to unit 0.
             (gl.active_texture)(GL_TEXTURE0);
             (gl.bind_texture)(GL_TEXTURE_2D, texture.id);
 
-            macro_rules! loc {
-                ($name:expr) => {{
-                    let cname: &[u8] = $name;
-                    (gl.get_uniform_location)(program, cname.as_ptr() as *const GLchar)
-                }};
+            if uniforms.texture >= 0  { (gl.uniform1i)(uniforms.texture, 0); }
+            if uniforms.mvp >= 0 {
+                (gl.uniform_matrix4fv)(uniforms.mvp, 1, GL_FALSE,
+                    mvp.cols.as_ptr() as *const GLfloat);
             }
-
-            // u_texture = sampler unit 0
-            let loc_tex = loc!(b"u_texture\0");
-            if loc_tex >= 0 {
-                (gl.uniform1i)(loc_tex, 0);
+            if uniforms.model >= 0 {
+                (gl.uniform_matrix4fv)(uniforms.model, 1, GL_FALSE,
+                    model.cols.as_ptr() as *const GLfloat);
             }
-
-            // u_mvp
-            let loc_mvp = loc!(b"u_mvp\0");
-            if loc_mvp >= 0 {
-                (gl.uniform_matrix4fv)(
-                    loc_mvp, 1, GL_FALSE,
-                    mvp.cols.as_ptr() as *const GLfloat,
-                );
+            if uniforms.color >= 0 {
+                (gl.uniform4fv)(uniforms.color, 1,
+                    [color.r, color.g, color.b, color.a].as_ptr());
             }
-
-            // u_model
-            let loc_model = loc!(b"u_model\0");
-            if loc_model >= 0 {
-                (gl.uniform_matrix4fv)(
-                    loc_model, 1, GL_FALSE,
-                    model.cols.as_ptr() as *const GLfloat,
-                );
+            if uniforms.light_dir >= 0 {
+                (gl.uniform3fv)(uniforms.light_dir, 1,
+                    [light_dir.x, light_dir.y, light_dir.z].as_ptr());
             }
-
-            // u_color (tint)
-            let loc_color = loc!(b"u_color\0");
-            if loc_color >= 0 {
-                let rgba = [color.r, color.g, color.b, color.a];
-                (gl.uniform4fv)(loc_color, 1, rgba.as_ptr());
+            if uniforms.view_pos >= 0 {
+                (gl.uniform3fv)(uniforms.view_pos, 1,
+                    [view_pos.x, view_pos.y, view_pos.z].as_ptr());
             }
-
-            // u_light_dir
-            let loc_light = loc!(b"u_light_dir\0");
-            if loc_light >= 0 {
-                let dir = [light_dir.x, light_dir.y, light_dir.z];
-                (gl.uniform3fv)(loc_light, 1, dir.as_ptr());
+            if uniforms.ambient >= 0 {
+                type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
+                let ptr = load_gl_fn("glUniform1f", self.opengl32);
+                if !ptr.is_null() {
+                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(ptr);
+                    f(uniforms.ambient, ambient);
+                }
             }
 
             (gl.bind_vertex_array)(mesh.vao);
-            (gl.draw_elements)(
-                GL_TRIANGLES,
-                mesh.index_count as GLsizei,
-                GL_UNSIGNED_INT,
-                null_mut(),
-            );
+            (gl.draw_elements)(GL_TRIANGLES, mesh.index_count as GLsizei,
+                GL_UNSIGNED_INT, null_mut());
             (gl.bind_vertex_array)(0);
             (gl.bind_texture)(GL_TEXTURE_2D, 0);
         }
@@ -783,8 +818,9 @@ impl OpenGLRenderer {
         }
     }
 
-    /// Delete a compiled shader program.
-    pub fn delete_program(&self, program: u32) {
+    /// Delete a compiled shader program and evict its cached uniform locations.
+    pub fn delete_program(&mut self, program: u32) {
+        self.uniform_cache.remove(&program);
         unsafe { (self.gl.delete_program)(program); }
     }
 
@@ -806,17 +842,22 @@ impl OpenGLRenderer {
         }
     }
 
-    /// Draw a GpuMesh with a compiled shader program.
+    /// Draw a [`GpuMesh`] with a compiled shader program.
+    ///
+    /// Forwards all parameters to [`draw_vao`](Self::draw_vao).
     pub fn draw_mesh(
-        &self,
+        &mut self,
         mesh:      &GpuMesh,
         program:   u32,
         mvp:       &Mat4,
         model:     &Mat4,
         color:     Color,
         light_dir: Vec3,
+        view_pos:  Vec3,
+        ambient:   f32,
     ) {
-        self.draw_vao(mesh.vao, mesh.index_count, program, mvp, model, color, light_dir);
+        self.draw_vao(mesh.vao, mesh.index_count, program,
+                      mvp, model, color, light_dir, view_pos, ambient);
     }
 
     /// Free all GPU resources owned by a GpuMesh.
