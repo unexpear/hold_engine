@@ -234,12 +234,12 @@ impl Mat4 {
         let a33 =  a*fk_gj - b*ek_gi + cc*ej_fi;
 
         // Inverse = adjugate / det.  adj[r][c] = cofactor(c,r).
-        // In col-major storage: result.cols[col][row] = cofactor(row, col) * s.
+        // In col-major storage: result.cols[col][row] = cofactor(col, row) * s.
         Some(Self { cols: [
-            [a00*s, a10*s, a20*s, a30*s],
-            [a01*s, a11*s, a21*s, a31*s],
-            [a02*s, a12*s, a22*s, a32*s],
-            [a03*s, a13*s, a23*s, a33*s],
+            [a00*s, a01*s, a02*s, a03*s],
+            [a10*s, a11*s, a12*s, a13*s],
+            [a20*s, a21*s, a22*s, a23*s],
+            [a30*s, a31*s, a32*s, a33*s],
         ]})
     }
 
@@ -279,5 +279,47 @@ impl std::fmt::Display for Mat4 {
             writeln!(f, "]")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mat4;
+
+    fn assert_approx_identity(m: Mat4, eps: f32) {
+        for col in 0..4 {
+            for row in 0..4 {
+                let expected = if col == row { 1.0 } else { 0.0 };
+                assert!(
+                    (m.cols[col][row] - expected).abs() <= eps,
+                    "m[{}, {}] = {}, expected {}",
+                    col,
+                    row,
+                    m.cols[col][row],
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_round_trips_perspective_gl() {
+        let m = Mat4::perspective_gl(1.0, 16.0 / 9.0, 0.1, 100.0);
+        let inv = m.inverse().expect("matrix should be invertible");
+        assert_approx_identity(m * inv, 1e-3);
+    }
+
+    #[test]
+    fn inverse_round_trips_general_matrix() {
+        let m = Mat4 {
+            cols: [
+                [1.0, 2.0, 3.0, 0.0],
+                [0.5, 1.25, -0.75, 2.0],
+                [4.0, -1.0, 0.5, 1.0],
+                [2.0, 3.0, -2.0, 1.0],
+            ],
+        };
+        let inv = m.inverse().expect("matrix should be invertible");
+        assert_approx_identity(m * inv, 1e-3);
     }
 }
