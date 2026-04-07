@@ -1,21 +1,20 @@
 //! RPG-style stats component.
 
-/// Core stats that any entity with "health" or combat properties can carry.
+/// Core stats that any entity with health or combat properties can carry.
 ///
-/// All values are plain f32 so they play nicely with the existing
-32 so they play nicely with the existing
-/// ECS pipeline (no trait bounds beyond 'static).
+/// All values are plain `f32` so they work with the existing ECS pipeline
+/// without additional trait bounds.
 pub struct Stats {
-    pub health:     f32,
+    pub health: f32,
     pub health_max: f32,
-    pub mana:       f32,
-    pub mana_max:   f32,
-    pub attack:     f32,
-    pub defense:    f32,
-    pub speed:      f32,
-    pub level:      u32,
-    pub xp:         u32,
-    pub xp_next:    u32,
+    pub mana: f32,
+    pub mana_max: f32,
+    pub attack: f32,
+    pub defense: f32,
+    pub speed: f32,
+    pub level: u32,
+    pub xp: u32,
+    pub xp_next: u32,
 }
 
 impl Stats {
@@ -35,21 +34,60 @@ impl Stats {
         }
     }
 
-    /// Simple constructor: health-only entity (e.g. a destructible barrel).
-    /// Spend mana.  Returns true if there was enough.
-    /// Award XP.  Returns true if a level-up occurred.
-        let mut leveled = false;
+    /// Simple constructor for health-only entities (for example, destructibles).
+    pub fn from_health(health: f32) -> Self {
+        Self::new(health, 0.0, 0.0, 0.0, 0.0)
+    }
 
+    /// Returns whether the entity is alive.
+    pub fn alive(&self) -> bool {
+        self.health > 0.0
+    }
+
+    /// Apply damage (reduced by defense and floored at 0). Returns actual damage dealt.
+    pub fn damage(&mut self, raw: f32) -> f32 {
+        let reduced = (raw - self.defense).max(0.0);
+        let dealt = reduced.min(self.health);
+        self.health -= dealt;
+        dealt
+    }
+
+    /// Heal, capped at max health. Returns actual healing applied.
+    pub fn heal(&mut self, amount: f32) -> f32 {
+        let room = self.health_max - self.health;
+        let healed = amount.min(room).max(0.0);
+        self.health += healed;
+        healed
+    }
+
+    /// Spend mana. Returns true if there was enough.
+    pub fn spend_mana(&mut self, cost: f32) -> bool {
+        if self.mana >= cost {
+            self.mana -= cost;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Award XP. Returns true if at least one level-up occurred.
+    pub fn award_xp(&mut self, amount: u32) -> bool {
+        self.xp = self.xp.saturating_add(amount);
+
+        let mut leveled = false;
         while self.xp >= self.xp_next {
+            self.xp -= self.xp_next;
+            self.level = self.level.saturating_add(1);
+            self.xp_next = self.xp_next.saturating_add(self.xp_next / 2); // 1.5x per level
             leveled = true;
+        }
 
         leveled
     }
 }
 
-
-        self.xp = self.xp.saturating_add(amount);
-            self.xp_next = self.xp_next.saturating_add(self.xp_next / 2); // 1.5x per level
+#[cfg(test)]
+mod tests {
     use super::Stats;
 
     #[test]
@@ -86,46 +124,5 @@ impl Stats {
         assert_eq!(stats.level, 3);
         assert_eq!(stats.xp, 10);
         assert_eq!(stats.xp_next, 225);
-    pub fn alive(&self) -> bool {
-        self.health > 0.0
-    }
-
-    /// Apply damage, floored at 0.  Returns actual damage dealt.
-    pub fn damage(&mut self, raw: f32) -> f32 {
-        let reduced = (raw - self.defense).max(0.0);
-        let dealt = reduced.min(self.health);
-        self.health -= dealt;
-        dealt
-    }
-
-    /// Heal, capped at max.  Returns actual healing.
-    pub fn heal(&mut self, amount: f32) -> f32 {
-        let room = self.health_max - self.health;
-        let healed = amount.min(room);
-        self.health += healed;
-        healed
-    }
-
-    /// Spend mana.  Returns 	rue if there was enough.
-    pub fn spend_mana(&mut self, cost: f32) -> bool {
-        if self.mana >= cost {
-            self.mana -= cost;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Award XP.  Returns 	rue if a level-up occurred.
-    pub fn award_xp(&mut self, amount: u32) -> bool {
-        self.xp += amount;
-        if self.xp >= self.xp_next {
-            self.xp -= self.xp_next;
-            self.level += 1;
-            self.xp_next = self.xp_next + self.xp_next / 2; // 1.5x per level
-            true
-        } else {
-            false
-        }
     }
 }
