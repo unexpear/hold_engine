@@ -5,6 +5,11 @@
 use std::fs;
 use std::path::Path;
 
+use crate::ecs::components::{Camera, DirectionalLight, Stats, Transform};
+use crate::ecs::{Entity, World};
+use crate::math::{Quat, Vec3};
+use crate::renderer::Color;
+
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -458,6 +463,228 @@ pub fn load_scene_doc<P: AsRef<Path>>(path: P) -> Result<SceneDocument, EditorIo
     SceneDocument::from_hscene_str(&src).map_err(EditorIoError::Parse)
 }
 
+#[derive(Debug)]
+pub enum EditorApplyError {
+    MissingField {
+        entity_id: u64,
+        component: String,
+        field: &'static str,
+    },
+    InvalidFieldType {
+        entity_id: u64,
+        component: String,
+        field: &'static str,
+    },
+}
+
+impl std::fmt::Display for EditorApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField {
+                entity_id,
+                component,
+                field,
+            } => write!(
+                f,
+                "editor apply error: entity {} missing {}.{}",
+                entity_id, component, field
+            ),
+            Self::InvalidFieldType {
+                entity_id,
+                component,
+                field,
+            } => write!(
+                f,
+                "editor apply error: entity {} invalid type for {}.{}",
+                entity_id, component, field
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EditorApplyError {}
+
+#[derive(Debug)]
+pub enum EditorPipelineError {
+    Io(EditorIoError),
+    Apply(EditorApplyError),
+}
+
+impl std::fmt::Display for EditorPipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "{e}"),
+            Self::Apply(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for EditorPipelineError {}
+
+/// Load `.hproj` and `.hscene`, then apply scene entities/components into a world.
+pub fn load_and_apply_scene_from_project<P: AsRef<Path>>(
+    project_path: P,
+    scene_file_name: &str,
+    world: &mut World,
+) -> Result<Vec<(u64, Entity)>, EditorPipelineError> {
+    let project = load_project(project_path).map_err(EditorPipelineError::Io)?;
+    let scene_path = format!("{}/{}", project.scenes_dir, scene_file_name);
+    let scene = load_scene_doc(scene_path).map_err(EditorPipelineError::Io)?;
+    apply_scene_document_to_world(world, &scene).map_err(EditorPipelineError::Apply)
+}
+
+/// Apply a dynamic editor scene document to typed ECS components in `world`.
+///
+/// Returns a vector that maps editor entity ids to spawned ECS entities.
+pub fn apply_scene_document_to_world(
+    world: &mut World,
+    scene: &SceneDocument,
+) -> Result<Vec<(u64, Entity)>, EditorApplyError> {
+    let mut map = Vec::with_capacity(scene.entities.len());
+
+    for editor_entity in &scene.entities {
+        let entity = world.spawn();
+        map.push((editor_entity.id, entity));
+
+        for component in &editor_entity.components {
+            match component.type_name.as_str() {
+                "Transform" => {
+                    let position = required_vec3(
+                        editor_entity.id,
+                        component,
+                        component.type_name.as_str(),
+                        "position",
+                    )?;
+                    let scale = optional_vec3(component, "scale").unwrap_or(Vec3::ONE);
+                    let rotation = optional_vec3(component, "rotation_euler_deg")
+                        .map(|e| Quat::from_euler_xyz(e.x.to_radians(), e.y.to_radians(), e.z.to_radians()))
+                        .unwrap_or(Quat::IDENTITY);
+                    world.add_component(
+                        entity,
+                        Transform {
+                            position,
+                            rotation,
+                            scale,
+                        },
+                    );
+                }
+                "Stats" => {
+                    let health = required_number(
+                        editor_entity.id,
+                        component,
+                        component.type_name.as_str(),
+                        "health",
+                    )?;
+                    let mana = optional_number(component, "mana").unwrap_or(0.0);
+                    let attack = optional_number(component, "attack").unwrap_or(0.0);
+                    let defense = optional_number(component, "defense").unwrap_or(0.0);
+                    let speed = optional_number(component, "speed").unwrap_or(0.0);
+
+                    let mut stats = Stats::new(health, mana, attack, defense, speed);
+                    stats.health_max = optional_number(component, "health_max").unwrap_or(stats.health_max);
+                    stats.mana_max = optional_number(component, "mana_max").unwrap_or(stats.mana_max);
+                    stats.level = optional_number(component, "level").unwrap_or(stats.level as f32).max(1.0) as u32;
+                    stats.xp = optional_number(component, "xp").unwrap_or(0.0).max(0.0) as u32;
+                    stats.xp_next = optional_number(component, "xp_next").unwrap_or(100.0).max(1.0) as u32;
+                    world.add_component(entity, stats);
+                }
+                "DirectionalLight" | "Light" => {
+                    let direction = required_vec3(
+                        editor_entity.id,
+                        component,
+                        component.type_name.as_str(),
+                        "direction",
+                    )?;
+                    let color = optional_vec3(component, "color")
+                        .map(|v| Color::rgb(v.x, v.y, v.z))
+                        .unwrap_or(Color::WHITE);
+                    let intensity = optional_number(component, "intensity").unwrap_or(1.0);
+                    let ambient = optional_number(component, "ambient").unwrap_or(0.15);
+                    world.add_component(
+                        entity,
+                        DirectionalLight {
+                            direction: direction.normalize(),
+                            color,
+                            intensity,
+                            ambient,
+                        },
+                    );
+                }
+                "Camera" => {
+                    let fov = optional_number(component, "fov_deg").unwrap_or(60.0);
+                    let near = optional_number(component, "near").unwrap_or(0.1);
+                    let far = optional_number(component, "far").unwrap_or(1000.0);
+                    let aspect = optional_number(component, "aspect").unwrap_or(16.0 / 9.0);
+                    world.add_component(entity, Camera::perspective(fov, aspect, near, far));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(map)
+}
+
+fn required_number(
+    entity_id: u64,
+    component: &InspectorComponent,
+    component_name: &str,
+    field: &'static str,
+) -> Result<f32, EditorApplyError> {
+    let value = component
+        .get_field(field)
+        .ok_or(EditorApplyError::MissingField {
+            entity_id,
+            component: component_name.to_string(),
+            field,
+        })?;
+    match value {
+        InspectorValue::Number(v) => Ok(*v),
+        _ => Err(EditorApplyError::InvalidFieldType {
+            entity_id,
+            component: component_name.to_string(),
+            field,
+        }),
+    }
+}
+
+fn required_vec3(
+    entity_id: u64,
+    component: &InspectorComponent,
+    component_name: &str,
+    field: &'static str,
+) -> Result<Vec3, EditorApplyError> {
+    let value = component
+        .get_field(field)
+        .ok_or(EditorApplyError::MissingField {
+            entity_id,
+            component: component_name.to_string(),
+            field,
+        })?;
+    match value {
+        InspectorValue::Vec3(v) => Ok(Vec3::new(v[0], v[1], v[2])),
+        _ => Err(EditorApplyError::InvalidFieldType {
+            entity_id,
+            component: component_name.to_string(),
+            field,
+        }),
+    }
+}
+
+fn optional_number(component: &InspectorComponent, field: &str) -> Option<f32> {
+    match component.get_field(field)? {
+        InspectorValue::Number(v) => Some(*v),
+        _ => None,
+    }
+}
+
+fn optional_vec3(component: &InspectorComponent, field: &str) -> Option<Vec3> {
+    match component.get_field(field)? {
+        InspectorValue::Vec3(v) => Some(Vec3::new(v[0], v[1], v[2])),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +879,96 @@ mod tests {
         let text = doc.to_hscene_string();
         let loaded = SceneDocument::from_hscene_str(&text).unwrap();
         assert_eq!(loaded, doc);
+    }
+
+    #[test]
+    fn apply_scene_document_to_world_maps_core_components() {
+        let scene = SceneDocument {
+            name: "Apply".into(),
+            entities: vec![EditorEntity {
+                id: 100,
+                name: "Player".into(),
+                components: vec![
+                    InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![
+                            InspectorField {
+                                name: "position".into(),
+                                value: InspectorValue::Vec3([1.0, 2.0, 3.0]),
+                            },
+                            InspectorField {
+                                name: "scale".into(),
+                                value: InspectorValue::Vec3([2.0, 2.0, 2.0]),
+                            },
+                        ],
+                    },
+                    InspectorComponent {
+                        type_name: "Stats".into(),
+                        fields: vec![InspectorField {
+                            name: "health".into(),
+                            value: InspectorValue::Number(120.0),
+                        }],
+                    },
+                ],
+            }],
+        };
+
+        let mut world = World::new();
+        let map = apply_scene_document_to_world(&mut world, &scene).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[0].0, 100);
+
+        let entity = map[0].1;
+        let t = world.get::<Transform>(entity).unwrap();
+        assert_eq!(t.position, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(t.scale, Vec3::new(2.0, 2.0, 2.0));
+
+        let stats = world.get::<Stats>(entity).unwrap();
+        assert_eq!(stats.health, 120.0);
+    }
+
+    #[test]
+    fn load_and_apply_scene_from_project_pipeline() {
+        let root = unique_test_dir("pipeline");
+        let scenes_dir = format!("{root}/scenes");
+        fs::create_dir_all(&scenes_dir).unwrap();
+
+        let project = Project::new("demo", root.clone());
+        save_project(&project).unwrap();
+
+        let scene = SceneDocument {
+            name: "Level01".into(),
+            entities: vec![EditorEntity {
+                id: 1,
+                name: "Cam".into(),
+                components: vec![
+                    InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([0.0, 1.0, 5.0]),
+                        }],
+                    },
+                    InspectorComponent {
+                        type_name: "Camera".into(),
+                        fields: vec![InspectorField {
+                            name: "fov_deg".into(),
+                            value: InspectorValue::Number(75.0),
+                        }],
+                    },
+                ],
+            }],
+        };
+
+        let scene_file = "level01.hscene";
+        let scene_path = format!("{}/{}", project.scenes_dir, scene_file);
+        save_scene_doc(scene_path, &scene).unwrap();
+
+        let mut world = World::new();
+        let map = load_and_apply_scene_from_project(project.project_file(), scene_file, &mut world).unwrap();
+        assert_eq!(map.len(), 1);
+        let entity = map[0].1;
+        assert!(world.has_component::<Transform>(entity));
+        assert!(world.has_component::<Camera>(entity));
     }
 }
