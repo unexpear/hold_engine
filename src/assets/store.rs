@@ -70,6 +70,15 @@ impl AssetStore {
             .downcast_ref::<AssetPool<T>>()
     }
 
+    /// Mutable access to the underlying pool for `T`.
+    ///
+    /// Returns `None` if no assets of type `T` have been inserted yet.
+    pub fn pool_mut<T: 'static>(&mut self) -> Option<&mut AssetPool<T>> {
+        self.pools
+            .get_mut(&TypeId::of::<T>())?
+            .downcast_mut::<AssetPool<T>>()
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
