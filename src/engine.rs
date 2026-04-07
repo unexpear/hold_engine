@@ -97,6 +97,10 @@ impl Engine {
                 break;
             }
 
+            // Clear events from the previous frame so systems and the frame
+            // callback start each iteration with a clean slate.
+            self.world.events.clear_all();
+
             // ── ECS systems ───────────────────────────────────────────────
             self.schedule.run(&mut self.world, dt);
 
@@ -124,8 +128,4 @@ impl Engine {
             app.update(world, renderer, input, dt);
         });
     }
-
-
-    
-
 }

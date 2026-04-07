@@ -5,6 +5,7 @@ use super::change::Mut;
 use super::entity::Entity;
 use super::query::{Query2, Query2Mut, Query3, Query3Mut};
 use super::sparse_set::{SparseSet, SparseSetIter, SparseSetIterMut, SparseSetTickIter};
+use crate::events::EventBus;
 
 // ── EntityMeta ────────────────────────────────────────────────────────────────
 
@@ -39,10 +40,27 @@ impl<T: 'static> AnyStorage for SparseSet<T> {
 
 // ── World ─────────────────────────────────────────────────────────────────────
 
-/// The ECS world.  Owns all entity metadata and component storages.
+/// The ECS world.  Owns all entity metadata, component storages, and the
+/// frame event bus.
 ///
 /// Systems are **not** stored here; use [`super::schedule::SystemSchedule`]
 /// for that.
+///
+/// # Events
+///
+/// Every system receives `&mut World`, so they can freely emit and read events
+/// through [`World::events`]:
+///
+/// ```ignore
+/// // Emit:
+/// world.events.emit(DamageEvent { target: entity, amount: 10 });
+///
+/// // Read (same or later system in the same frame):
+/// for ev in world.events.read::<DamageEvent>() { … }
+/// ```
+///
+/// Events are cleared at the start of each frame by `Engine::run` (or
+/// wherever the main loop lives).
 ///
 /// # Ticks and change detection
 ///
@@ -58,6 +76,11 @@ pub struct World {
     free_list:    Vec<u32>,
     components:   HashMap<TypeId, Box<dyn AnyStorage>>,
     current_tick: u32,
+    /// Frame-scoped event bus.
+    ///
+    /// Cleared automatically at the start of each frame by `Engine::run`.
+    /// Systems and frame callbacks may both emit and read events freely.
+    pub events: EventBus,
 }
 
 impl World {
@@ -67,6 +90,7 @@ impl World {
             free_list:    Vec::new(),
             components:   HashMap::new(),
             current_tick: 0,
+            events:       EventBus::new(),
         }
     }
 
