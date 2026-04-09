@@ -53,15 +53,6 @@ pub struct GpuTexture {
 }
 
 
-/// GPU-side texture handle returned by the OpenGL renderer after uploading a
-/// [`Texture`].
-///
-/// Stores the OpenGL texture ID.  Created via
-/// [`OpenGLRenderer::upload_texture()`](crate::renderer::opengl::OpenGLRenderer::upload_texture)
-/// and freed via
-/// [`OpenGLRenderer::free_texture()`](crate::renderer::opengl::OpenGLRenderer::free_texture).
-
-
 
 // ---------------------------------------------------------------------------
 // Shader

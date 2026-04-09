@@ -50,7 +50,7 @@ impl MeshData {
     /// ```no_run
     /// use hold::MeshData;
     ///
-    /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn main() -> Result<(), hold::ObjError> {
     /// let mesh = MeshData::from_obj("assets/models/sword.obj")?;
     /// println!("{} vertices, {} triangles", mesh.vertex_count(), mesh.triangle_count());
     /// # Ok(())
@@ -67,6 +67,169 @@ impl MeshData {
 
     pub fn vertex_count(&self)   -> usize { self.vertices.len() }
     pub fn triangle_count(&self) -> usize { self.indices.len() / 3 }
+
+    // ── Procedural primitives ─────────────────────────────────────────────────
+
+    /// Unit cube centred at the origin (half-extents 0.5 on each axis).
+    /// Each face has its own 4 vertices so normals are hard/flat per face.
+    /// Produces 24 vertices and 36 indices.
+    pub fn cube() -> Self {
+        // (corners[4], normal)  — corners in CCW order viewed from outside.
+        type FaceDef = ([([f32; 3], [f32; 2]); 4], [f32; 3]);
+        let faces: [FaceDef; 6] = [
+            // +Z
+            ([
+                ([-0.5, -0.5,  0.5], [0.0, 0.0]),
+                ([ 0.5, -0.5,  0.5], [1.0, 0.0]),
+                ([ 0.5,  0.5,  0.5], [1.0, 1.0]),
+                ([-0.5,  0.5,  0.5], [0.0, 1.0]),
+            ], [0.0, 0.0, 1.0]),
+            // -Z
+            ([
+                ([ 0.5, -0.5, -0.5], [0.0, 0.0]),
+                ([-0.5, -0.5, -0.5], [1.0, 0.0]),
+                ([-0.5,  0.5, -0.5], [1.0, 1.0]),
+                ([ 0.5,  0.5, -0.5], [0.0, 1.0]),
+            ], [0.0, 0.0, -1.0]),
+            // +X
+            ([
+                ([ 0.5, -0.5,  0.5], [0.0, 0.0]),
+                ([ 0.5, -0.5, -0.5], [1.0, 0.0]),
+                ([ 0.5,  0.5, -0.5], [1.0, 1.0]),
+                ([ 0.5,  0.5,  0.5], [0.0, 1.0]),
+            ], [1.0, 0.0, 0.0]),
+            // -X
+            ([
+                ([-0.5, -0.5, -0.5], [0.0, 0.0]),
+                ([-0.5, -0.5,  0.5], [1.0, 0.0]),
+                ([-0.5,  0.5,  0.5], [1.0, 1.0]),
+                ([-0.5,  0.5, -0.5], [0.0, 1.0]),
+            ], [-1.0, 0.0, 0.0]),
+            // +Y
+            ([
+                ([-0.5,  0.5,  0.5], [0.0, 0.0]),
+                ([ 0.5,  0.5,  0.5], [1.0, 0.0]),
+                ([ 0.5,  0.5, -0.5], [1.0, 1.0]),
+                ([-0.5,  0.5, -0.5], [0.0, 1.0]),
+            ], [0.0, 1.0, 0.0]),
+            // -Y
+            ([
+                ([-0.5, -0.5, -0.5], [0.0, 0.0]),
+                ([ 0.5, -0.5, -0.5], [1.0, 0.0]),
+                ([ 0.5, -0.5,  0.5], [1.0, 1.0]),
+                ([-0.5, -0.5,  0.5], [0.0, 1.0]),
+            ], [0.0, -1.0, 0.0]),
+        ];
+
+        let mut vertices = Vec::with_capacity(24);
+        let mut indices  = Vec::with_capacity(36);
+
+        for (corners, normal) in &faces {
+            let base = vertices.len() as u32;
+            for &(pos, uv) in corners {
+                vertices.push(Vertex { pos, normal: *normal, uv });
+            }
+            // Two triangles per quad (CCW): 0-1-2 and 0-2-3.
+            indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// Flat XZ-plane grid centred at the origin with unit total size.
+    ///
+    /// `cols` × `rows` quads, each subdivided into two CCW triangles.
+    /// Normals all point up (+Y). Minimum 1×1 quad.
+    pub fn plane(cols: u32, rows: u32) -> Self {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let nx   = (cols + 1) as usize;
+        let nz   = (rows + 1) as usize;
+
+        let mut vertices = Vec::with_capacity(nx * nz);
+        let mut indices  = Vec::with_capacity((cols * rows * 6) as usize);
+
+        for zi in 0..nz {
+            for xi in 0..nx {
+                let u = xi as f32 / cols as f32;
+                let v = zi as f32 / rows as f32;
+                vertices.push(Vertex {
+                    pos:    [u - 0.5, 0.0, v - 0.5],
+                    normal: [0.0, 1.0, 0.0],
+                    uv:     [u, 1.0 - v],
+                });
+            }
+        }
+
+        for zi in 0..rows as usize {
+            for xi in 0..cols as usize {
+                let tl = (zi * nx + xi) as u32;
+                let tr = tl + 1;
+                let bl = tl + nx as u32;
+                let br = bl + 1;
+                // CCW triangles facing up: (tl,bl,br) and (tl,br,tr).
+                indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+            }
+        }
+
+        Self { vertices, indices }
+    }
+
+    /// UV sphere of radius 1 centred at the origin.
+    ///
+    /// `stacks` horizontal bands (latitude), `slices` vertical divisions
+    /// (longitude). Minimums are 2 stacks and 3 slices.
+    /// Poles collapse to single triangles, middle quads to two triangles.
+    pub fn sphere(stacks: u32, slices: u32) -> Self {
+        use std::f32::consts::PI;
+
+        let stacks = stacks.max(2);
+        let slices = slices.max(3);
+        let row    = slices + 1; // vertices per latitude ring (seam duplicated)
+
+        let mut vertices = Vec::with_capacity(((stacks + 1) * row) as usize);
+        let mut indices  = Vec::with_capacity((stacks * slices * 6) as usize);
+
+        for si in 0..=stacks {
+            let phi = PI * si as f32 / stacks as f32; // 0 (top) → π (bottom)
+            let y   = phi.cos();
+            let r   = phi.sin();
+
+            for li in 0..=slices {
+                let theta = 2.0 * PI * li as f32 / slices as f32;
+                let x = r * theta.cos();
+                let z = r * theta.sin();
+                let u = li as f32 / slices as f32;
+                let v = si as f32 / stacks as f32;
+
+                vertices.push(Vertex {
+                    pos:    [x, y, z],
+                    normal: [x, y, z], // unit sphere: pos == normal
+                    uv:     [u, 1.0 - v],
+                });
+            }
+        }
+
+        for si in 0..stacks {
+            for li in 0..slices {
+                let tl = si * row + li;
+                let tr = tl + 1;
+                let bl = tl + row;
+                let br = bl + 1;
+
+                // At top pole (si==0): tl==tr, emit only bottom triangle.
+                if si != 0 {
+                    indices.extend_from_slice(&[tl, tr, br]);
+                }
+                // At bottom pole (si==stacks-1): bl==br, emit only top triangle.
+                if si != stacks - 1 {
+                    indices.extend_from_slice(&[tl, br, bl]);
+                }
+            }
+        }
+
+        Self { vertices, indices }
+    }
 }
 
 // ── ObjError ──────────────────────────────────────────────────────────────────

@@ -1,9 +1,11 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
+use super::change::Mut;
 use super::entity::Entity;
 use super::query::{Query2, Query2Mut, Query3, Query3Mut};
-use super::sparse_set::{SparseSet, SparseSetIter, SparseSetIterMut};
+use super::sparse_set::{SparseSet, SparseSetIter, SparseSetIterMut, SparseSetTickIter};
+use crate::events::EventBus;
 
 // ── EntityMeta ────────────────────────────────────────────────────────────────
 
@@ -38,23 +40,78 @@ impl<T: 'static> AnyStorage for SparseSet<T> {
 
 // ── World ─────────────────────────────────────────────────────────────────────
 
-/// The ECS world.  Owns all entity metadata and component storages.
+/// The ECS world.  Owns all entity metadata, component storages, and the
+/// frame event bus.
 ///
 /// Systems are **not** stored here; use [`super::schedule::SystemSchedule`]
 /// for that.
+///
+/// # Events
+///
+/// Every system receives `&mut World`, so they can freely emit and read events
+/// through [`World::events`]:
+///
+/// ```ignore
+/// // Emit:
+/// world.events.emit(DamageEvent { target: entity, amount: 10 });
+///
+/// // Read (same or later system in the same frame):
+/// for ev in world.events.read::<DamageEvent>() { … }
+/// ```
+///
+/// Events are cleared at the start of each frame by `Engine::run` (or
+/// wherever the main loop lives).
+///
+/// # Ticks and change detection
+///
+/// The world maintains a monotonic `current_tick` counter.  Every time a
+/// component is inserted (via [`add_component`](Self::add_component)) or
+/// written through a [`Mut`] guard (via
+/// [`get_tracked_mut`](Self::get_tracked_mut)), the component's
+/// `changed_tick` is updated.  Use [`query_added_since`](Self::query_added_since) and
+/// [`query_changed_since`](Self::query_changed_since) to iterate only the
+/// components that changed since a system's last run.
 pub struct World {
-    entities:   Vec<EntityMeta>,
-    free_list:  Vec<u32>,
-    components: HashMap<TypeId, Box<dyn AnyStorage>>,
+    entities:     Vec<EntityMeta>,
+    free_list:    Vec<u32>,
+    components:   HashMap<TypeId, Box<dyn AnyStorage>>,
+    current_tick: u32,
+    /// Frame-scoped event bus.
+    ///
+    /// Cleared automatically at the start of each frame by `Engine::run`.
+    /// Systems and frame callbacks may both emit and read events freely.
+    pub events: EventBus,
 }
 
 impl World {
     pub fn new() -> Self {
         Self {
-            entities:   Vec::new(),
-            free_list:  Vec::new(),
-            components: HashMap::new(),
+            entities:     Vec::new(),
+            free_list:    Vec::new(),
+            components:   HashMap::new(),
+            current_tick: 0,
+            events:       EventBus::new(),
         }
+    }
+
+    // ── Tick ──────────────────────────────────────────────────────────────────
+
+    /// The world's current frame tick.
+    ///
+    /// Store this at the *end* of a system's `update` call and pass it to
+    /// [`query_added_since`](Self::query_added_since) or
+    /// [`query_changed_since`](Self::query_changed_since) next frame to see
+    /// only the changes that happened since the system last ran.
+    #[inline]
+    pub fn tick(&self) -> u32 {
+        self.current_tick
+    }
+
+    /// Advance the tick by one.  Called automatically by
+    /// [`super::schedule::SystemSchedule::run`] at the beginning of every frame.
+    #[inline]
+    pub fn advance_tick(&mut self) {
+        self.current_tick = self.current_tick.saturating_add(1);
     }
 
     // ── Entity lifecycle ──────────────────────────────────────────────────────
@@ -63,12 +120,8 @@ impl World {
     pub fn spawn(&mut self) -> Entity {
         if let Some(index) = self.free_list.pop() {
             let meta = &mut self.entities[index as usize];
-            // Bump generation so old handles become invalid.
-            // Saturate at u32::MAX — slot becomes permanently dead rather than
-            // silently wrapping and aliasing a generation-0 handle.
             meta.generation = meta.generation.saturating_add(1);
             if meta.generation == u32::MAX {
-                // Slot exhausted; leave it dead and fall through to allocating a new one.
                 self.entities.push(EntityMeta { generation: 0, alive: true });
                 let new_index = (self.entities.len() - 1) as u32;
                 return Entity::new(new_index, 0);
@@ -82,12 +135,11 @@ impl World {
         }
     }
 
-    /// Destroy an entity: checks the generation so stale handles are ignored.
+    /// Destroy an entity and remove all its components.
     pub fn despawn(&mut self, entity: Entity) {
         if !self.is_alive(entity) {
             return;
         }
-        // Remove from every component storage.
         for storage in self.components.values_mut() {
             storage.remove_entity(entity);
         }
@@ -107,11 +159,14 @@ impl World {
     // ── Components ────────────────────────────────────────────────────────────
 
     /// Attach (or replace) a component on an entity.
+    ///
+    /// Sets `added_tick` on first attach; updates `changed_tick` on every call.
     pub fn add_component<C: 'static>(&mut self, entity: Entity, component: C) {
         if !self.is_alive(entity) {
             return;
         }
-        self.storage_mut::<C>().insert(entity, component);
+        let tick = self.current_tick;
+        self.storage_mut::<C>().insert(entity, component, tick);
     }
 
     /// Detach a component from an entity (no-op if absent).
@@ -136,6 +191,9 @@ impl World {
     }
 
     /// Exclusive reference to a component, with generation check.
+    ///
+    /// Does **not** update `changed_tick` — use
+    /// [`get_tracked_mut`](Self::get_tracked_mut) if you need change detection.
     pub fn get_mut<C: 'static>(&mut self, entity: Entity) -> Option<&mut C> {
         if !self.is_alive(entity) {
             return None;
@@ -143,7 +201,20 @@ impl World {
         self.storage_mut::<C>().get_mut(entity)
     }
 
-    // ── Queries ───────────────────────────────────────────────────────────────
+    /// Exclusive reference to a component wrapped in a [`Mut`] guard.
+    ///
+    /// The guard's `changed_tick` is updated to `current_tick` only when the
+    /// value is accessed through [`DerefMut`](std::ops::DerefMut), making it
+    /// safe to hold a guard without marking the component as changed.
+    pub fn get_tracked_mut<C: 'static>(&mut self, entity: Entity) -> Option<Mut<'_, C>> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        let tick = self.current_tick;
+        self.storage_mut::<C>().get_tracked_mut(entity, tick)
+    }
+
+    // ── Single-component queries ──────────────────────────────────────────────
 
     /// Iterate every entity that has component `C`.
     ///
@@ -164,20 +235,55 @@ impl World {
         }
     }
 
-    /// Mutable variant of [`query`].
+    /// Mutable variant of [`query`](Self::query).
     pub fn query_mut<C: 'static>(&mut self) -> SparseSetIterMut<'_, C> {
         self.storage_mut::<C>().iter_mut()
+    }
+
+    // ── Change-detection queries ──────────────────────────────────────────────
+
+    /// Iterate components of type `C` that were **added** (first attached) after
+    /// tick `since`.
+    ///
+    /// ```ignore
+    /// // React only to newly spawned enemies.
+    /// for (entity, enemy) in world.query_added_since::<Enemy>(self.last_tick) {
+    ///     // first-time initialisation...
+    /// }
+    /// self.last_tick = world.tick();
+    /// ```
+    pub fn query_added_since<C: 'static>(&self, since: u32) -> SparseSetTickIter<'_, C> {
+        match self.storage_ref::<C>() {
+            Some(set) => set.iter_added_since(since),
+            None      => SparseSetTickIter::empty(),
+        }
+    }
+
+    /// Iterate components of type `C` that were **changed** (inserted or written
+    /// through a [`Mut`] guard) after tick `since`.
+    ///
+    /// ```ignore
+    /// for (entity, transform) in world.query_changed_since::<Transform>(self.last_tick) {
+    ///     // recompute something that depends on the transform...
+    /// }
+    /// self.last_tick = world.tick();
+    /// ```
+    pub fn query_changed_since<C: 'static>(&self, since: u32) -> SparseSetTickIter<'_, C> {
+        match self.storage_ref::<C>() {
+            Some(set) => set.iter_changed_since(since),
+            None      => SparseSetTickIter::empty(),
+        }
     }
 
     // ── Multi-component queries ───────────────────────────────────────────────
 
     /// Borrow two component storages immutably for joint iteration.
     ///
-    /// Returns `None` if either type has no storage yet (no entity carries it).
+    /// Returns `None` if either type has no storage yet.
     ///
     /// ```ignore
     /// if let Some(q) = world.query2::<Transform, Camera>() {
-    ///     for (entity, transform, camera) in q.iter() { ... }
+    ///     for (entity, transform, camera) in q.iter() { … }
     /// }
     /// ```
     pub fn query2<A: 'static, B: 'static>(&self) -> Option<Query2<'_, A, B>> {
@@ -187,8 +293,6 @@ impl World {
     }
 
     /// Borrow three component storages immutably for joint iteration.
-    ///
-    /// Returns `None` if any of the three types has no storage yet.
     pub fn query3<A: 'static, B: 'static, C: 'static>(&self) -> Option<Query3<'_, A, B, C>> {
         let a = self.storage_ref::<A>()?;
         let b = self.storage_ref::<B>()?;
@@ -201,8 +305,7 @@ impl World {
     /// Returns `None` if either storage is absent.
     ///
     /// # Panics
-    /// Panics if `A` and `B` are the same type — a type cannot be borrowed
-    /// mutably and immutably at the same time.
+    /// Panics if `A` and `B` are the same type.
     ///
     /// ```ignore
     /// if let Some(mut q) = world.query2_mut::<Transform, Velocity>() {
@@ -216,17 +319,6 @@ impl World {
             TypeId::of::<A>() != TypeId::of::<B>(),
             "query2_mut: A and B must be distinct component types"
         );
-
-        // We need &mut SparseSet<A> and &SparseSet<B> simultaneously.
-        // Since they live under different TypeId keys they are distinct heap
-        // allocations (each Box<dyn AnyStorage> is its own object).
-        // We acquire raw pointers sequentially — each HashMap borrow ends at
-        // the semicolon — then reconstruct typed references.
-        //
-        // SAFETY: a_ptr and b_ptr point to non-overlapping memory (different
-        // TypeIds → different HashMap entries → different Box allocations).
-        // The returned Query2Mut is lifetime-bound to `&mut self`, preventing
-        // the World from being accessed while the query lives.
         let a_ptr = self.components
             .get_mut(&TypeId::of::<A>())?
             .as_any_mut()
@@ -239,6 +331,8 @@ impl World {
             .downcast_ref::<SparseSet<B>>()?
             as *const SparseSet<B>;
 
+        // SAFETY: a_ptr and b_ptr point to non-overlapping allocations (different
+        // TypeIds → different HashMap entries → different Box objects on the heap).
         Some(Query2Mut {
             a: unsafe { &mut *a_ptr },
             b: unsafe { &*b_ptr },
@@ -246,8 +340,6 @@ impl World {
     }
 
     /// Borrow `A` mutably and `B`, `C` immutably for joint iteration.
-    ///
-    /// Returns `None` if any storage is absent.
     ///
     /// # Panics
     /// Panics if any two of `A`, `B`, `C` are the same type.
@@ -262,8 +354,6 @@ impl World {
             "query3_mut: A, B, and C must all be distinct component types"
         );
 
-        // Same safety argument as query2_mut — three distinct TypeIds mean
-        // three non-overlapping Box allocations.
         let a_ptr = self.components
             .get_mut(&a_tid)?
             .as_any_mut()
@@ -282,6 +372,7 @@ impl World {
             .downcast_ref::<SparseSet<C>>()?
             as *const SparseSet<C>;
 
+        // SAFETY: three distinct TypeIds → three non-overlapping allocations.
         Some(Query3Mut {
             a: unsafe { &mut *a_ptr },
             b: unsafe { &*b_ptr },
@@ -294,8 +385,7 @@ impl World {
     /// Iterate entities that have `A` and **also** carry `B` (without reading `B`).
     ///
     /// ```ignore
-    /// // All entities that have both a Transform and an ActiveCamera marker.
-    /// for (entity, transform) in world.query_with::<Transform, ActiveCamera>() { ... }
+    /// for (entity, transform) in world.query_with::<Transform, ActiveCamera>() { … }
     /// ```
     pub fn query_with<A: 'static, B: 'static>(
         &self,
@@ -309,8 +399,7 @@ impl World {
     /// Iterate entities that have `A` but do **not** carry `B`.
     ///
     /// ```ignore
-    /// // Root entities: have Transform but no Parent.
-    /// for (entity, transform) in world.query_without::<Transform, Parent>() { ... }
+    /// for (entity, transform) in world.query_without::<Transform, Parent>() { … }
     /// ```
     pub fn query_without<A: 'static, B: 'static>(
         &self,
@@ -329,14 +418,12 @@ impl World {
         if child == parent || !self.is_alive(child) || !self.is_alive(parent) {
             return;
         }
-        // Remove from old parent if any.
         if let Some(old_parent) = self.get::<Parent>(child).map(|p| p.entity) {
             if let Some(children) = self.get_mut::<Children>(old_parent) {
                 children.list.retain(|&e| e != child);
             }
         }
         self.add_component(child, Parent { entity: parent });
-        // Add child to new parent's Children (or create it).
         let has_children = self.get::<Children>(parent).is_some();
         if has_children {
             if let Some(children) = self.get_mut::<Children>(parent) {
@@ -360,7 +447,6 @@ impl World {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    /// Get or create the `SparseSet<C>` for component type `C`.
     fn storage_mut<C: 'static>(&mut self) -> &mut SparseSet<C> {
         let entry = self.components
             .entry(TypeId::of::<C>())
@@ -372,11 +458,8 @@ impl World {
             .expect("component storage downcast should match its TypeId")
     }
 
-    /// Read-only access to `SparseSet<C>`, or `None` if no component of that
-    /// type has ever been registered.
     fn storage_ref<C: 'static>(&self) -> Option<&SparseSet<C>> {
         let entry = self.components.get(&TypeId::of::<C>())?;
-
         entry.as_any().downcast_ref::<SparseSet<C>>()
     }
 }

@@ -1,3 +1,5 @@
+pub mod access;
+pub mod change;
 mod entity;
 pub mod query;
 mod sparse_set;
@@ -7,6 +9,8 @@ pub mod schedule;
 pub mod systems;
 pub mod world;
 
+pub use access::SystemAccess;
+pub use change::Mut;
 pub use components::{ActiveCamera, ActiveDialogue, Camera, CameraMode, Children,
                      DialogueChoice, DialogueNode, DialogueTree, DirectionalLight,
                      GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,

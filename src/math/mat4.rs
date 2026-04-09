@@ -181,6 +181,68 @@ impl Mat4 {
         Vec3::new(self.cols[3][0], self.cols[3][1], self.cols[3][2])
     }
 
+    /// General 4×4 matrix inverse via cofactor expansion.
+    ///
+    /// Returns `None` if the matrix is singular (|det| < 1e-10).
+    /// For pure rotation+translation matrices prefer the faster [`Self::inverse_rigid`].
+    pub fn inverse(&self) -> Option<Self> {
+        let c = &self.cols; // c[col][row] — column-major
+
+        // Unpack rows for readability.
+        let (a, b, cc, d)  = (c[0][0], c[1][0], c[2][0], c[3][0]);
+        let (e, f, g, h)   = (c[0][1], c[1][1], c[2][1], c[3][1]);
+        let (i, j, k, l)   = (c[0][2], c[1][2], c[2][2], c[3][2]);
+        let (m, n, o, p)   = (c[0][3], c[1][3], c[2][3], c[3][3]);
+
+        // 18 reused 2×2 sub-determinants.
+        let kp_lo = k*p - l*o;  let jp_ln = j*p - l*n;
+        let jo_kn = j*o - k*n;  let ip_lm = i*p - l*m;
+        let io_km = i*o - k*m;  let in_jm = i*n - j*m;
+
+        let gp_ho = g*p - h*o;  let fp_hn = f*p - h*n;
+        let fo_gn = f*o - g*n;  let ep_hm = e*p - h*m;
+        let eo_gm = e*o - g*m;  let en_fm = e*n - f*m;
+
+        let gl_hk = g*l - h*k;  let fl_hj = f*l - h*j;
+        let fk_gj = f*k - g*j;  let el_hi = e*l - h*i;
+        let ek_gi = e*k - g*i;  let ej_fi = e*j - f*i;
+
+        // Cofactors of row 0 (used for determinant).
+        let a00 =  f*kp_lo - g*jp_ln + h*jo_kn;
+        let a01 = -(e*kp_lo - g*ip_lm + h*io_km);
+        let a02 =  e*jp_ln - f*ip_lm + h*in_jm;
+        let a03 = -(e*jo_kn - f*io_km + g*in_jm);
+
+        let det = a*a00 + b*a01 + cc*a02 + d*a03;
+        if det.abs() < 1e-10 { return None; }
+        let s = 1.0 / det;
+
+        // Remaining 12 cofactors.
+        let a10 = -(b*kp_lo - cc*jp_ln + d*jo_kn);
+        let a11 =  a*kp_lo - cc*ip_lm + d*io_km;
+        let a12 = -(a*jp_ln - b*ip_lm + d*in_jm);
+        let a13 =  a*jo_kn - b*io_km + cc*in_jm;
+
+        let a20 =  b*gp_ho - cc*fp_hn + d*fo_gn;
+        let a21 = -(a*gp_ho - cc*ep_hm + d*eo_gm);
+        let a22 =  a*fp_hn - b*ep_hm + d*en_fm;
+        let a23 = -(a*fo_gn - b*eo_gm + cc*en_fm);
+
+        let a30 = -(b*gl_hk - cc*fl_hj + d*fk_gj);
+        let a31 =  a*gl_hk - cc*el_hi + d*ek_gi;
+        let a32 = -(a*fl_hj - b*el_hi + d*ej_fi);
+        let a33 =  a*fk_gj - b*ek_gi + cc*ej_fi;
+
+        // Inverse = adjugate / det.  adj[r][c] = cofactor(c,r).
+        // In col-major storage: result.cols[col][row] = cofactor(col, row) * s.
+        Some(Self { cols: [
+            [a00*s, a01*s, a02*s, a03*s],
+            [a10*s, a11*s, a12*s, a13*s],
+            [a20*s, a21*s, a22*s, a23*s],
+            [a30*s, a31*s, a32*s, a33*s],
+        ]})
+    }
+
     pub fn transpose(&self) -> Self {
         let c = &self.cols;
         Self {
@@ -217,5 +279,47 @@ impl std::fmt::Display for Mat4 {
             writeln!(f, "]")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mat4;
+
+    fn assert_approx_identity(m: Mat4, eps: f32) {
+        for col in 0..4 {
+            for row in 0..4 {
+                let expected = if col == row { 1.0 } else { 0.0 };
+                assert!(
+                    (m.cols[col][row] - expected).abs() <= eps,
+                    "m[{}, {}] = {}, expected {}",
+                    col,
+                    row,
+                    m.cols[col][row],
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_round_trips_perspective_gl() {
+        let m = Mat4::perspective_gl(1.0, 16.0 / 9.0, 0.1, 100.0);
+        let inv = m.inverse().expect("matrix should be invertible");
+        assert_approx_identity(m * inv, 1e-3);
+    }
+
+    #[test]
+    fn inverse_round_trips_general_matrix() {
+        let m = Mat4 {
+            cols: [
+                [1.0, 2.0, 3.0, 0.0],
+                [0.5, 1.25, -0.75, 2.0],
+                [4.0, -1.0, 0.5, 1.0],
+                [2.0, 3.0, -2.0, 1.0],
+            ],
+        };
+        let inv = m.inverse().expect("matrix should be invertible");
+        assert_approx_identity(m * inv, 1e-3);
     }
 }

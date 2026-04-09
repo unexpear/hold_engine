@@ -123,4 +123,15 @@ impl<T> AssetPool<T> {
             }
         })
     }
+
+    /// Iterate mutably over all live assets together with their handles.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (Handle<T>, &mut T)> {
+        self.slots.iter_mut().enumerate().filter_map(|(i, slot)| {
+            let gen = slot.generation;
+            match &mut slot.state {
+                SlotState::Occupied(v) => Some((Handle::new(i as u32, gen), v)),
+                SlotState::Empty       => None,
+            }
+        })
+    }
 }

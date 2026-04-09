@@ -1,4 +1,4 @@
-use crate::ecs::{Entity, System, World};
+use crate::ecs::{Entity, System, SystemAccess, World};
 use crate::ecs::components::{ActiveCamera, Camera, CameraMode, GlobalTransform};
 use crate::math::{Vec3, Mat4};
 
@@ -10,6 +10,19 @@ use crate::math::{Vec3, Mat4};
 pub struct CameraSystem;
 
 impl System for CameraSystem {
+    fn access(&self) -> SystemAccess {
+        // Writes Camera; reads ActiveCamera, CameraMode, GlobalTransform.
+        // NOTE: GlobalTransform is also written by TransformPropagateSystem,
+        // so those two systems will always be placed in separate batches and
+        // run sequentially — CameraSystem must follow TransformPropagateSystem.
+        SystemAccess::new()
+            .write::<Camera>()
+            .read::<ActiveCamera>()
+            .read::<CameraMode>()
+            .read::<GlobalTransform>()
+    }
+
+
     fn update(&mut self, world: &mut World, _dt: f32) {
         // Collect active cameras together with their CameraMode in one pass,
         // avoiding a separate world.get::<CameraMode> call inside the loop.

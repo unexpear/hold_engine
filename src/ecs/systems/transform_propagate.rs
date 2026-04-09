@@ -1,10 +1,20 @@
-use crate::ecs::{System, World};
+use crate::ecs::{System, SystemAccess, World};
 use crate::ecs::components::{Children, GlobalTransform, Parent, Transform};
 use crate::math::Mat4;
 
 pub struct TransformPropagateSystem;
 
 impl System for TransformPropagateSystem {
+    fn access(&self) -> SystemAccess {
+        // Reads Transform, Children, Parent; writes GlobalTransform.
+        SystemAccess::new()
+            .write::<GlobalTransform>()
+            .read::<Transform>()
+            .read::<Children>()
+            .read::<Parent>()
+    }
+
+
     fn update(&mut self, world: &mut World, _dt: f32) {
         // Root entities: have Transform but no Parent.
         // query_without iterates the Transform storage and skips any entity

@@ -37,6 +37,11 @@ impl Vec3 {
     #[inline] pub fn min(self, o: Self) -> Self { Self::new(self.x.min(o.x), self.y.min(o.y), self.z.min(o.z)) }
     #[inline] pub fn max(self, o: Self) -> Self { Self::new(self.x.max(o.x), self.y.max(o.y), self.z.max(o.z)) }
     #[inline] pub fn reflect(self, normal: Self) -> Self { self - normal * (2.0 * self.dot(normal)) }
+    #[inline] pub fn distance(self, other: Self) -> f32 { (other - self).length() }
+    #[inline] pub fn distance_sq(self, other: Self) -> f32 { (other - self).length_sq() }
+    #[inline] pub fn clamp(self, min: Self, max: Self) -> Self {
+        Self::new(self.x.clamp(min.x, max.x), self.y.clamp(min.y, max.y), self.z.clamp(min.z, max.z))
+    }
 }
 
 impl Add for Vec3 { type Output = Self; fn add(self, r: Self) -> Self { Self::new(self.x+r.x, self.y+r.y, self.z+r.z) } }

@@ -22,9 +22,9 @@ pub use assets::{
 pub use ecs::{
     ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Children, DialogueChoice,
     DialogueNode, DialogueTree, DirectionalLight, Entity, GlobalTransform, Inventory, ItemId,
-    ItemStack, NodeId, Parent, Query2, Query2Mut, Query3, Query3Mut, Quest, QuestId, QuestLog,
-    QuestObjective, QuestState, Stats, System, SystemSchedule, Transform, TransformPropagateSystem,
-    World,
+    ItemStack, Mut, NodeId, Parent, Query2, Query2Mut, Query3, Query3Mut, Quest, QuestId,
+    QuestLog, QuestObjective, QuestState, Stats, System, SystemAccess, SystemSchedule, Transform,
+    TransformPropagateSystem, World,
 };
 pub use engine::{App, Engine};
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};
