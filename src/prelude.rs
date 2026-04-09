@@ -5,54 +5,93 @@
 //! ```
 
 pub use crate::{
-    // ECS core
-    Entity, World, System, SystemSchedule, SystemAccess,
-    Transform, GlobalTransform, TransformPropagateSystem,
-    Query2, Query2Mut, Query3, Query3Mut,
-    Mut,
+    // Engine core
+    engine::{App, Engine},
 
-    // Camera
-    Camera, CameraMode, CameraSystem, ActiveCamera,
+    // Input
+    input::{self, vk, InputState, MouseButton},
 
-    // Lighting
-    DirectionalLight,
-
-    // Rendering
-    renderer::{Color, Renderer},
-    renderer::software::SoftwareRenderer,
+    // Asset and scene loading
+    load_bmp,
+    load_scene,
+    load_texture,
+    load_tga,
+    parse_scene,
+    save_scene,
+    serialize_scene,
+    spawn_scene,
 
     // Math
     math::{Mat4, Quat, Vec2, Vec3, Vec4},
 
-    // Input
-    input::{self, InputState, MouseButton, vk},
+    // Rendering
+    renderer::software::SoftwareRenderer,
+    renderer::{Color, Renderer},
 
-    // Engine core
-    engine::{App, Engine},
-
-    // Assets
-    MeshData, Vertex, GpuMesh, GpuTexture, Handle, AssetStore,
-    Texture, TextureFormat, TexError,
-    load_bmp, load_tga, load_texture,
-
-    // Gameplay components
-    Stats, Inventory, ItemId, ItemStack,
-    DialogueTree, DialogueNode, DialogueChoice, ActiveDialogue, NodeId,
-    Quest, QuestId, QuestLog, QuestObjective, QuestState,
-
-    // World
-    Heightmap, Terrain, TerrainChunk,
-    LodTerrain, LodChunk, LodMesh, LodLevel, ChunkTier,
+    ActiveCamera,
+    ActiveDialogue,
+    AppExit,
+    AssetStore,
+    Camera,
+    CameraMode,
+    CameraSystem,
+    Children,
+    ChunkTier,
+    DialogueChoice,
+    DialogueNode,
+    DialogueTree,
+    DirectionalLight,
+    EditorEntity,
+    Entity,
+    EntityDef,
+    EventBus,
+    EventQueue,
+    GlobalTransform,
+    GpuMesh,
+    GpuTexture,
+    Handle,
+    Heightmap,
+    InspectorComponent,
+    InspectorField,
+    InspectorValue,
+    Inventory,
+    ItemId,
+    ItemStack,
+    LodChunk,
+    LodLevel,
+    LodMesh,
+    LodTerrain,
+    MeshData,
+    Mut,
+    NodeId,
+    Parent,
     PlayerController,
+    Project,
+    Query2,
+    Query2Mut,
+    Query3,
+    Query3Mut,
+    Quest,
+    QuestId,
+    QuestLog,
+    QuestObjective,
+    QuestState,
+    SceneData,
+    SceneDocument,
+    SceneError,
     Skybox,
-
-    // Events
-    EventBus, EventQueue, AppExit, WindowResized,
-
-    // Hierarchy
-    Parent, Children,
-
-    // Scene
-    SceneData, SceneError, EntityDef,
-    load_scene, parse_scene, spawn_scene, serialize_scene, save_scene,
+    Stats,
+    System,
+    SystemAccess,
+    SystemSchedule,
+    Terrain,
+    TerrainChunk,
+    TexError,
+    Texture,
+    TextureFormat,
+    Transform,
+    TransformPropagateSystem,
+    Vertex,
+    WindowResized,
+    World,
 };

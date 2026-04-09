@@ -219,6 +219,15 @@ impl World {
     /// Iterate every entity that has component `C`.
     ///
     /// Iterates the dense array directly — no Vec allocation, no indirection.
+    ///
+    /// **Multi-component queries:** for now, compose with `get`:
+    /// ```ignore
+    /// world.query::<A>()
+    ///      .filter_map(|(e, a)| world.get::<B>(e).map(|b| (e, a, b)))
+    /// ```
+    /// This is still O(|A|) with O(1) sparse lookups into `B`, but it does extra
+    /// random-access probing compared with dedicated join queries.
+    /// Archetype/table-style joins are the correct long-term fix.
     pub fn query<C: 'static>(&self) -> SparseSetIter<'_, C> {
         match self.storage_ref::<C>() {
             Some(set) => set.iter(),
