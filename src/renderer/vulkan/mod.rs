@@ -17,6 +17,7 @@ const FRAMES_IN_FLIGHT: usize = 2;
 
 // ── Vulkan function table ─────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 struct Vk {
     // Global
     get_instance_proc_addr: PFN_vkGetInstanceProcAddr,
@@ -212,7 +213,7 @@ impl VulkanRenderer {
             // ── Find queue families ───────────────────────────────────────
             let mut qf_count = 0u32;
             get_queue_family_props(physical_device, &mut qf_count, null_mut());
-            let mut qf_props = vec![unsafe {std::mem::zeroed::<VkQueueFamilyProperties>()}; qf_count as usize];
+            let mut qf_props = vec![std::mem::zeroed::<VkQueueFamilyProperties>(); qf_count as usize];
             get_queue_family_props(physical_device, &mut qf_count, qf_props.as_mut_ptr());
 
             let mut graphics_family = u32::MAX;

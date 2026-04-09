@@ -1,7 +1,6 @@
 //! CPU software renderer with a barycentric triangle rasterizer.
 //! Blits each frame to the window via Win32 StretchDIBits -- no GPU required.
 
-use std::ptr::null_mut;
 use crate::platform::ffi::*;
 use crate::math::{Mat4, Vec3, Vec4};
 use super::{Color, Renderer};
@@ -44,7 +43,7 @@ impl SoftwareRenderer {
         self.pixels[y as usize * self.width as usize + x as usize] = color.to_bgra_u32();
     }
 
-    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32, color: Color) {
+    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };

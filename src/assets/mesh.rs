@@ -48,9 +48,13 @@ impl MeshData {
     ///
     /// # Example
     /// ```no_run
+    /// use hold::MeshData;
+    ///
+    /// # fn main() -> Result<(), hold::ObjError> {
     /// let mesh = MeshData::from_obj("assets/models/sword.obj")?;
     /// println!("{} vertices, {} triangles", mesh.vertex_count(), mesh.triangle_count());
-    /// let gpu = renderer.upload_mesh(&mesh);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_obj<P: AsRef<Path>>(path: P) -> Result<Self, ObjError> {
         load_obj(path.as_ref())
