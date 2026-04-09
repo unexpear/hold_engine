@@ -2,46 +2,132 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Morphic Engine Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Morphic Engine Unified Prototype</title>
   <style>
-    body { background: #222; color: #eee; font-family: sans-serif; margin: 0; }
-    #demo-root { width: 100vw; height: 100vh; position: relative; }
+    :root {
+      color-scheme: dark;
+      --ink: #f6ecd9;
+      --muted: rgba(246, 236, 217, 0.72);
+      --panel: rgba(22, 25, 34, 0.78);
+      --panel-border: rgba(255, 255, 255, 0.14);
+      --accent: #f3b35f;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      --grid: rgba(255, 255, 255, 0.06);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top left, rgba(243, 179, 95, 0.22), transparent 32%),
+        radial-gradient(circle at top right, rgba(92, 157, 255, 0.18), transparent 28%),
+        linear-gradient(180deg, #11131a 0%, #161b25 42%, #0f1218 100%);
+      color: var(--ink);
+      font-family: "Aptos", "Trebuchet MS", "Segoe UI Variable Display", sans-serif;
+      letter-spacing: 0.01em;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+      background-size: 32px 32px;
+      pointer-events: none;
+      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 92%);
+    }
+
+    .hero {
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 5;
+      width: min(460px, calc(100vw - 36px));
+      padding: 18px 20px;
+      border: 1px solid var(--panel-border);
+      border-radius: 20px;
+      background: var(--panel);
+      backdrop-filter: blur(18px);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.5rem, 2vw, 2.2rem);
+      line-height: 1.05;
+    }
+
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .tips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .tip {
+      padding: 7px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    #demo-root {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    @media (max-width: 760px) {
+      .hero {
+        width: calc(100vw - 24px);
+        top: 12px;
+        left: 12px;
+        padding: 16px;
+      }
+    }
   </style>
 </head>
 <body>
+  <section class="hero">
+    <p class="eyebrow">Unified Branch</p>
+    <h1>Morphic Engine Browser Playground</h1>
+    <p>
+      This branch keeps the Rust engine intact and folds the browser prototype into
+      the repo as a standalone ES module demo. Click a morph to inspect it, right-click
+      for actions, and use the console for trusted local experiments.
+    </p>
+    <div class="tips">
+      <span class="tip">Click to select</span>
+      <span class="tip">Right-click for actions</span>
+      <span class="tip">Edit via console helpers</span>
+    </div>
+  </section>
   <div id="demo-root"></div>
-  <script type="module">
-    import { MorphicObject } from './src/MorphicObject.js';
-    import { MorphicTree } from './src/MorphicTree.js';
-    import { MorphicRegistry } from './src/MorphicRegistry.js';
-    import { Renderer } from './src/Renderer.js';
-    import { ContextMenu } from './src/ContextMenu.js';
-    import { Inspector } from './src/Inspector.js';
-    import { ScriptingConsole } from './src/ScriptingConsole.js';
-
-    // Demo setup
-    const root = new MorphicObject({
-      position: { x: 100, y: 100 },
-      size: { width: 300, height: 200 },
-      style: { background: '#4a90e2', color: '#fff', border: '2px solid #fff', borderRadius: '12px' }
-    });
-    root.name = 'RootMorph';
-    const child = new MorphicObject({
-      position: { x: 40, y: 40 },
-      size: { width: 120, height: 80 },
-      style: { background: '#e94e77', color: '#fff', border: '2px solid #fff', borderRadius: '8px' }
-    });
-    child.name = 'ChildMorph';
-    root.addChild(child);
-    MorphicRegistry.instance.register(root);
-    MorphicRegistry.instance.register(child);
-    const tree = new MorphicTree(root);
-    const renderer = new Renderer(tree, document.getElementById('demo-root'));
-    renderer.render();
-    // Attach context menu, inspector, scripting console
-    new ContextMenu(renderer);
-    new Inspector(renderer);
-    new ScriptingConsole();
-  </script>
+  <script type="module" src="./src/main.js"></script>
 </body>
 </html>

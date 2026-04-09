@@ -1,5 +1,16 @@
-This folder preserves the local browser-based Morphic prototype that existed
-outside the original `hold_engine` git repository.
+This folder contains the browser-side Morphic playground for the `hold_engine`
+repo.
 
-Files were copied into this branch so the work can be tracked without
-overwriting the Rust engine source on `main`.
+It is intentionally build-free: open `index.html` in a browser, or serve this
+folder from any static file server, and the ES module demo will boot without a
+Node or TypeScript toolchain.
+
+What is included here:
+
+- Click-to-select morphs with a live inspector
+- Right-click context actions to add, duplicate, or delete children
+- A trusted local scripting console with `registry`, `tree`, `renderer`, and
+  `MorphicObject` helpers
+
+This branch keeps the Rust engine source untouched while giving the repo a
+working browser prototype in the same tracked history.
