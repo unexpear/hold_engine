@@ -61,7 +61,7 @@ export class Renderer {
     title.style.letterSpacing = "0.03em";
 
     const summary = document.createElement("div");
-    summary.textContent = `${object.size.width} x ${object.size.height}  •  ${object.children.length} child${object.children.length === 1 ? "" : "ren"}`;
+    summary.textContent = `${object.size.width} x ${object.size.height} | ${object.children.length} child${object.children.length === 1 ? "" : "ren"}`;
     summary.style.fontSize = "0.78rem";
     summary.style.opacity = "0.72";
 
