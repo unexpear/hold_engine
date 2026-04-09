@@ -1,9 +1,9 @@
 //! CPU software renderer with a barycentric triangle rasterizer.
 //! Blits each frame to the window via Win32 StretchDIBits -- no GPU required.
 
-use super::{Color, Renderer};
-use crate::math::{Mat4, Vec3, Vec4};
 use crate::platform::ffi::*;
+use crate::math::{Mat4, Vec3, Vec4};
+use super::{Color, Renderer};
 
 pub struct SoftwareRenderer {
     hwnd: HWND,
