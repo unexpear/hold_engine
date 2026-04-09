@@ -4,6 +4,7 @@ import { MorphicObject } from "./MorphicObject.js";
 import { MorphicRegistry } from "./MorphicRegistry.js";
 import { MorphicTree } from "./MorphicTree.js";
 import { Renderer } from "./Renderer.js";
+import { exportTreeToScene, getSceneName, importSceneToTree } from "./SceneCodec.js";
 import { ScriptingConsole } from "./ScriptingConsole.js";
 
 function createScene() {
@@ -57,20 +58,45 @@ function createScene() {
 const container = document.getElementById("demo-root");
 const root = createScene();
 const tree = new MorphicTree(root);
+tree.sceneName = "Unified Branch Demo";
 
 MorphicRegistry.instance.reset();
 MorphicRegistry.instance.registerTree(root);
 
 const renderer = new Renderer(container, tree);
+window.morphic = {};
+
+function replaceTree(nextTree) {
+  MorphicRegistry.instance.reset();
+  MorphicRegistry.instance.registerTree(nextTree.root);
+  renderer.tree = nextTree;
+  window.morphic.tree = nextTree;
+  renderer.select(nextTree.root);
+}
+
+const scene = {
+  exportText() {
+    return exportTreeToScene(renderer.tree, {
+      sceneName: renderer.tree.sceneName || getSceneName(renderer.tree),
+    });
+  },
+  importText(source) {
+    const nextTree = importSceneToTree(source);
+    replaceTree(nextTree);
+    return nextTree;
+  },
+};
+
 new ContextMenu(renderer);
-new Inspector(renderer);
-new ScriptingConsole({ renderer, tree });
+new Inspector(renderer, scene);
+new ScriptingConsole({ renderer, sceneBridge: scene });
 
 renderer.select(root);
 
-window.morphic = {
+Object.assign(window.morphic, {
   renderer,
   tree,
   registry: MorphicRegistry.instance,
   MorphicObject,
-};
+  scene,
+});

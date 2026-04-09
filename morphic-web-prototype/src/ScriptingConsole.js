@@ -18,9 +18,9 @@ function formatResult(result) {
 }
 
 export class ScriptingConsole {
-  constructor({ renderer, tree }) {
+  constructor({ renderer, sceneBridge }) {
     this.renderer = renderer;
-    this.tree = tree;
+    this.sceneBridge = sceneBridge;
     this.panel = document.createElement("section");
     this.panel.style.position = "fixed";
     this.panel.style.left = "18px";
@@ -44,7 +44,7 @@ export class ScriptingConsole {
     title.style.textTransform = "uppercase";
 
     const note = document.createElement("p");
-    note.textContent = "Trusted local JS only. Available helpers: registry, tree, renderer, MorphicObject.";
+    note.textContent = "Trusted local JS only. Available helpers: registry, tree, renderer, MorphicObject, scene.";
     note.style.margin = "8px 0 10px";
     note.style.color = "rgba(246, 236, 217, 0.72)";
     note.style.fontSize = "0.88rem";
@@ -116,7 +116,8 @@ export class ScriptingConsole {
     }
 
     const registry = MorphicRegistry.instance;
-    const { renderer, tree } = this;
+    const { renderer, sceneBridge: scene } = this;
+    const tree = renderer.tree;
 
     try {
       let result;
@@ -127,16 +128,18 @@ export class ScriptingConsole {
           "tree",
           "renderer",
           "MorphicObject",
+          "scene",
           `"use strict"; return (${source});`,
-        )(registry, tree, renderer, MorphicObject);
+        )(registry, tree, renderer, MorphicObject, scene);
       } catch (expressionError) {
         result = new Function(
           "registry",
           "tree",
           "renderer",
           "MorphicObject",
+          "scene",
           `"use strict"; ${source}`,
-        )(registry, tree, renderer, MorphicObject);
+        )(registry, tree, renderer, MorphicObject, scene);
       }
 
       this.output.textContent = formatResult(result);

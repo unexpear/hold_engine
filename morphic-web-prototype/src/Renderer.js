@@ -17,6 +17,11 @@ export class Renderer {
 
   render() {
     this.container.replaceChildren(this.renderNode(this.tree.root));
+    window.dispatchEvent(
+      new CustomEvent("morphic-render", {
+        detail: { renderer: this, tree: this.tree },
+      }),
+    );
   }
 
   select(object) {
