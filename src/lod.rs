@@ -20,9 +20,9 @@ use crate::terrain::Heightmap;
 
 /// A single level within a [LodMesh].
 pub struct LodLevel {
-    pub verts:   Vec<Vec3>,
+    pub verts: Vec<Vec3>,
     pub normals: Vec<Vec3>,
-    pub faces:   Vec<[usize; 3]>,
+    pub faces: Vec<[usize; 3]>,
     /// Objects farther than this use the *next* (coarser) level.
     /// The last level has max_dist = f32::INFINITY.
     pub max_dist: f32,
@@ -68,17 +68,19 @@ const CHUNK_SIZE: f32 = 16.0;
 /// Chunks closer than the threshold use that resolution.
 /// The last tier covers everything beyond.
 const LOD_TIERS: [(usize, i32); 3] = [
-    (17, 1),   // 17x17  for distance <= 1 chunk
-    (9,  2),   // 9x9    for distance <= 2 chunks
-    (5,  999), // 5x5    for everything farther
+    (17, 1),  // 17x17  for distance <= 1 chunk
+    (9, 2),   // 9x9    for distance <= 2 chunks
+    (5, 999), // 5x5    for everything farther
 ];
+const MIN_SKIRT_DEPTH: f32 = 1.0;
+const SKIRT_DEPTH_SCALE: f32 = 1.5;
 
 /// A single resolution tier stored inside [LodChunk].
 pub struct ChunkTier {
-    pub verts:   Vec<Vec3>,
+    pub verts: Vec<Vec3>,
     pub normals: Vec<Vec3>,
-    pub faces:   Vec<[usize; 3]>,
-    pub res:     usize,
+    pub faces: Vec<[usize; 3]>,
+    pub res: usize,
 }
 
 /// Terrain chunk that carries multiple pre-built resolution tiers.
@@ -158,7 +160,80 @@ impl LodChunk {
             *n = n.normalize();
         }
 
-        ChunkTier { verts, normals, faces, res }
+        let skirt_depth = (hmap.amplitude.abs() * SKIRT_DEPTH_SCALE)
+            .max(step * 2.0)
+            .max(MIN_SKIRT_DEPTH);
+        append_skirt(
+            &mut verts,
+            &mut normals,
+            &mut faces,
+            &(0..res).collect::<Vec<_>>(),
+            skirt_depth,
+        );
+        append_skirt(
+            &mut verts,
+            &mut normals,
+            &mut faces,
+            &((0..res).map(|iz| iz * res + (res - 1)).collect::<Vec<_>>()),
+            skirt_depth,
+        );
+        append_skirt(
+            &mut verts,
+            &mut normals,
+            &mut faces,
+            &((0..res).map(|ix| (res - 1) * res + ix).collect::<Vec<_>>()),
+            skirt_depth,
+        );
+        append_skirt(
+            &mut verts,
+            &mut normals,
+            &mut faces,
+            &((0..res).map(|iz| iz * res).collect::<Vec<_>>()),
+            skirt_depth,
+        );
+
+        ChunkTier {
+            verts,
+            normals,
+            faces,
+            res,
+        }
+    }
+}
+
+fn append_skirt(
+    verts: &mut Vec<Vec3>,
+    normals: &mut Vec<Vec3>,
+    faces: &mut Vec<[usize; 3]>,
+    edge: &[usize],
+    depth: f32,
+) {
+    let mut top = Vec::with_capacity(edge.len());
+    let mut bottom = Vec::with_capacity(edge.len());
+
+    for &index in edge {
+        let vertex = verts[index];
+        let normal = normals[index];
+        top.push(verts.len());
+        verts.push(vertex);
+        normals.push(normal);
+
+        bottom.push(verts.len());
+        verts.push(Vec3::new(vertex.x, vertex.y - depth, vertex.z));
+        normals.push(normal);
+    }
+
+    for i in 0..(edge.len() - 1) {
+        let t0 = top[i];
+        let t1 = top[i + 1];
+        let b0 = bottom[i];
+        let b1 = bottom[i + 1];
+
+        // Draw both windings so the skirts still cover cracks from either side.
+        faces.push([t0, b0, t1]);
+        faces.push([t1, b0, b1]);
+        faces.push([t1, b0, t0]);
+        faces.push([b1, b0, t1]);
     }
 }
 
@@ -172,7 +247,12 @@ pub struct LodTerrain {
 
 impl LodTerrain {
     pub fn new(heightmap: Heightmap, view_radius: i32, color: crate::renderer::Color) -> Self {
-        Self { heightmap, chunks: Vec::new(), view_radius, color }
+        Self {
+            heightmap,
+            chunks: Vec::new(),
+            view_radius,
+            color,
+        }
     }
 
     /// Update loaded chunks around the camera position.
@@ -181,9 +261,8 @@ impl LodTerrain {
         let cam_cz = (camera_pos.z / CHUNK_SIZE).floor() as i32;
         let r = self.view_radius;
 
-        self.chunks.retain(|c| {
-            (c.cx - cam_cx).abs() <= r && (c.cz - cam_cz).abs() <= r
-        });
+        self.chunks
+            .retain(|c| (c.cx - cam_cx).abs() <= r && (c.cz - cam_cz).abs() <= r);
 
         for cz in (cam_cz - r)..=(cam_cz + r) {
             for cx in (cam_cx - r)..=(cam_cx + r) {
@@ -204,5 +283,26 @@ impl LodTerrain {
         let cam_cx = (cam_pos.x / CHUNK_SIZE).floor() as i32;
         let cam_cz = (cam_pos.z / CHUNK_SIZE).floor() as i32;
         (cx - cam_cx).abs().max((cz - cam_cz).abs())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lod_chunk_tiers_include_skirt_geometry() {
+        let chunk = LodChunk::build(&Heightmap::default(), 0, 0);
+
+        for tier in &chunk.tiers {
+            let top_vertex_count = tier.res * tier.res;
+            let top_face_count = (tier.res - 1) * (tier.res - 1) * 2;
+            let skirt_vertex_count = tier.res * 8;
+            let skirt_face_count = (tier.res - 1) * 16;
+
+            assert_eq!(tier.verts.len(), top_vertex_count + skirt_vertex_count);
+            assert_eq!(tier.normals.len(), top_vertex_count + skirt_vertex_count);
+            assert_eq!(tier.faces.len(), top_face_count + skirt_face_count);
+        }
     }
 }
