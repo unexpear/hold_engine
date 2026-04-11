@@ -1,9 +1,9 @@
 //! CPU software renderer with a barycentric triangle rasterizer.
 //! Blits each frame to the window via Win32 StretchDIBits -- no GPU required.
 
-use crate::platform::ffi::*;
-use crate::math::{Mat4, Vec3, Vec4};
 use super::{Color, Renderer};
+use crate::math::{Mat4, Vec3, Vec4};
+use crate::platform::ffi::*;
 
 pub struct SoftwareRenderer {
     hwnd: HWND,
@@ -99,10 +99,11 @@ impl SoftwareRenderer {
         v2: (f32, f32),
         color: Color,
     ) {
-        let min_x = v0.0.min(v1.0).min(v2.0).max(0.0) as i32;
-        let max_x = (v0.0.max(v1.0).max(v2.0) as i32 + 1).min(self.width as i32 - 1);
-        let min_y = v0.1.min(v1.1).min(v2.1).max(0.0) as i32;
-        let max_y = (v0.1.max(v1.1).max(v2.1) as i32 + 1).min(self.height as i32 - 1);
+        let Some((min_x, max_x, min_y, max_y)) =
+            triangle_bounds(self.width, self.height, v0, v1, v2)
+        else {
+            return;
+        };
         let packed = color.to_bgra_u32();
         for y in min_y..=max_y {
             for x in min_x..=max_x {
@@ -164,10 +165,15 @@ impl SoftwareRenderer {
         let s0 = self.clip_to_screen(clip0);
         let s1 = self.clip_to_screen(clip1);
         let s2 = self.clip_to_screen(clip2);
-        let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
-        let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width as i32 - 1);
-        let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
-        let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
+        let Some((min_x, max_x, min_y, max_y)) = triangle_bounds(
+            self.width,
+            self.height,
+            (s0.0, s0.1),
+            (s1.0, s1.1),
+            (s2.0, s2.1),
+        ) else {
+            return;
+        };
         let area = edge2d((s0.0, s0.1), (s1.0, s1.1), (s2.0, s2.1));
         if area <= 0.0 {
             return;
@@ -222,10 +228,15 @@ impl SoftwareRenderer {
         let s0 = self.clip_to_screen(clip0);
         let s1 = self.clip_to_screen(clip1);
         let s2 = self.clip_to_screen(clip2);
-        let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
-        let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width as i32 - 1);
-        let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
-        let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
+        let Some((min_x, max_x, min_y, max_y)) = triangle_bounds(
+            self.width,
+            self.height,
+            (s0.0, s0.1),
+            (s1.0, s1.1),
+            (s2.0, s2.1),
+        ) else {
+            return;
+        };
         let area = edge2d((s0.0, s0.1), (s1.0, s1.1), (s2.0, s2.1));
         if area <= 0.0 {
             return;
@@ -274,10 +285,15 @@ impl SoftwareRenderer {
         s2: (f32, f32, f32),
         color: Color,
     ) {
-        let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
-        let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width as i32 - 1);
-        let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
-        let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
+        let Some((min_x, max_x, min_y, max_y)) = triangle_bounds(
+            self.width,
+            self.height,
+            (s0.0, s0.1),
+            (s1.0, s1.1),
+            (s2.0, s2.1),
+        ) else {
+            return;
+        };
         let area = edge2d((s0.0, s0.1), (s1.0, s1.1), (s2.0, s2.1));
         if area <= 0.0 {
             return;
@@ -384,6 +400,57 @@ impl Drop for SoftwareRenderer {
     }
 }
 
+fn triangle_bounds(
+    width: u32,
+    height: u32,
+    v0: (f32, f32),
+    v1: (f32, f32),
+    v2: (f32, f32),
+) -> Option<(i32, i32, i32, i32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let coords = [v0, v1, v2];
+    if coords.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+        return None;
+    }
+
+    let min_x = coords
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::INFINITY, f32::min)
+        .floor();
+    let max_x = coords
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil();
+    let min_y = coords
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::INFINITY, f32::min)
+        .floor();
+    let max_y = coords
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil();
+
+    let screen_max_x = width as f32 - 1.0;
+    let screen_max_y = height as f32 - 1.0;
+    if max_x < 0.0 || min_x > screen_max_x || max_y < 0.0 || min_y > screen_max_y {
+        return None;
+    }
+
+    Some((
+        min_x.max(0.0) as i32,
+        max_x.min(screen_max_x) as i32,
+        min_y.max(0.0) as i32,
+        max_y.min(screen_max_y) as i32,
+    ))
+}
+
 #[inline]
 fn edge(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
     (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
@@ -397,4 +464,23 @@ fn edge2d(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
 #[inline]
 fn ndc(v: Vec4) -> Vec3 {
     Vec3::new(v.x / v.w, v.y / v.w, v.z / v.w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::triangle_bounds;
+
+    #[test]
+    fn triangle_bounds_clamps_huge_coordinates() {
+        let bounds = triangle_bounds(960, 540, (f32::MAX, 10.0), (100.0, 40.0), (120.0, 60.0));
+
+        assert_eq!(bounds, Some((100, 959, 10, 60)));
+    }
+
+    #[test]
+    fn triangle_bounds_rejects_non_finite_points() {
+        let bounds = triangle_bounds(960, 540, (f32::INFINITY, 0.0), (0.0, 1.0), (2.0, 3.0));
+
+        assert!(bounds.is_none());
+    }
 }
