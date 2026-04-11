@@ -1,4 +1,5 @@
 import { ContextMenu } from "./ContextMenu.js";
+import { EditorProtocol } from "./EditorProtocol.js";
 import { Inspector } from "./Inspector.js";
 import { MorphicObject } from "./MorphicObject.js";
 import { MorphicRegistry } from "./MorphicRegistry.js";
@@ -94,6 +95,7 @@ new ScriptingConsole({ renderer, sceneBridge: scene });
 renderer.select(root);
 
 Object.assign(window.morphic, {
+  editorProtocol: EditorProtocol,
   renderer,
   tree,
   registry: MorphicRegistry.instance,

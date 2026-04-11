@@ -4,6 +4,7 @@
 
 pub mod command;
 pub mod drawlist;
+pub mod protocol;
 mod host;
 mod session;
 
@@ -26,6 +27,13 @@ pub use command::{
     EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
 };
 pub use drawlist::{generate_draw_list, EditorDrawList};
+pub use protocol::{
+    decode_command as decode_editor_command_protocol,
+    decode_event as decode_editor_event_protocol,
+    encode_command as encode_editor_command_protocol,
+    encode_event as encode_editor_event_protocol,
+    EditorProtocolError,
+};
 pub use host::{EditorCamera, EditorRuntimeHost};
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 

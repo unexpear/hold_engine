@@ -19,6 +19,7 @@ use crate::math::{Mat4, Vec3};
 
 use super::{
     command::{EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor},
+    protocol::{decode_command, encode_event, EditorProtocolError},
     EditorPlayState, EditorSceneSession, EditorSessionError, InspectorValue, SceneDocument,
 };
 
@@ -402,6 +403,17 @@ impl EditorRuntimeHost {
             EditorCommand::ForcePatch => self.cmd_force_patch(),
             EditorCommand::ForceRebuild => self.cmd_force_rebuild(),
         }
+    }
+
+    /// Decode a bridge-protocol command message, execute it, and return the
+    /// resulting events encoded back into bridge-protocol messages.
+    pub fn execute_protocol_message(
+        &mut self,
+        message: &str,
+    ) -> Result<Vec<String>, EditorProtocolError> {
+        let command = decode_command(message)?;
+        let events = self.execute(command).map_err(EditorProtocolError::Command)?;
+        Ok(events.iter().map(encode_event).collect())
     }
 
     // ── Private: cursor helpers ────────────────────────────────────────────
@@ -1257,6 +1269,25 @@ entity "cam" {
             EditorEvent::PatchRequiresRebuild { .. }
         )));
         assert!(host.world_requires_rebuild());
+    }
+
+    #[test]
+    fn protocol_message_executes_and_roundtrips_to_encoded_events() {
+        let path = write_two_entity_scene("protocol");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        let encoded_events = host
+            .execute_protocol_message("cmd|SelectNextEntity")
+            .unwrap();
+        assert_eq!(encoded_events.len(), 1);
+
+        let decoded_event = crate::editor::protocol::decode_event(&encoded_events[0]).unwrap();
+        match decoded_event {
+            EditorEvent::SelectionChanged(cursor) => {
+                assert_eq!(cursor.entity_id, host.cursor().unwrap().entity_id);
+            }
+            other => panic!("expected SelectionChanged, got {other:?}"),
+        }
     }
 
     #[test]

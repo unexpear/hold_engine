@@ -45,7 +45,8 @@ pub use editor::{
     load_and_apply_scene_from_project, load_project, load_scene_doc, load_scene_doc_from_hsc,
     save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorAxis,
     EditorCamera, EditorCommand, EditorCommandError, EditorDrawList, EditorEntity, EditorEvent,
-    EditorInspectorCursor, EditorIoError, EditorPipelineError, EditorPlayState, EditorRuntimeHost,
-    EditorSceneSession, EditorSessionError, InspectorComponent, InspectorField, InspectorValue,
-    Project, SceneBridgeError, SceneDocument,
+    EditorInspectorCursor, EditorIoError, EditorPipelineError, EditorPlayState, EditorProtocolError,
+    EditorRuntimeHost, EditorSceneSession, EditorSessionError, InspectorComponent, InspectorField,
+    InspectorValue, Project, SceneBridgeError, SceneDocument, decode_editor_command_protocol,
+    decode_editor_event_protocol, encode_editor_command_protocol, encode_editor_event_protocol,
 };
