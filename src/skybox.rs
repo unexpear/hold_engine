@@ -6,8 +6,8 @@
 //! computed analytically.
 
 use crate::math::{Mat4, Vec3};
-use crate::renderer::{Color, Renderer};
 use crate::renderer::software::SoftwareRenderer;
+use crate::renderer::{Color, Renderer};
 
 /// Procedural skybox that writes directly into the software framebuffer.
 pub struct Skybox {
@@ -30,9 +30,9 @@ impl Skybox {
     pub fn day(sun_dir: Vec3) -> Self {
         Self {
             sun_dir: sun_dir.normalize(),
-            zenith:   Color::rgb(0.20, 0.35, 0.85),
-            horizon:  Color::rgb(0.55, 0.70, 0.95),
-            ground:   Color::rgb(0.25, 0.22, 0.20),
+            zenith: Color::rgb(0.20, 0.35, 0.85),
+            horizon: Color::rgb(0.55, 0.70, 0.95),
+            ground: Color::rgb(0.25, 0.22, 0.20),
             sun_radius: 0.04,
             sun_color: Color::rgb(1.0, 0.95, 0.8),
         }
@@ -43,7 +43,7 @@ impl Skybox {
     /// Call after clear and before any geometry so that
     /// the depth buffer is still at +inf and geometry will overdraw the sky.
     pub fn draw(&self, renderer: &mut SoftwareRenderer, view: &Mat4, proj: &Mat4) {
-        let w = renderer.width()  as usize;
+        let w = renderer.width() as usize;
         let h = renderer.height() as usize;
 
         // Build view-rotation-only (strip translation).
@@ -65,7 +65,7 @@ impl Skybox {
 
         for py in 0..h {
             for px in 0..w {
-                let ndc_x = (px as f32 + 0.5) / fw *  2.0 - 1.0;
+                let ndc_x = (px as f32 + 0.5) / fw * 2.0 - 1.0;
                 let ndc_y = (py as f32 + 0.5) / fh * -2.0 + 1.0;
 
                 let dir = unproject(&inv, ndc_x, ndc_y);
@@ -112,10 +112,10 @@ impl Skybox {
 fn unproject(inv_vp: &Mat4, ndc_x: f32, ndc_y: f32) -> Vec3 {
     let c = &inv_vp.cols;
     // Multiply inv_vp * (ndc_x, ndc_y, 1.0, 1.0)
-    let x = c[0][0]*ndc_x + c[1][0]*ndc_y + c[2][0] + c[3][0];
-    let y = c[0][1]*ndc_x + c[1][1]*ndc_y + c[2][1] + c[3][1];
-    let z = c[0][2]*ndc_x + c[1][2]*ndc_y + c[2][2] + c[3][2];
-    let w = c[0][3]*ndc_x + c[1][3]*ndc_y + c[2][3] + c[3][3];
+    let x = c[0][0] * ndc_x + c[1][0] * ndc_y + c[2][0] + c[3][0];
+    let y = c[0][1] * ndc_x + c[1][1] * ndc_y + c[2][1] + c[3][1];
+    let z = c[0][2] * ndc_x + c[1][2] * ndc_y + c[2][2] + c[3][2];
+    let w = c[0][3] * ndc_x + c[1][3] * ndc_y + c[2][3] + c[3][3];
     let inv_w = if w.abs() > 1e-12 { 1.0 / w } else { 1.0 };
     Vec3::new(x * inv_w, y * inv_w, z * inv_w).normalize()
 }
@@ -127,62 +127,94 @@ fn mat4_inverse(m: &Mat4) -> Mat4 {
     // Flatten to row-major s[row*4+col].
     let c = &m.cols;
     let s: [f32; 16] = [
-        c[0][0], c[1][0], c[2][0], c[3][0],
-        c[0][1], c[1][1], c[2][1], c[3][1],
-        c[0][2], c[1][2], c[2][2], c[3][2],
-        c[0][3], c[1][3], c[2][3], c[3][3],
+        c[0][0], c[1][0], c[2][0], c[3][0], c[0][1], c[1][1], c[2][1], c[3][1], c[0][2], c[1][2],
+        c[2][2], c[3][2], c[0][3], c[1][3], c[2][3], c[3][3],
     ];
 
     let mut inv = [0.0_f32; 16];
 
-    inv[0]  =  s[5]*s[10]*s[15] - s[5]*s[11]*s[14] - s[9]*s[6]*s[15]
-             + s[9]*s[7]*s[14]  + s[13]*s[6]*s[11]  - s[13]*s[7]*s[10];
-    inv[1]  = -s[1]*s[10]*s[15] + s[1]*s[11]*s[14]  + s[9]*s[2]*s[15]
-             - s[9]*s[3]*s[14]  - s[13]*s[2]*s[11]  + s[13]*s[3]*s[10];
-    inv[2]  =  s[1]*s[6]*s[15]  - s[1]*s[7]*s[14]   - s[5]*s[2]*s[15]
-             + s[5]*s[3]*s[14]  + s[13]*s[2]*s[7]   - s[13]*s[3]*s[6];
-    inv[3]  = -s[1]*s[6]*s[11]  + s[1]*s[7]*s[10]   + s[5]*s[2]*s[11]
-             - s[5]*s[3]*s[10]  - s[9]*s[2]*s[7]    + s[9]*s[3]*s[6];
+    inv[0] = s[5] * s[10] * s[15] - s[5] * s[11] * s[14] - s[9] * s[6] * s[15]
+        + s[9] * s[7] * s[14]
+        + s[13] * s[6] * s[11]
+        - s[13] * s[7] * s[10];
+    inv[1] = -s[1] * s[10] * s[15] + s[1] * s[11] * s[14] + s[9] * s[2] * s[15]
+        - s[9] * s[3] * s[14]
+        - s[13] * s[2] * s[11]
+        + s[13] * s[3] * s[10];
+    inv[2] = s[1] * s[6] * s[15] - s[1] * s[7] * s[14] - s[5] * s[2] * s[15]
+        + s[5] * s[3] * s[14]
+        + s[13] * s[2] * s[7]
+        - s[13] * s[3] * s[6];
+    inv[3] = -s[1] * s[6] * s[11] + s[1] * s[7] * s[10] + s[5] * s[2] * s[11]
+        - s[5] * s[3] * s[10]
+        - s[9] * s[2] * s[7]
+        + s[9] * s[3] * s[6];
 
-    inv[4]  = -s[4]*s[10]*s[15] + s[4]*s[11]*s[14]  + s[8]*s[6]*s[15]
-             - s[8]*s[7]*s[14]  - s[12]*s[6]*s[11]  + s[12]*s[7]*s[10];
-    inv[5]  =  s[0]*s[10]*s[15] - s[0]*s[11]*s[14]  - s[8]*s[2]*s[15]
-             + s[8]*s[3]*s[14]  + s[12]*s[2]*s[11]  - s[12]*s[3]*s[10];
-    inv[6]  = -s[0]*s[6]*s[15]  + s[0]*s[7]*s[14]   + s[4]*s[2]*s[15]
-             - s[4]*s[3]*s[14]  - s[12]*s[2]*s[7]   + s[12]*s[3]*s[6];
-    inv[7]  =  s[0]*s[6]*s[11]  - s[0]*s[7]*s[10]   - s[4]*s[2]*s[11]
-             + s[4]*s[3]*s[10]  + s[8]*s[2]*s[7]    - s[8]*s[3]*s[6];
+    inv[4] = -s[4] * s[10] * s[15] + s[4] * s[11] * s[14] + s[8] * s[6] * s[15]
+        - s[8] * s[7] * s[14]
+        - s[12] * s[6] * s[11]
+        + s[12] * s[7] * s[10];
+    inv[5] = s[0] * s[10] * s[15] - s[0] * s[11] * s[14] - s[8] * s[2] * s[15]
+        + s[8] * s[3] * s[14]
+        + s[12] * s[2] * s[11]
+        - s[12] * s[3] * s[10];
+    inv[6] = -s[0] * s[6] * s[15] + s[0] * s[7] * s[14] + s[4] * s[2] * s[15]
+        - s[4] * s[3] * s[14]
+        - s[12] * s[2] * s[7]
+        + s[12] * s[3] * s[6];
+    inv[7] = s[0] * s[6] * s[11] - s[0] * s[7] * s[10] - s[4] * s[2] * s[11]
+        + s[4] * s[3] * s[10]
+        + s[8] * s[2] * s[7]
+        - s[8] * s[3] * s[6];
 
-    inv[8]  =  s[4]*s[9]*s[15]  - s[4]*s[11]*s[13]  - s[8]*s[5]*s[15]
-             + s[8]*s[7]*s[13]  + s[12]*s[5]*s[11]  - s[12]*s[7]*s[9];
-    inv[9]  = -s[0]*s[9]*s[15]  + s[0]*s[11]*s[13]  + s[8]*s[1]*s[15]
-             - s[8]*s[3]*s[13]  - s[12]*s[1]*s[11]  + s[12]*s[3]*s[9];
-    inv[10] =  s[0]*s[5]*s[15]  - s[0]*s[7]*s[13]   - s[4]*s[1]*s[15]
-             + s[4]*s[3]*s[13]  + s[12]*s[1]*s[7]   - s[12]*s[3]*s[5];
-    inv[11] = -s[0]*s[5]*s[11]  + s[0]*s[7]*s[9]    + s[4]*s[1]*s[11]
-             - s[4]*s[3]*s[9]   - s[8]*s[1]*s[7]    + s[8]*s[3]*s[5];
+    inv[8] = s[4] * s[9] * s[15] - s[4] * s[11] * s[13] - s[8] * s[5] * s[15]
+        + s[8] * s[7] * s[13]
+        + s[12] * s[5] * s[11]
+        - s[12] * s[7] * s[9];
+    inv[9] = -s[0] * s[9] * s[15] + s[0] * s[11] * s[13] + s[8] * s[1] * s[15]
+        - s[8] * s[3] * s[13]
+        - s[12] * s[1] * s[11]
+        + s[12] * s[3] * s[9];
+    inv[10] = s[0] * s[5] * s[15] - s[0] * s[7] * s[13] - s[4] * s[1] * s[15]
+        + s[4] * s[3] * s[13]
+        + s[12] * s[1] * s[7]
+        - s[12] * s[3] * s[5];
+    inv[11] = -s[0] * s[5] * s[11] + s[0] * s[7] * s[9] + s[4] * s[1] * s[11]
+        - s[4] * s[3] * s[9]
+        - s[8] * s[1] * s[7]
+        + s[8] * s[3] * s[5];
 
-    inv[12] = -s[4]*s[9]*s[14]  + s[4]*s[10]*s[13]  + s[8]*s[5]*s[14]
-             - s[8]*s[6]*s[13]  - s[12]*s[5]*s[10]  + s[12]*s[6]*s[9];
-    inv[13] =  s[0]*s[9]*s[14]  - s[0]*s[10]*s[13]  - s[8]*s[1]*s[14]
-             + s[8]*s[2]*s[13]  + s[12]*s[1]*s[10]  - s[12]*s[2]*s[9];
-    inv[14] = -s[0]*s[5]*s[14]  + s[0]*s[6]*s[13]   + s[4]*s[1]*s[14]
-             - s[4]*s[2]*s[13]  - s[12]*s[1]*s[6]   + s[12]*s[2]*s[5];
-    inv[15] =  s[0]*s[5]*s[10]  - s[0]*s[6]*s[9]    - s[4]*s[1]*s[10]
-             + s[4]*s[2]*s[9]   + s[8]*s[1]*s[6]    - s[8]*s[2]*s[5];
+    inv[12] = -s[4] * s[9] * s[14] + s[4] * s[10] * s[13] + s[8] * s[5] * s[14]
+        - s[8] * s[6] * s[13]
+        - s[12] * s[5] * s[10]
+        + s[12] * s[6] * s[9];
+    inv[13] = s[0] * s[9] * s[14] - s[0] * s[10] * s[13] - s[8] * s[1] * s[14]
+        + s[8] * s[2] * s[13]
+        + s[12] * s[1] * s[10]
+        - s[12] * s[2] * s[9];
+    inv[14] = -s[0] * s[5] * s[14] + s[0] * s[6] * s[13] + s[4] * s[1] * s[14]
+        - s[4] * s[2] * s[13]
+        - s[12] * s[1] * s[6]
+        + s[12] * s[2] * s[5];
+    inv[15] = s[0] * s[5] * s[10] - s[0] * s[6] * s[9] - s[4] * s[1] * s[10]
+        + s[4] * s[2] * s[9]
+        + s[8] * s[1] * s[6]
+        - s[8] * s[2] * s[5];
 
-    let det = s[0]*inv[0] + s[1]*inv[4] + s[2]*inv[8] + s[3]*inv[12];
+    let det = s[0] * inv[0] + s[1] * inv[4] + s[2] * inv[8] + s[3] * inv[12];
     if det.abs() < 1e-12 {
         return Mat4::IDENTITY;
     }
     let inv_det = 1.0 / det;
-    for v in &mut inv { *v *= inv_det; }
+    for v in &mut inv {
+        *v *= inv_det;
+    }
 
     // Pack back to column-major.
     Mat4 {
         cols: [
-            [inv[0], inv[4], inv[8],  inv[12]],
-            [inv[1], inv[5], inv[9],  inv[13]],
+            [inv[0], inv[4], inv[8], inv[12]],
+            [inv[1], inv[5], inv[9], inv[13]],
             [inv[2], inv[6], inv[10], inv[14]],
             [inv[3], inv[7], inv[11], inv[15]],
         ],

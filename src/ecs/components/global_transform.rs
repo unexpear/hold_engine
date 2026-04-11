@@ -7,9 +7,15 @@ pub struct GlobalTransform {
 }
 
 impl GlobalTransform {
-    pub fn identity() -> Self { Self { matrix: Mat4::IDENTITY } }
+    pub fn identity() -> Self {
+        Self {
+            matrix: Mat4::IDENTITY,
+        }
+    }
 }
 
 impl Default for GlobalTransform {
-    fn default() -> Self { Self::identity() }
+    fn default() -> Self {
+        Self::identity()
+    }
 }

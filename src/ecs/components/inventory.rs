@@ -11,14 +11,18 @@ pub struct ItemId(pub u32);
 /// An entry inside an [Inventory].
 #[derive(Debug, Clone)]
 pub struct ItemStack {
-    pub id:       ItemId,
+    pub id: ItemId,
     pub quantity: u32,
     pub max_stack: u32,
 }
 
 impl ItemStack {
     pub fn new(id: ItemId, quantity: u32, max_stack: u32) -> Self {
-        Self { id, quantity, max_stack }
+        Self {
+            id,
+            quantity,
+            max_stack,
+        }
     }
 
     /// Single-item stack with stack limit of 1 (e.g. a weapon).
@@ -46,7 +50,9 @@ pub struct Inventory {
 impl Inventory {
     /// Create an inventory with size empty slots.
     pub fn new(size: usize) -> Self {
-        Self { slots: vec![None; size] }
+        Self {
+            slots: vec![None; size],
+        }
     }
 
     /// Total number of slots (occupied + empty).
@@ -67,7 +73,9 @@ impl Inventory {
     pub fn add(&mut self, id: ItemId, mut quantity: u32, max_stack: u32) -> u32 {
         // Merge into existing stacks first.
         for slot in self.slots.iter_mut() {
-            if quantity == 0 { break; }
+            if quantity == 0 {
+                break;
+            }
             if let Some(stack) = slot {
                 if stack.id == id {
                     let room = stack.max_stack - stack.quantity;
@@ -79,7 +87,9 @@ impl Inventory {
         }
         // Fill empty slots.
         for slot in self.slots.iter_mut() {
-            if quantity == 0 { break; }
+            if quantity == 0 {
+                break;
+            }
             if slot.is_none() {
                 let take = quantity.min(max_stack);
                 *slot = Some(ItemStack::new(id, take, max_stack));
@@ -93,7 +103,9 @@ impl Inventory {
     pub fn remove(&mut self, id: ItemId, mut quantity: u32) -> u32 {
         let mut removed = 0u32;
         for slot in self.slots.iter_mut() {
-            if quantity == 0 { break; }
+            if quantity == 0 {
+                break;
+            }
             if let Some(stack) = slot {
                 if stack.id == id {
                     let take = quantity.min(stack.quantity);
@@ -111,7 +123,8 @@ impl Inventory {
 
     /// Count total quantity of an item across all stacks.
     pub fn count(&self, id: ItemId) -> u32 {
-        self.slots.iter()
+        self.slots
+            .iter()
             .filter_map(|s| s.as_ref())
             .filter(|s| s.id == id)
             .map(|s| s.quantity)

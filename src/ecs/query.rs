@@ -50,9 +50,9 @@ impl<'w, A: 'static, B: 'static> Query2<'w, A, B> {
     /// Iterates the `A` storage and performs O(1) lookups into `B` — O(|A|) total.
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &'w A, &'w B)> + '_ {
         let b = self.b;
-        self.a.iter().filter_map(move |(e, a)| {
-            b.get(e).map(|bv| (e, a, bv))
-        })
+        self.a
+            .iter()
+            .filter_map(move |(e, a)| b.get(e).map(|bv| (e, a, bv)))
     }
 
     /// Iterate every entity that has `A`, pairing with `B` if present.
@@ -92,18 +92,18 @@ impl<'w, A: 'static, B: 'static, C: 'static> Query3<'w, A, B, C> {
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &'w A, &'w B, &'w C)> + '_ {
         let b = self.b;
         let c = self.c;
-        self.a.iter().filter_map(move |(e, a)| {
-            b.get(e).and_then(|bv| c.get(e).map(|cv| (e, a, bv, cv)))
-        })
+        self.a
+            .iter()
+            .filter_map(move |(e, a)| b.get(e).and_then(|bv| c.get(e).map(|cv| (e, a, bv, cv))))
     }
 
     /// Iterate `A` and `B` together, pairing with `C` if present.
     pub fn iter_opt_c(&self) -> impl Iterator<Item = (Entity, &'w A, &'w B, Option<&'w C>)> + '_ {
         let b = self.b;
         let c = self.c;
-        self.a.iter().filter_map(move |(e, a)| {
-            b.get(e).map(|bv| (e, a, bv, c.get(e)))
-        })
+        self.a
+            .iter()
+            .filter_map(move |(e, a)| b.get(e).map(|bv| (e, a, bv, c.get(e))))
     }
 }
 
@@ -124,17 +124,17 @@ impl<'w, A: 'static, B: 'static> Query2Mut<'w, A, B> {
     /// Iterate every entity with both `A` (mutable) and `B` (shared).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (Entity, &mut A, &B)> + '_ {
         let b: &SparseSet<B> = self.b;
-        self.a.iter_mut().filter_map(move |(e, a)| {
-            b.get(e).map(|bv| (e, a, bv))
-        })
+        self.a
+            .iter_mut()
+            .filter_map(move |(e, a)| b.get(e).map(|bv| (e, a, bv)))
     }
 
     /// Iterate every entity with both `A` (shared) and `B` (shared).
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &A, &B)> + '_ {
         let b = self.b;
-        self.a.iter().filter_map(move |(e, a)| {
-            b.get(e).map(|bv| (e, a, bv))
-        })
+        self.a
+            .iter()
+            .filter_map(move |(e, a)| b.get(e).map(|bv| (e, a, bv)))
     }
 
     /// Iterate `A` (mutable), pairing with `B` if present.
@@ -160,26 +160,28 @@ impl<'w, A: 'static, B: 'static, C: 'static> Query3Mut<'w, A, B, C> {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (Entity, &mut A, &B, &C)> + '_ {
         let b: &SparseSet<B> = self.b;
         let c: &SparseSet<C> = self.c;
-        self.a.iter_mut().filter_map(move |(e, a)| {
-            b.get(e).and_then(|bv| c.get(e).map(|cv| (e, a, bv, cv)))
-        })
+        self.a
+            .iter_mut()
+            .filter_map(move |(e, a)| b.get(e).and_then(|bv| c.get(e).map(|cv| (e, a, bv, cv))))
     }
 
     /// Iterate every entity with all three components; all shared.
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &A, &B, &C)> + '_ {
         let b = self.b;
         let c = self.c;
-        self.a.iter().filter_map(move |(e, a)| {
-            b.get(e).and_then(|bv| c.get(e).map(|cv| (e, a, bv, cv)))
-        })
+        self.a
+            .iter()
+            .filter_map(move |(e, a)| b.get(e).and_then(|bv| c.get(e).map(|cv| (e, a, bv, cv))))
     }
 
     /// Iterate `A` (mutable) and `B` (shared), pairing `C` if present.
-    pub fn iter_mut_opt_c(&mut self) -> impl Iterator<Item = (Entity, &mut A, &B, Option<&C>)> + '_ {
+    pub fn iter_mut_opt_c(
+        &mut self,
+    ) -> impl Iterator<Item = (Entity, &mut A, &B, Option<&C>)> + '_ {
         let b: &SparseSet<B> = self.b;
         let c: &SparseSet<C> = self.c;
-        self.a.iter_mut().filter_map(move |(e, a)| {
-            b.get(e).map(|bv| (e, a, bv, c.get(e)))
-        })
+        self.a
+            .iter_mut()
+            .filter_map(move |(e, a)| b.get(e).map(|bv| (e, a, bv, c.get(e))))
     }
 }

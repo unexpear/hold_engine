@@ -11,7 +11,7 @@ use crate::events::EventBus;
 
 struct EntityMeta {
     generation: u32,
-    alive:      bool,
+    alive: bool,
 }
 
 // ── AnyStorage trait ──────────────────────────────────────────────────────────
@@ -72,9 +72,9 @@ impl<T: 'static> AnyStorage for SparseSet<T> {
 /// [`query_changed_since`](Self::query_changed_since) to iterate only the
 /// components that changed since a system's last run.
 pub struct World {
-    entities:     Vec<EntityMeta>,
-    free_list:    Vec<u32>,
-    components:   HashMap<TypeId, Box<dyn AnyStorage>>,
+    entities: Vec<EntityMeta>,
+    free_list: Vec<u32>,
+    components: HashMap<TypeId, Box<dyn AnyStorage>>,
     current_tick: u32,
     /// Frame-scoped event bus.
     ///
@@ -86,11 +86,11 @@ pub struct World {
 impl World {
     pub fn new() -> Self {
         Self {
-            entities:     Vec::new(),
-            free_list:    Vec::new(),
-            components:   HashMap::new(),
+            entities: Vec::new(),
+            free_list: Vec::new(),
+            components: HashMap::new(),
             current_tick: 0,
-            events:       EventBus::new(),
+            events: EventBus::new(),
         }
     }
 
@@ -122,7 +122,10 @@ impl World {
             let meta = &mut self.entities[index as usize];
             meta.generation = meta.generation.saturating_add(1);
             if meta.generation == u32::MAX {
-                self.entities.push(EntityMeta { generation: 0, alive: true });
+                self.entities.push(EntityMeta {
+                    generation: 0,
+                    alive: true,
+                });
                 let new_index = (self.entities.len() - 1) as u32;
                 return Entity::new(new_index, 0);
             }
@@ -130,7 +133,10 @@ impl World {
             Entity::new(index, meta.generation)
         } else {
             let index = self.entities.len() as u32;
-            self.entities.push(EntityMeta { generation: 0, alive: true });
+            self.entities.push(EntityMeta {
+                generation: 0,
+                alive: true,
+            });
             Entity::new(index, 0)
         }
     }
@@ -231,7 +237,7 @@ impl World {
     pub fn query<C: 'static>(&self) -> SparseSetIter<'_, C> {
         match self.storage_ref::<C>() {
             Some(set) => set.iter(),
-            None      => SparseSetIter::empty(),
+            None => SparseSetIter::empty(),
         }
     }
 
@@ -255,7 +261,7 @@ impl World {
     pub fn query_added_since<C: 'static>(&self, since: u32) -> SparseSetTickIter<'_, C> {
         match self.storage_ref::<C>() {
             Some(set) => set.iter_added_since(since),
-            None      => SparseSetTickIter::empty(),
+            None => SparseSetTickIter::empty(),
         }
     }
 
@@ -271,7 +277,7 @@ impl World {
     pub fn query_changed_since<C: 'static>(&self, since: u32) -> SparseSetTickIter<'_, C> {
         match self.storage_ref::<C>() {
             Some(set) => set.iter_changed_since(since),
-            None      => SparseSetTickIter::empty(),
+            None => SparseSetTickIter::empty(),
         }
     }
 
@@ -319,17 +325,17 @@ impl World {
             TypeId::of::<A>() != TypeId::of::<B>(),
             "query2_mut: A and B must be distinct component types"
         );
-        let a_ptr = self.components
+        let a_ptr = self
+            .components
             .get_mut(&TypeId::of::<A>())?
             .as_any_mut()
-            .downcast_mut::<SparseSet<A>>()?
-            as *mut SparseSet<A>;
+            .downcast_mut::<SparseSet<A>>()? as *mut SparseSet<A>;
 
-        let b_ptr = self.components
+        let b_ptr = self
+            .components
             .get(&TypeId::of::<B>())?
             .as_any()
-            .downcast_ref::<SparseSet<B>>()?
-            as *const SparseSet<B>;
+            .downcast_ref::<SparseSet<B>>()? as *const SparseSet<B>;
 
         // SAFETY: a_ptr and b_ptr point to non-overlapping allocations (different
         // TypeIds → different HashMap entries → different Box objects on the heap).
@@ -354,23 +360,23 @@ impl World {
             "query3_mut: A, B, and C must all be distinct component types"
         );
 
-        let a_ptr = self.components
+        let a_ptr = self
+            .components
             .get_mut(&a_tid)?
             .as_any_mut()
-            .downcast_mut::<SparseSet<A>>()?
-            as *mut SparseSet<A>;
+            .downcast_mut::<SparseSet<A>>()? as *mut SparseSet<A>;
 
-        let b_ptr = self.components
+        let b_ptr = self
+            .components
             .get(&b_tid)?
             .as_any()
-            .downcast_ref::<SparseSet<B>>()?
-            as *const SparseSet<B>;
+            .downcast_ref::<SparseSet<B>>()? as *const SparseSet<B>;
 
-        let c_ptr = self.components
+        let c_ptr = self
+            .components
             .get(&c_tid)?
             .as_any()
-            .downcast_ref::<SparseSet<C>>()?
-            as *const SparseSet<C>;
+            .downcast_ref::<SparseSet<C>>()? as *const SparseSet<C>;
 
         // SAFETY: three distinct TypeIds → three non-overlapping allocations.
         Some(Query3Mut {
@@ -387,13 +393,10 @@ impl World {
     /// ```ignore
     /// for (entity, transform) in world.query_with::<Transform, ActiveCamera>() { … }
     /// ```
-    pub fn query_with<A: 'static, B: 'static>(
-        &self,
-    ) -> impl Iterator<Item = (Entity, &A)> + '_ {
+    pub fn query_with<A: 'static, B: 'static>(&self) -> impl Iterator<Item = (Entity, &A)> + '_ {
         let b_set = self.storage_ref::<B>();
-        self.query::<A>().filter(move |(e, _)| {
-            b_set.map_or(false, |s| s.contains(*e))
-        })
+        self.query::<A>()
+            .filter(move |(e, _)| b_set.map_or(false, |s| s.contains(*e)))
     }
 
     /// Iterate entities that have `A` but do **not** carry `B`.
@@ -401,13 +404,10 @@ impl World {
     /// ```ignore
     /// for (entity, transform) in world.query_without::<Transform, Parent>() { … }
     /// ```
-    pub fn query_without<A: 'static, B: 'static>(
-        &self,
-    ) -> impl Iterator<Item = (Entity, &A)> + '_ {
+    pub fn query_without<A: 'static, B: 'static>(&self) -> impl Iterator<Item = (Entity, &A)> + '_ {
         let b_set = self.storage_ref::<B>();
-        self.query::<A>().filter(move |(e, _)| {
-            b_set.map_or(true, |s| !s.contains(*e))
-        })
+        self.query::<A>()
+            .filter(move |(e, _)| b_set.map_or(true, |s| !s.contains(*e)))
     }
 
     // ── Hierarchy helpers ─────────────────────────────────────────────────────
@@ -448,7 +448,8 @@ impl World {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     fn storage_mut<C: 'static>(&mut self) -> &mut SparseSet<C> {
-        let entry = self.components
+        let entry = self
+            .components
             .entry(TypeId::of::<C>())
             .or_insert_with(|| Box::new(SparseSet::<C>::new()));
 

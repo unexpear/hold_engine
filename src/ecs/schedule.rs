@@ -43,7 +43,9 @@ pub struct SystemSchedule {
 
 impl SystemSchedule {
     pub fn new() -> Self {
-        Self { systems: Vec::new() }
+        Self {
+            systems: Vec::new(),
+        }
     }
 
     /// Register a system.  Its [`access`](System::access) descriptor is

@@ -35,8 +35,8 @@ use std::any::TypeId;
 /// that need sole access to the whole world.
 #[derive(Clone, Default)]
 pub struct SystemAccess {
-    pub(crate) reads:     Vec<TypeId>,
-    pub(crate) writes:    Vec<TypeId>,
+    pub(crate) reads: Vec<TypeId>,
+    pub(crate) writes: Vec<TypeId>,
     /// When `true` the system requires sole exclusive access to the entire
     /// world and cannot run concurrently with any other system.
     pub(crate) exclusive: bool,
@@ -53,7 +53,10 @@ impl SystemAccess {
     /// the default from [`System::access`](super::system::System::access)) when
     /// a system accesses components that are not known at registration time.
     pub fn exclusive() -> Self {
-        Self { exclusive: true, ..Default::default() }
+        Self {
+            exclusive: true,
+            ..Default::default()
+        }
     }
 
     /// Declare a shared (read-only) access to component type `T`.

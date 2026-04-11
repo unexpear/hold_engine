@@ -30,9 +30,7 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-use crate::ecs::components::{
-    ActiveCamera, Camera, DirectionalLight, Stats, Transform,
-};
+use crate::ecs::components::{ActiveCamera, Camera, DirectionalLight, Stats, Transform};
 use crate::ecs::Entity;
 use crate::ecs::World;
 use crate::math::{Quat, Vec3};
@@ -45,12 +43,15 @@ use crate::renderer::Color;
 #[derive(Debug)]
 pub struct SceneError {
     pub line: usize,
-    pub msg:  String,
+    pub msg: String,
 }
 
 impl SceneError {
     fn new(line: usize, msg: impl Into<String>) -> Self {
-        Self { line, msg: msg.into() }
+        Self {
+            line,
+            msg: msg.into(),
+        }
     }
 }
 
@@ -68,46 +69,46 @@ impl std::error::Error for SceneError {}
 
 /// A parsed scene ready to be spawned into a [`World`].
 pub struct SceneData {
-    pub name:     String,
+    pub name: String,
     pub entities: Vec<EntityDef>,
 }
 
 /// One entity definition from the scene file.
 pub struct EntityDef {
-    pub name:          String,
-    pub transform:     Option<TransformDef>,
-    pub camera:        Option<CameraDef>,
+    pub name: String,
+    pub transform: Option<TransformDef>,
+    pub camera: Option<CameraDef>,
     pub active_camera: bool,
-    pub light:         Option<LightDef>,
-    pub stats:         Option<StatsDef>,
-    pub parent_name:   Option<String>,
+    pub light: Option<LightDef>,
+    pub stats: Option<StatsDef>,
+    pub parent_name: Option<String>,
 }
 
 pub struct TransformDef {
     pub position: Vec3,
     pub rotation: Quat,
-    pub scale:    Vec3,
+    pub scale: Vec3,
 }
 
 pub struct CameraDef {
-    pub fov:  f32,
+    pub fov: f32,
     pub near: f32,
-    pub far:  f32,
+    pub far: f32,
 }
 
 pub struct LightDef {
     pub direction: Vec3,
-    pub color:     Color,
+    pub color: Color,
     pub intensity: f32,
-    pub ambient:   f32,
+    pub ambient: f32,
 }
 
 pub struct StatsDef {
-    pub health:  f32,
-    pub mana:    f32,
-    pub attack:  f32,
+    pub health: f32,
+    pub mana: f32,
+    pub attack: f32,
     pub defense: f32,
-    pub speed:   f32,
+    pub speed: f32,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -117,21 +118,25 @@ pub struct StatsDef {
 #[derive(Debug, PartialEq)]
 enum Token<'a> {
     Word(&'a str),
-    Str(&'a str),     // contents without quotes
+    Str(&'a str), // contents without quotes
     Number(f32),
     LBrace,
     RBrace,
 }
 
 struct Lexer<'a> {
-    src:  &'a str,
-    pos:  usize,
+    src: &'a str,
+    pos: usize,
     line: usize,
 }
 
 impl<'a> Lexer<'a> {
     fn new(src: &'a str) -> Self {
-        Self { src, pos: 0, line: 1 }
+        Self {
+            src,
+            pos: 0,
+            line: 1,
+        }
     }
 
     fn skip_ws_and_comments(&mut self) {
@@ -167,15 +172,24 @@ impl<'a> Lexer<'a> {
 
         let c = self.src.as_bytes()[self.pos];
         match c {
-            b'{' => { self.pos += 1; Ok(Some(Token::LBrace)) }
-            b'}' => { self.pos += 1; Ok(Some(Token::RBrace)) }
+            b'{' => {
+                self.pos += 1;
+                Ok(Some(Token::LBrace))
+            }
+            b'}' => {
+                self.pos += 1;
+                Ok(Some(Token::RBrace))
+            }
             b'"' => self.read_string(),
             _ if c == b'-' || c == b'+' || c == b'.' || c.is_ascii_digit() => {
                 // Could be a number or a word starting with a digit.
                 self.read_number_or_word()
             }
             _ if c.is_ascii_alphabetic() || c == b'_' => self.read_word(),
-            _ => Err(SceneError::new(self.line, format!("unexpected character '{}'", c as char))),
+            _ => Err(SceneError::new(
+                self.line,
+                format!("unexpected character '{}'", c as char),
+            )),
         }
     }
 
@@ -184,7 +198,9 @@ impl<'a> Lexer<'a> {
         self.pos += 1; // skip opening "
         let start = self.pos;
         while self.pos < self.src.len() && self.src.as_bytes()[self.pos] != b'"' {
-            if self.src.as_bytes()[self.pos] == b'\n' { self.line += 1; }
+            if self.src.as_bytes()[self.pos] == b'\n' {
+                self.line += 1;
+            }
             self.pos += 1;
         }
         if self.pos >= self.src.len() {
@@ -232,9 +248,9 @@ impl<'a> Lexer<'a> {
         }
         let slice = &self.src[start..self.pos];
         if has_digit {
-            let val: f32 = slice.parse().map_err(|_| {
-                SceneError::new(self.line, format!("invalid number: {slice}"))
-            })?;
+            let val: f32 = slice
+                .parse()
+                .map_err(|_| SceneError::new(self.line, format!("invalid number: {slice}")))?;
             Ok(Some(Token::Number(val)))
         } else {
             // Not a valid number — treat as word.
@@ -256,16 +272,21 @@ impl<'a> Lexer<'a> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct Parser<'a> {
-    lex:     Lexer<'a>,
-    peeked:  Option<Token<'a>>,
+    lex: Lexer<'a>,
+    peeked: Option<Token<'a>>,
 }
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Self {
-        Self { lex: Lexer::new(src), peeked: None }
+        Self {
+            lex: Lexer::new(src),
+            peeked: None,
+        }
     }
 
-    fn line(&self) -> usize { self.lex.line }
+    fn line(&self) -> usize {
+        self.lex.line
+    }
 
     fn peek(&mut self) -> Result<Option<&Token<'a>>, SceneError> {
         if self.peeked.is_none() {
@@ -326,7 +347,7 @@ impl<'a> Parser<'a> {
 
     fn parse_scene(&mut self) -> Result<SceneData, SceneError> {
         let mut scene = SceneData {
-            name:     String::new(),
+            name: String::new(),
             entities: Vec::new(),
         };
 
@@ -350,33 +371,33 @@ impl<'a> Parser<'a> {
 
         let mut def = EntityDef {
             name,
-            transform:     None,
-            camera:        None,
+            transform: None,
+            camera: None,
             active_camera: false,
-            light:         None,
-            stats:         None,
-            parent_name:   None,
+            light: None,
+            stats: None,
+            parent_name: None,
         };
 
         loop {
             let _ln = self.lex.line;
             match self.peek()? {
-                Some(Token::RBrace) => { self.next()?; break; }
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
                 Some(Token::Word(_)) => {
                     // Peek the word to decide which component.
                     if let Some(Token::Word(w)) = self.next()? {
                         match w {
-                            "transform"     => def.transform     = Some(self.parse_transform()?),
-                            "camera"        => def.camera        = Some(self.parse_camera()?),
+                            "transform" => def.transform = Some(self.parse_transform()?),
+                            "camera" => def.camera = Some(self.parse_camera()?),
                             "active_camera" => def.active_camera = true,
-                            "light"         => def.light         = Some(self.parse_light()?),
-                            "stats"         => def.stats         = Some(self.parse_stats()?),
-                            "parent"        => def.parent_name   = Some(self.expect_str()?),
+                            "light" => def.light = Some(self.parse_light()?),
+                            "stats" => def.stats = Some(self.parse_stats()?),
+                            "parent" => def.parent_name = Some(self.expect_str()?),
                             _ => {
-                                return Err(SceneError::new(
-                                    _ln,
-                                    format!("unknown component"),
-                                ));
+                                return Err(SceneError::new(_ln, format!("unknown component")));
                             }
                         }
                     }
@@ -401,13 +422,16 @@ impl<'a> Parser<'a> {
         let mut t = TransformDef {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale:    Vec3::ONE,
+            scale: Vec3::ONE,
         };
 
         loop {
             let _ln = self.lex.line;
             match self.peek()? {
-                Some(Token::RBrace) => { self.next()?; break; }
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
                 Some(Token::Word(_)) => {
                     if let Some(Token::Word(key)) = self.next()? {
                         match key {
@@ -437,7 +461,9 @@ impl<'a> Parser<'a> {
                                 let z = self.expect_number()?;
                                 use crate::math::deg_to_rad;
                                 t.rotation = Quat::from_euler_xyz(
-                                    deg_to_rad(x), deg_to_rad(y), deg_to_rad(z),
+                                    deg_to_rad(x),
+                                    deg_to_rad(y),
+                                    deg_to_rad(z),
                                 );
                             }
                             _ => {
@@ -465,26 +491,26 @@ impl<'a> Parser<'a> {
         self.expect_lbrace()?;
 
         let mut c = CameraDef {
-            fov:  60.0,
+            fov: 60.0,
             near: 0.1,
-            far:  1000.0,
+            far: 1000.0,
         };
 
         loop {
             let _ln = self.lex.line;
             match self.peek()? {
-                Some(Token::RBrace) => { self.next()?; break; }
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
                 Some(Token::Word(_)) => {
                     if let Some(Token::Word(key)) = self.next()? {
                         match key {
-                            "fov"  => c.fov  = self.expect_number()?,
+                            "fov" => c.fov = self.expect_number()?,
                             "near" => c.near = self.expect_number()?,
-                            "far"  => c.far  = self.expect_number()?,
-                            _other  => {
-                                return Err(SceneError::new(
-                                    _ln,
-                                    format!("unknown camera field"),
-                                ));
+                            "far" => c.far = self.expect_number()?,
+                            _other => {
+                                return Err(SceneError::new(_ln, format!("unknown camera field")));
                             }
                         }
                     }
@@ -506,15 +532,18 @@ impl<'a> Parser<'a> {
 
         let mut l = LightDef {
             direction: Vec3::new(0.0, -1.0, 0.0),
-            color:     Color::WHITE,
+            color: Color::WHITE,
             intensity: 1.0,
-            ambient:   0.15,
+            ambient: 0.15,
         };
 
         loop {
             let _ln = self.lex.line;
             match self.peek()? {
-                Some(Token::RBrace) => { self.next()?; break; }
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
                 Some(Token::Word(_)) => {
                     if let Some(Token::Word(key)) = self.next()? {
                         match key {
@@ -532,12 +561,9 @@ impl<'a> Parser<'a> {
                                 l.color = Color::new(r, g, b, a);
                             }
                             "intensity" => l.intensity = self.expect_number()?,
-                            "ambient"   => l.ambient   = self.expect_number()?,
+                            "ambient" => l.ambient = self.expect_number()?,
                             _ => {
-                                return Err(SceneError::new(
-                                    _ln,
-                                    format!("unknown light field"),
-                                ));
+                                return Err(SceneError::new(_ln, format!("unknown light field")));
                             }
                         }
                     }
@@ -558,30 +584,30 @@ impl<'a> Parser<'a> {
         self.expect_lbrace()?;
 
         let mut s = StatsDef {
-            health:  100.0,
-            mana:    0.0,
-            attack:  0.0,
+            health: 100.0,
+            mana: 0.0,
+            attack: 0.0,
             defense: 0.0,
-            speed:   0.0,
+            speed: 0.0,
         };
 
         loop {
             let _ln = self.lex.line;
             match self.peek()? {
-                Some(Token::RBrace) => { self.next()?; break; }
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
                 Some(Token::Word(_)) => {
                     if let Some(Token::Word(key)) = self.next()? {
                         match key {
-                            "health"  => s.health  = self.expect_number()?,
-                            "mana"    => s.mana    = self.expect_number()?,
-                            "attack"  => s.attack  = self.expect_number()?,
+                            "health" => s.health = self.expect_number()?,
+                            "mana" => s.mana = self.expect_number()?,
+                            "attack" => s.attack = self.expect_number()?,
                             "defense" => s.defense = self.expect_number()?,
-                            "speed"   => s.speed   = self.expect_number()?,
-                            _other     => {
-                                return Err(SceneError::new(
-                                    _ln,
-                                    format!("unknown stats field"),
-                                ));
+                            "speed" => s.speed = self.expect_number()?,
+                            _other => {
+                                return Err(SceneError::new(_ln, format!("unknown stats field")));
                             }
                         }
                     }
@@ -629,15 +655,21 @@ pub fn spawn_scene(
         let entity = world.spawn();
 
         if let Some(t) = &def.transform {
-            world.add_component(entity, Transform {
-                position: t.position,
-                rotation: t.rotation,
-                scale:    t.scale,
-            });
+            world.add_component(
+                entity,
+                Transform {
+                    position: t.position,
+                    rotation: t.rotation,
+                    scale: t.scale,
+                },
+            );
         }
 
         if let Some(c) = &def.camera {
-            world.add_component(entity, Camera::perspective(c.fov, 16.0 / 9.0, c.near, c.far));
+            world.add_component(
+                entity,
+                Camera::perspective(c.fov, 16.0 / 9.0, c.near, c.far),
+            );
         }
 
         if def.active_camera {
@@ -645,18 +677,22 @@ pub fn spawn_scene(
         }
 
         if let Some(l) = &def.light {
-            world.add_component(entity, DirectionalLight {
-                direction: l.direction.normalize(),
-                color:     l.color,
-                intensity: l.intensity,
-                ambient:   l.ambient,
-            });
+            world.add_component(
+                entity,
+                DirectionalLight {
+                    direction: l.direction.normalize(),
+                    color: l.color,
+                    intensity: l.intensity,
+                    ambient: l.ambient,
+                },
+            );
         }
 
         if let Some(s) = &def.stats {
-            world.add_component(entity, Stats::new(
-                s.health, s.mana, s.attack, s.defense, s.speed,
-            ));
+            world.add_component(
+                entity,
+                Stats::new(s.health, s.mana, s.attack, s.defense, s.speed),
+            );
         }
 
         if !def.name.is_empty() {
@@ -670,9 +706,10 @@ pub fn spawn_scene(
             let child = name_map.get(&def.name).copied().ok_or_else(|| {
                 SceneError::new(0, format!("entity '{}' not found in name map", def.name))
             })?;
-            let parent = name_map.get(parent_name.as_str()).copied().ok_or_else(|| {
-                SceneError::new(0, format!("parent '{}' not found", parent_name))
-            })?;
+            let parent = name_map
+                .get(parent_name.as_str())
+                .copied()
+                .ok_or_else(|| SceneError::new(0, format!("parent '{}' not found", parent_name)))?;
             world.set_parent(child, parent);
         }
     }
@@ -699,16 +736,22 @@ pub fn serialize_scene(scene: &SceneData) -> String {
             out.push_str("  transform {\n");
             out.push_str(&format!(
                 "    pos {} {} {}\n",
-                fmt_f32(t.position.x), fmt_f32(t.position.y), fmt_f32(t.position.z),
+                fmt_f32(t.position.x),
+                fmt_f32(t.position.y),
+                fmt_f32(t.position.z),
             ));
             out.push_str(&format!(
                 "    rot {} {} {} {}\n",
-                fmt_f32(t.rotation.x), fmt_f32(t.rotation.y),
-                fmt_f32(t.rotation.z), fmt_f32(t.rotation.w),
+                fmt_f32(t.rotation.x),
+                fmt_f32(t.rotation.y),
+                fmt_f32(t.rotation.z),
+                fmt_f32(t.rotation.w),
             ));
             out.push_str(&format!(
                 "    scale {} {} {}\n",
-                fmt_f32(t.scale.x), fmt_f32(t.scale.y), fmt_f32(t.scale.z),
+                fmt_f32(t.scale.x),
+                fmt_f32(t.scale.y),
+                fmt_f32(t.scale.z),
             ));
             out.push_str("  }\n");
         }
@@ -716,7 +759,9 @@ pub fn serialize_scene(scene: &SceneData) -> String {
         if let Some(c) = &def.camera {
             out.push_str(&format!(
                 "  camera {{ fov {} near {} far {} }}\n",
-                fmt_f32(c.fov), fmt_f32(c.near), fmt_f32(c.far),
+                fmt_f32(c.fov),
+                fmt_f32(c.near),
+                fmt_f32(c.far),
             ));
         }
 
@@ -728,12 +773,16 @@ pub fn serialize_scene(scene: &SceneData) -> String {
             out.push_str("  light {\n");
             out.push_str(&format!(
                 "    dir {} {} {}\n",
-                fmt_f32(l.direction.x), fmt_f32(l.direction.y), fmt_f32(l.direction.z),
+                fmt_f32(l.direction.x),
+                fmt_f32(l.direction.y),
+                fmt_f32(l.direction.z),
             ));
             out.push_str(&format!(
                 "    color {} {} {} {}\n",
-                fmt_f32(l.color.r), fmt_f32(l.color.g),
-                fmt_f32(l.color.b), fmt_f32(l.color.a),
+                fmt_f32(l.color.r),
+                fmt_f32(l.color.g),
+                fmt_f32(l.color.b),
+                fmt_f32(l.color.a),
             ));
             out.push_str(&format!("    intensity {}\n", fmt_f32(l.intensity)));
             out.push_str(&format!("    ambient {}\n", fmt_f32(l.ambient)));
@@ -743,8 +792,11 @@ pub fn serialize_scene(scene: &SceneData) -> String {
         if let Some(s) = &def.stats {
             out.push_str(&format!(
                 "  stats {{ health {} mana {} attack {} defense {} speed {} }}\n",
-                fmt_f32(s.health), fmt_f32(s.mana), fmt_f32(s.attack),
-                fmt_f32(s.defense), fmt_f32(s.speed),
+                fmt_f32(s.health),
+                fmt_f32(s.mana),
+                fmt_f32(s.attack),
+                fmt_f32(s.defense),
+                fmt_f32(s.speed),
             ));
         }
 

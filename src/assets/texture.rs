@@ -36,17 +36,21 @@ pub enum TexError {
 impl fmt::Display for TexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TexError::Io(e)          => write!(f, "IO error: {e}"),
-            TexError::BadMagic       => write!(f, "unrecognised file header"),
+            TexError::Io(e) => write!(f, "IO error: {e}"),
+            TexError::BadMagic => write!(f, "unrecognised file header"),
             TexError::Unsupported(s) => write!(f, "unsupported: {s}"),
-            TexError::Truncated      => write!(f, "file truncated"),
+            TexError::Truncated => write!(f, "file truncated"),
         }
     }
 }
 
 impl std::error::Error for TexError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let TexError::Io(e) = self { Some(e) } else { None }
+        if let TexError::Io(e) = self {
+            Some(e)
+        } else {
+            None
+        }
     }
 }
 
@@ -105,9 +109,9 @@ pub fn decode_bmp(data: &[u8]) -> Result<Texture, TexError> {
             "DIB header size {dib_size} (only BITMAPINFOHEADER supported)"
         )));
     }
-    let raw_width  = i32_le(data, 18);
+    let raw_width = i32_le(data, 18);
     let raw_height = i32_le(data, 22);
-    let bpp        = u16_le(data, 28);
+    let bpp = u16_le(data, 28);
     let compression = u32_le(data, 30);
 
     if compression != 0 {
@@ -121,24 +125,24 @@ pub fn decode_bmp(data: &[u8]) -> Result<Texture, TexError> {
         )));
     }
 
-    let width  = raw_width.unsigned_abs();
+    let width = raw_width.unsigned_abs();
     let height = raw_height.unsigned_abs();
     // Positive height = bottom-up; negative = top-down.
     let bottom_up = raw_height > 0;
 
     let bytes_per_pixel = (bpp / 8) as usize;
-    let row_bytes       = width as usize * bytes_per_pixel;
+    let row_bytes = width as usize * bytes_per_pixel;
     // BMP rows are padded to a 4-byte boundary.
     let stride = (row_bytes + 3) & !3;
 
     let pixel_data = data.get(pixel_offset..).ok_or(TexError::Truncated)?;
-    let needed     = stride * height as usize;
+    let needed = stride * height as usize;
     if pixel_data.len() < needed {
         return Err(TexError::Truncated);
     }
 
     // ── Decode to RGBA8 ───────────────────────────────────────────────────
-    let w = width  as usize;
+    let w = width as usize;
     let h = height as usize;
     let mut rgba = vec![255u8; w * h * 4];
 
@@ -151,9 +155,9 @@ pub fn decode_bmp(data: &[u8]) -> Result<Texture, TexError> {
             let si = src_off + col * bytes_per_pixel;
             let di = dst_off + col * 4;
             // BMP stores pixels as BGR(A).
-            rgba[di]     = pixel_data[si + 2]; // R
+            rgba[di] = pixel_data[si + 2]; // R
             rgba[di + 1] = pixel_data[si + 1]; // G
-            rgba[di + 2] = pixel_data[si];     // B
+            rgba[di + 2] = pixel_data[si]; // B
             rgba[di + 3] = if bpp == 32 { pixel_data[si + 3] } else { 255 };
         }
     }
@@ -162,7 +166,7 @@ pub fn decode_bmp(data: &[u8]) -> Result<Texture, TexError> {
         width,
         height,
         format: TextureFormat::Rgba8,
-        data:   rgba,
+        data: rgba,
     })
 }
 
@@ -189,12 +193,12 @@ pub fn decode_tga(data: &[u8]) -> Result<Texture, TexError> {
     if data.len() < 18 {
         return Err(TexError::Truncated);
     }
-    let id_len     = data[0] as usize;
-    let cmap_type  = data[1];
-    let img_type   = data[2];
-    let width      = u16_le(data, 12) as u32;
-    let height     = u16_le(data, 14) as u32;
-    let bpp        = data[16];
+    let id_len = data[0] as usize;
+    let cmap_type = data[1];
+    let img_type = data[2];
+    let width = u16_le(data, 12) as u32;
+    let height = u16_le(data, 14) as u32;
+    let bpp = data[16];
     let descriptor = data[17];
 
     if cmap_type != 0 {
@@ -214,12 +218,12 @@ pub fn decode_tga(data: &[u8]) -> Result<Texture, TexError> {
     }
 
     let bytes_per_pixel = (bpp / 8) as usize;
-    let pixel_count     = (width as usize) * (height as usize);
-    let origin_top      = (descriptor & 0x20) != 0;
+    let pixel_count = (width as usize) * (height as usize);
+    let origin_top = (descriptor & 0x20) != 0;
 
     // Skip past the image ID field.
     let pixel_start = 18 + id_len;
-    let pixel_data  = data.get(pixel_start..).ok_or(TexError::Truncated)?;
+    let pixel_data = data.get(pixel_start..).ok_or(TexError::Truncated)?;
 
     // ── Decode raw BGR(A) pixels ──────────────────────────────────────────
     let bgra: Vec<u8> = if img_type == 2 {
@@ -235,7 +239,7 @@ pub fn decode_tga(data: &[u8]) -> Result<Texture, TexError> {
     };
 
     // ── Convert BGR(A) → RGBA8 and flip rows if needed ────────────────────
-    let w = width  as usize;
+    let w = width as usize;
     let h = height as usize;
     let mut rgba = vec![255u8; pixel_count * 4];
 
@@ -247,9 +251,9 @@ pub fn decode_tga(data: &[u8]) -> Result<Texture, TexError> {
         for col in 0..w {
             let si = src_off + col * bytes_per_pixel;
             let di = dst_off + col * 4;
-            rgba[di]     = bgra[si + 2]; // R
+            rgba[di] = bgra[si + 2]; // R
             rgba[di + 1] = bgra[si + 1]; // G
-            rgba[di + 2] = bgra[si];     // B
+            rgba[di + 2] = bgra[si]; // B
             rgba[di + 3] = if bpp == 32 { bgra[si + 3] } else { 255 };
         }
     }
@@ -258,14 +262,14 @@ pub fn decode_tga(data: &[u8]) -> Result<Texture, TexError> {
         width,
         height,
         format: TextureFormat::Rgba8,
-        data:   rgba,
+        data: rgba,
     })
 }
 
 /// Decode TGA run-length-encoded pixel data.
 fn decode_tga_rle(
-    src:             &[u8],
-    pixel_count:     usize,
+    src: &[u8],
+    pixel_count: usize,
     bytes_per_pixel: usize,
 ) -> Result<Vec<u8>, TexError> {
     let mut out = Vec::with_capacity(pixel_count * bytes_per_pixel);
@@ -314,10 +318,15 @@ fn decode_tga_rle(
 /// Recognised extensions: `.bmp`, `.tga` (case-insensitive).
 pub fn load_texture<P: AsRef<Path>>(path: P) -> Result<Texture, TexError> {
     let p = path.as_ref();
-    match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("bmp") => load_bmp(p),
         Some("tga") => load_tga(p),
-        Some(ext)   => Err(TexError::Unsupported(format!("unknown extension .{ext}"))),
-        None        => Err(TexError::Unsupported("no file extension".into())),
+        Some(ext) => Err(TexError::Unsupported(format!("unknown extension .{ext}"))),
+        None => Err(TexError::Unsupported("no file extension".into())),
     }
 }

@@ -23,13 +23,17 @@ pub enum QuestState {
 #[derive(Debug, Clone)]
 pub struct QuestObjective {
     pub description: String,
-    pub current:     u32,
-    pub required:    u32,
+    pub current: u32,
+    pub required: u32,
 }
 
 impl QuestObjective {
     pub fn new(description: impl Into<String>, required: u32) -> Self {
-        Self { description: description.into(), current: 0, required }
+        Self {
+            description: description.into(),
+            current: 0,
+            required,
+        }
     }
 
     /// Is this individual objective satisfied?
@@ -51,13 +55,13 @@ impl QuestObjective {
 /// centrally in a [QuestLog].
 #[derive(Debug, Clone)]
 pub struct Quest {
-    pub id:          QuestId,
-    pub name:        String,
+    pub id: QuestId,
+    pub name: String,
     pub description: String,
-    pub state:       QuestState,
-    pub objectives:  Vec<QuestObjective>,
+    pub state: QuestState,
+    pub objectives: Vec<QuestObjective>,
     /// Optional XP reward.
-    pub xp_reward:   u32,
+    pub xp_reward: u32,
 }
 
 impl Quest {
@@ -91,7 +95,9 @@ impl Quest {
     /// Advance objective at index.  Automatically transitions to
     /// [QuestState::Complete] when all objectives are met.
     pub fn advance_objective(&mut self, index: usize, amount: u32) {
-        if self.state != QuestState::Active { return; }
+        if self.state != QuestState::Active {
+            return;
+        }
         if let Some(obj) = self.objectives.get_mut(index) {
             obj.advance(amount);
         }
@@ -167,5 +173,7 @@ impl QuestLog {
 }
 
 impl Default for QuestLog {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

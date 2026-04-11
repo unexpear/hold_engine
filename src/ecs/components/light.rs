@@ -9,11 +9,11 @@ pub struct DirectionalLight {
     /// Direction toward the light (normalised).
     pub direction: Vec3,
     /// Light colour.
-    pub color:     Color,
+    pub color: Color,
     /// Diffuse intensity multiplier (0.0 = off, 1.0 = full).
     pub intensity: f32,
     /// Ambient floor -- minimum brightness even in full shadow (0.0 .. 1.0).
-    pub ambient:   f32,
+    pub ambient: f32,
 }
 
 impl DirectionalLight {
@@ -23,7 +23,7 @@ impl DirectionalLight {
             direction: direction.normalize(),
             color,
             intensity: 1.0,
-            ambient:   0.15,
+            ambient: 0.15,
         }
     }
 
@@ -35,7 +35,7 @@ impl DirectionalLight {
     pub fn shade(&self, normal: Vec3, base_color: Color) -> Color {
         let n_dot_l = normal.dot(self.direction).max(0.0);
         let diffuse = n_dot_l * self.intensity;
-        let total   = (self.ambient + diffuse).min(1.0);
+        let total = (self.ambient + diffuse).min(1.0);
         Color {
             r: (base_color.r * self.color.r * total).min(1.0),
             g: (base_color.g * self.color.g * total).min(1.0),

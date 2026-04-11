@@ -11,7 +11,7 @@ enum SlotState<T> {
 
 struct Slot<T> {
     generation: u32,
-    state:      SlotState<T>,
+    state: SlotState<T>,
 }
 
 // ---------------------------------------------------------------------------
@@ -25,12 +25,15 @@ struct Slot<T> {
 /// any old handles referring to that slot will be rejected.
 pub struct AssetPool<T> {
     slots: Vec<Slot<T>>,
-    free:  Vec<u32>, // recycled indices ready for reuse
+    free: Vec<u32>, // recycled indices ready for reuse
 }
 
 impl<T> Default for AssetPool<T> {
     fn default() -> Self {
-        Self { slots: Vec::new(), free: Vec::new() }
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
     }
 }
 
@@ -50,7 +53,10 @@ impl<T> AssetPool<T> {
             Handle::new(index, slot.generation)
         } else {
             let index = self.slots.len() as u32;
-            self.slots.push(Slot { generation: 0, state: SlotState::Occupied(value) });
+            self.slots.push(Slot {
+                generation: 0,
+                state: SlotState::Occupied(value),
+            });
             Handle::new(index, 0)
         }
     }
@@ -73,7 +79,7 @@ impl<T> AssetPool<T> {
         self.free.push(handle.index);
         match old_state {
             SlotState::Occupied(v) => Some(v),
-            SlotState::Empty       => None,
+            SlotState::Empty => None,
         }
     }
 
@@ -88,7 +94,7 @@ impl<T> AssetPool<T> {
         }
         match &slot.state {
             SlotState::Occupied(v) => Some(v),
-            SlotState::Empty       => None,
+            SlotState::Empty => None,
         }
     }
 
@@ -103,7 +109,7 @@ impl<T> AssetPool<T> {
         }
         match &mut slot.state {
             SlotState::Occupied(v) => Some(v),
-            SlotState::Empty       => None,
+            SlotState::Empty => None,
         }
     }
 
@@ -114,14 +120,13 @@ impl<T> AssetPool<T> {
 
     /// Iterate over all live assets together with their handles.
     pub fn iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> {
-        self.slots.iter().enumerate().filter_map(|(i, slot)| {
-            match &slot.state {
-                SlotState::Occupied(v) => {
-                    Some((Handle::new(i as u32, slot.generation), v))
-                }
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| match &slot.state {
+                SlotState::Occupied(v) => Some((Handle::new(i as u32, slot.generation), v)),
                 SlotState::Empty => None,
-            }
-        })
+            })
     }
 
     /// Iterate mutably over all live assets together with their handles.
@@ -130,7 +135,7 @@ impl<T> AssetPool<T> {
             let gen = slot.generation;
             match &mut slot.state {
                 SlotState::Occupied(v) => Some((Handle::new(i as u32, gen), v)),
-                SlotState::Empty       => None,
+                SlotState::Empty => None,
             }
         })
     }

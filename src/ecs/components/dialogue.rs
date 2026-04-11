@@ -17,7 +17,10 @@ pub struct DialogueChoice {
 
 impl DialogueChoice {
     pub fn new(text: impl Into<String>, next: Option<NodeId>) -> Self {
-        Self { text: text.into(), next }
+        Self {
+            text: text.into(),
+            next,
+        }
     }
 
     /// Shorthand: choice that leads to another node.
@@ -52,16 +55,22 @@ impl DialogueNode {
         text: impl Into<String>,
         choices: Vec<DialogueChoice>,
     ) -> Self {
-        Self { speaker: speaker.into(), text: text.into(), choices, next: None }
+        Self {
+            speaker: speaker.into(),
+            text: text.into(),
+            choices,
+            next: None,
+        }
     }
 
     /// Speech node that auto-advances to the next node (no player choice).
-    pub fn say(
-        speaker: impl Into<String>,
-        text: impl Into<String>,
-        next: Option<NodeId>,
-    ) -> Self {
-        Self { speaker: speaker.into(), text: text.into(), choices: Vec::new(), next }
+    pub fn say(speaker: impl Into<String>, text: impl Into<String>, next: Option<NodeId>) -> Self {
+        Self {
+            speaker: speaker.into(),
+            text: text.into(),
+            choices: Vec::new(),
+            next,
+        }
     }
 }
 
@@ -73,7 +82,10 @@ pub struct DialogueTree {
 
 impl DialogueTree {
     pub fn new(start: NodeId) -> Self {
-        Self { nodes: HashMap::new(), start }
+        Self {
+            nodes: HashMap::new(),
+            start,
+        }
     }
 
     /// Insert a node. Returns &mut Self for chaining.
@@ -111,7 +123,10 @@ pub struct ActiveDialogue {
 
 impl ActiveDialogue {
     pub fn start(tree_owner: crate::ecs::Entity, tree: &DialogueTree) -> Self {
-        Self { tree_owner, current_node: tree.start }
+        Self {
+            tree_owner,
+            current_node: tree.start,
+        }
     }
 
     /// Advance through a node that has no choices (auto-advance).

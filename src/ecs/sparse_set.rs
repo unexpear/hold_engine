@@ -24,20 +24,20 @@ const MAX_ENTITY_INDEX: usize = 4_000_000;
 ///
 /// All five arrays are kept in sync on every insert/remove.
 pub struct SparseSet<T> {
-    sparse:        Vec<u32>,
-    dense:         Vec<T>,
-    entities:      Vec<Entity>,
-    added_ticks:   Vec<u32>,
+    sparse: Vec<u32>,
+    dense: Vec<T>,
+    entities: Vec<Entity>,
+    added_ticks: Vec<u32>,
     changed_ticks: Vec<u32>,
 }
 
 impl<T> SparseSet<T> {
     pub fn new() -> Self {
         Self {
-            sparse:        Vec::new(),
-            dense:         Vec::new(),
-            entities:      Vec::new(),
-            added_ticks:   Vec::new(),
+            sparse: Vec::new(),
+            dense: Vec::new(),
+            entities: Vec::new(),
+            added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
         }
     }
@@ -51,7 +51,11 @@ impl<T> SparseSet<T> {
     ///   the original insertion tick.
     pub fn insert(&mut self, entity: Entity, value: T, tick: u32) {
         let idx = entity.index as usize;
-        assert!(idx < MAX_ENTITY_INDEX, "entity index {} exceeds MAX_ENTITY_INDEX", idx);
+        assert!(
+            idx < MAX_ENTITY_INDEX,
+            "entity index {} exceeds MAX_ENTITY_INDEX",
+            idx
+        );
 
         // Grow sparse array if needed, filling gaps with ABSENT.
         if idx >= self.sparse.len() {
@@ -62,8 +66,8 @@ impl<T> SparseSet<T> {
         if slot != ABSENT {
             // Overwrite — keep added_tick, update changed_tick.
             let s = slot as usize;
-            self.dense[s]         = value;
-            self.entities[s]      = entity;
+            self.dense[s] = value;
+            self.entities[s] = entity;
             self.changed_ticks[s] = tick;
         } else {
             // New insert — set both ticks.
@@ -122,7 +126,11 @@ impl<T> SparseSet<T> {
             return None;
         }
         let slot = self.sparse[idx];
-        if slot == ABSENT { None } else { Some(&self.dense[slot as usize]) }
+        if slot == ABSENT {
+            None
+        } else {
+            Some(&self.dense[slot as usize])
+        }
     }
 
     pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
@@ -131,7 +139,11 @@ impl<T> SparseSet<T> {
             return None;
         }
         let slot = self.sparse[idx];
-        if slot == ABSENT { None } else { Some(&mut self.dense[slot as usize]) }
+        if slot == ABSENT {
+            None
+        } else {
+            Some(&mut self.dense[slot as usize])
+        }
     }
 
     /// Return a [`Mut<T>`] guard that tracks the `changed_tick` when written through.
@@ -146,7 +158,7 @@ impl<T> SparseSet<T> {
         }
         let s = slot as usize;
         Some(Mut {
-            value:        &mut self.dense[s],
+            value: &mut self.dense[s],
             changed_tick: &mut self.changed_ticks[s],
             current_tick,
         })
@@ -161,10 +173,10 @@ impl<T> SparseSet<T> {
     pub fn iter_added_since(&self, since: u32) -> SparseSetTickIter<'_, T> {
         SparseSetTickIter {
             entities: &self.entities,
-            dense:    &self.dense,
-            ticks:    &self.added_ticks,
+            dense: &self.dense,
+            ticks: &self.added_ticks,
             since,
-            pos:      0,
+            pos: 0,
         }
     }
 
@@ -175,10 +187,10 @@ impl<T> SparseSet<T> {
     pub fn iter_changed_since(&self, since: u32) -> SparseSetTickIter<'_, T> {
         SparseSetTickIter {
             entities: &self.entities,
-            dense:    &self.dense,
-            ticks:    &self.changed_ticks,
+            dense: &self.dense,
+            ticks: &self.changed_ticks,
             since,
-            pos:      0,
+            pos: 0,
         }
     }
 
@@ -188,8 +200,8 @@ impl<T> SparseSet<T> {
     pub fn iter(&self) -> SparseSetIter<'_, T> {
         SparseSetIter {
             entities: &self.entities,
-            dense:    &self.dense,
-            pos:      0,
+            dense: &self.dense,
+            pos: 0,
         }
     }
 
@@ -197,7 +209,7 @@ impl<T> SparseSet<T> {
     pub fn iter_mut(&mut self) -> SparseSetIterMut<'_, T> {
         SparseSetIterMut {
             entities: self.entities.iter(),
-            dense:    self.dense.iter_mut(),
+            dense: self.dense.iter_mut(),
         }
     }
 
@@ -221,14 +233,18 @@ impl<T> Default for SparseSet<T> {
 
 pub struct SparseSetIter<'a, T> {
     entities: &'a [Entity],
-    dense:    &'a [T],
-    pos:      usize,
+    dense: &'a [T],
+    pos: usize,
 }
 
 impl<'a, T> SparseSetIter<'a, T> {
     /// An iterator that yields nothing (used when no storage exists for a type).
     pub fn empty() -> Self {
-        Self { entities: &[], dense: &[], pos: 0 }
+        Self {
+            entities: &[],
+            dense: &[],
+            pos: 0,
+        }
     }
 }
 
@@ -240,7 +256,7 @@ impl<'a, T> Iterator for SparseSetIter<'a, T> {
             return None;
         }
         let entity = self.entities[self.pos];
-        let value  = &self.dense[self.pos];
+        let value = &self.dense[self.pos];
         self.pos += 1;
         Some((entity, value))
     }
@@ -250,7 +266,7 @@ impl<'a, T> Iterator for SparseSetIter<'a, T> {
 
 pub struct SparseSetIterMut<'a, T> {
     entities: std::slice::Iter<'a, Entity>,
-    dense:    std::slice::IterMut<'a, T>,
+    dense: std::slice::IterMut<'a, T>,
 }
 
 impl<'a, T> Iterator for SparseSetIterMut<'a, T> {
@@ -258,7 +274,7 @@ impl<'a, T> Iterator for SparseSetIterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let entity = *self.entities.next()?;
-        let value  = self.dense.next()?;
+        let value = self.dense.next()?;
         Some((entity, value))
     }
 }
@@ -270,15 +286,21 @@ impl<'a, T> Iterator for SparseSetIterMut<'a, T> {
 /// Used by [`SparseSet::iter_added_since`] and [`SparseSet::iter_changed_since`].
 pub struct SparseSetTickIter<'a, T> {
     entities: &'a [Entity],
-    dense:    &'a [T],
-    ticks:    &'a [u32],
-    since:    u32,
-    pos:      usize,
+    dense: &'a [T],
+    ticks: &'a [u32],
+    since: u32,
+    pos: usize,
 }
 
 impl<'a, T> SparseSetTickIter<'a, T> {
     pub fn empty() -> Self {
-        Self { entities: &[], dense: &[], ticks: &[], since: 0, pos: 0 }
+        Self {
+            entities: &[],
+            dense: &[],
+            ticks: &[],
+            since: 0,
+            pos: 0,
+        }
     }
 }
 
@@ -290,9 +312,9 @@ impl<'a, T> Iterator for SparseSetTickIter<'a, T> {
             if self.pos >= self.dense.len() {
                 return None;
             }
-            let tick   = self.ticks[self.pos];
+            let tick = self.ticks[self.pos];
             let entity = self.entities[self.pos];
-            let value  = &self.dense[self.pos];
+            let value = &self.dense[self.pos];
             self.pos += 1;
             if tick > self.since {
                 return Some((entity, value));

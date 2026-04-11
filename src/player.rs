@@ -1,7 +1,7 @@
 //! Player controller -- capsule movement, gravity, terrain collision.
 
-use crate::math::Vec3;
 use crate::lod::LodTerrain;
+use crate::math::Vec3;
 
 /// First-person player with capsule collision against the heightmap terrain.
 pub struct PlayerController {
@@ -15,9 +15,9 @@ pub struct PlayerController {
     pub height: f32,
     pub move_speed: f32,
     pub jump_speed: f32,
-    pub gravity:    f32,
-    pub yaw:              f32,
-    pub pitch:            f32,
+    pub gravity: f32,
+    pub yaw: f32,
+    pub pitch: f32,
     pub look_sensitivity: f32,
     pub grounded: bool,
 }
@@ -41,7 +41,11 @@ impl PlayerController {
 
     /// Eye position -- near the top of the capsule.
     pub fn eye_position(&self) -> Vec3 {
-        Vec3::new(self.position.x, self.position.y + self.height * 0.5 - 0.1, self.position.z)
+        Vec3::new(
+            self.position.x,
+            self.position.y + self.height * 0.5 - 0.1,
+            self.position.z,
+        )
     }
 
     /// Forward direction on the XZ plane (derived from yaw).
@@ -72,17 +76,21 @@ impl PlayerController {
         let half_pi = std::f32::consts::FRAC_PI_2 - 0.01;
 
         // Mouse look
-        self.yaw   += look_delta.0 * self.look_sensitivity;
+        self.yaw += look_delta.0 * self.look_sensitivity;
         self.pitch -= look_delta.1 * self.look_sensitivity;
-        self.pitch  = self.pitch.clamp(-half_pi, half_pi);
+        self.pitch = self.pitch.clamp(-half_pi, half_pi);
 
         // Horizontal movement
         let forward = self.forward();
-        let right   = self.right();
+        let right = self.right();
         let wish = forward * move_input.z + right * move_input.x;
         let wish_len = wish.length();
         if wish_len > 0.0 {
-            let speed = if sprint { self.move_speed * 2.5 } else { self.move_speed };
+            let speed = if sprint {
+                self.move_speed * 2.5
+            } else {
+                self.move_speed
+            };
             let step = wish * (speed * dt / wish_len);
             self.position.x += step.x;
             self.position.z += step.z;
@@ -120,7 +128,8 @@ impl PlayerController {
         let x = self.position.x;
         let z = self.position.z;
         let r = self.radius;
-        terrain.height_at(x, z)
+        terrain
+            .height_at(x, z)
             .max(terrain.height_at(x + r, z))
             .max(terrain.height_at(x - r, z))
             .max(terrain.height_at(x, z + r))

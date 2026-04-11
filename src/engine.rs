@@ -7,7 +7,6 @@ use crate::platform::Window;
 use crate::renderer::Renderer;
 use std::time::Instant;
 
-
 /// Trait for structured game applications.
 ///
 /// Implement this instead of using a raw closure with `Engine::run`.
@@ -31,26 +30,31 @@ pub trait App {
     /// Called once before the first frame.
     fn setup(&mut self, _world: &mut World) {}
     /// Called every frame.
-    fn update(&mut self, world: &mut World, renderer: &mut dyn Renderer, input: &InputState, dt: f32);
+    fn update(
+        &mut self,
+        world: &mut World,
+        renderer: &mut dyn Renderer,
+        input: &InputState,
+        dt: f32,
+    );
 }
 
-
 pub struct Engine {
-    pub world:    World,
+    pub world: World,
     pub schedule: SystemSchedule,
-    pub window:   Window,
-    input:        InputState,
-    fps_timer:    f32,   // seconds since last title update
+    pub window: Window,
+    input: InputState,
+    fps_timer: f32, // seconds since last title update
 }
 
 impl Engine {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let window = Window::new(title, width, height);
         Self {
-            world:    World::new(),
+            world: World::new(),
             schedule: SystemSchedule::new(),
             window,
-            input:    InputState::new(),
+            input: InputState::new(),
             fps_timer: 0.0,
         }
     }

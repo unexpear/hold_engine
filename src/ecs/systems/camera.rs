@@ -1,6 +1,6 @@
-use crate::ecs::{Entity, System, SystemAccess, World};
 use crate::ecs::components::{ActiveCamera, Camera, CameraMode, GlobalTransform};
-use crate::math::{Vec3, Mat4};
+use crate::ecs::{Entity, System, SystemAccess, World};
+use crate::math::{Mat4, Vec3};
 
 /// Recomputes [\Camera::view\] (and rebuilds proj if aspect changed) for every
 /// entity that carries both [\ActiveCamera\] and [\Camera\].
@@ -22,7 +22,6 @@ impl System for CameraSystem {
             .read::<GlobalTransform>()
     }
 
-
     fn update(&mut self, world: &mut World, _dt: f32) {
         // Collect active cameras together with their CameraMode in one pass,
         // avoiding a separate world.get::<CameraMode> call inside the loop.
@@ -34,11 +33,11 @@ impl System for CameraSystem {
             .collect();
 
         for (entity, mode) in cameras {
-
             let view = match mode {
                 CameraMode::FirstPerson { yaw, pitch, .. } => {
                     // Position comes from the entity's GlobalTransform.
-                    let pos = world.get::<GlobalTransform>(entity)
+                    let pos = world
+                        .get::<GlobalTransform>(entity)
                         .map(|gt| gt.matrix.extract_position())
                         .unwrap_or(Vec3::ZERO);
 
@@ -52,25 +51,31 @@ impl System for CameraSystem {
                     Mat4::look_at(pos, pos + forward, Vec3::Y)
                 }
 
-                CameraMode::ThirdPerson { target, distance, yaw, pitch } => {
+                CameraMode::ThirdPerson {
+                    target,
+                    distance,
+                    yaw,
+                    pitch,
+                } => {
                     // World-space position of the entity we're orbiting.
                     let target_pos = world
                         .get::<GlobalTransform>(target)
                         .map(|gt| gt.matrix.extract_position())
                         .unwrap_or(Vec3::ZERO);
 
-                    // Spherical to Cartesian — orbit around target.    
-                    let eye = target_pos + Vec3::new(
-                        yaw.sin() * pitch.cos() * distance,
-                        pitch.sin()             * distance,
-                        yaw.cos() * pitch.cos() * distance,
-                    );
+                    // Spherical to Cartesian — orbit around target.
+                    let eye = target_pos
+                        + Vec3::new(
+                            yaw.sin() * pitch.cos() * distance,
+                            pitch.sin() * distance,
+                            yaw.cos() * pitch.cos() * distance,
+                        );
 
                     Mat4::look_at(eye, target_pos, Vec3::Y)
                 }
             };
 
-            if let Some(cam) = world.get_mut::<Camera>(entity) {        
+            if let Some(cam) = world.get_mut::<Camera>(entity) {
                 cam.view = view;
             }
         }

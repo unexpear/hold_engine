@@ -14,7 +14,9 @@ pub struct AssetStore {
 
 impl Default for AssetStore {
     fn default() -> Self {
-        Self { pools: HashMap::new() }
+        Self {
+            pools: HashMap::new(),
+        }
     }
 }
 

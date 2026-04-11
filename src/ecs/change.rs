@@ -26,7 +26,7 @@ use std::ops::{Deref, DerefMut};
 ///
 /// Obtain one via [`super::world::World::get_tracked_mut`].
 pub struct Mut<'a, T> {
-    pub(crate) value:        &'a mut T,
+    pub(crate) value: &'a mut T,
     pub(crate) changed_tick: &'a mut u32,
     pub(crate) current_tick: u32,
 }

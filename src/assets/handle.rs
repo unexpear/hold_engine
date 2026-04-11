@@ -10,9 +10,9 @@ use std::marker::PhantomData;
 /// spurious bounds on `T` (e.g. `T: Debug`, `T: Clone`, etc.).
 #[derive(PartialEq, Eq, Hash)]
 pub struct Handle<T> {
-    pub(crate) index:      u32,
+    pub(crate) index: u32,
     pub(crate) generation: u32,
-    _marker:               PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T> Clone for Handle<T> {
@@ -34,7 +34,11 @@ impl<T> Handle<T> {
     /// Construct a handle from raw parts.  Prefer using [`AssetPool::insert`].
     #[inline]
     pub(crate) fn new(index: u32, generation: u32) -> Self {
-        Self { index, generation, _marker: PhantomData }
+        Self {
+            index,
+            generation,
+            _marker: PhantomData,
+        }
     }
 
     /// Sentinel "null" handle — never points to a valid asset.

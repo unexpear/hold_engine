@@ -16,9 +16,9 @@ use std::path::Path;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
-    pub pos:    [f32; 3],
+    pub pos: [f32; 3],
     pub normal: [f32; 3],
-    pub uv:     [f32; 2],
+    pub uv: [f32; 2],
 }
 
 // ── MeshData ──────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ pub struct Vertex {
 /// `renderer.upload_mesh(&mesh)` to get a drawable [`GpuMesh`].
 pub struct MeshData {
     pub vertices: Vec<Vertex>,
-    pub indices:  Vec<u32>,
+    pub indices: Vec<u32>,
 }
 
 impl MeshData {
@@ -65,8 +65,12 @@ impl MeshData {
         Self { vertices, indices }
     }
 
-    pub fn vertex_count(&self)   -> usize { self.vertices.len() }
-    pub fn triangle_count(&self) -> usize { self.indices.len() / 3 }
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
 
     // ── Procedural primitives ─────────────────────────────────────────────────
 
@@ -78,59 +82,81 @@ impl MeshData {
         type FaceDef = ([([f32; 3], [f32; 2]); 4], [f32; 3]);
         let faces: [FaceDef; 6] = [
             // +Z
-            ([
-                ([-0.5, -0.5,  0.5], [0.0, 0.0]),
-                ([ 0.5, -0.5,  0.5], [1.0, 0.0]),
-                ([ 0.5,  0.5,  0.5], [1.0, 1.0]),
-                ([-0.5,  0.5,  0.5], [0.0, 1.0]),
-            ], [0.0, 0.0, 1.0]),
+            (
+                [
+                    ([-0.5, -0.5, 0.5], [0.0, 0.0]),
+                    ([0.5, -0.5, 0.5], [1.0, 0.0]),
+                    ([0.5, 0.5, 0.5], [1.0, 1.0]),
+                    ([-0.5, 0.5, 0.5], [0.0, 1.0]),
+                ],
+                [0.0, 0.0, 1.0],
+            ),
             // -Z
-            ([
-                ([ 0.5, -0.5, -0.5], [0.0, 0.0]),
-                ([-0.5, -0.5, -0.5], [1.0, 0.0]),
-                ([-0.5,  0.5, -0.5], [1.0, 1.0]),
-                ([ 0.5,  0.5, -0.5], [0.0, 1.0]),
-            ], [0.0, 0.0, -1.0]),
+            (
+                [
+                    ([0.5, -0.5, -0.5], [0.0, 0.0]),
+                    ([-0.5, -0.5, -0.5], [1.0, 0.0]),
+                    ([-0.5, 0.5, -0.5], [1.0, 1.0]),
+                    ([0.5, 0.5, -0.5], [0.0, 1.0]),
+                ],
+                [0.0, 0.0, -1.0],
+            ),
             // +X
-            ([
-                ([ 0.5, -0.5,  0.5], [0.0, 0.0]),
-                ([ 0.5, -0.5, -0.5], [1.0, 0.0]),
-                ([ 0.5,  0.5, -0.5], [1.0, 1.0]),
-                ([ 0.5,  0.5,  0.5], [0.0, 1.0]),
-            ], [1.0, 0.0, 0.0]),
+            (
+                [
+                    ([0.5, -0.5, 0.5], [0.0, 0.0]),
+                    ([0.5, -0.5, -0.5], [1.0, 0.0]),
+                    ([0.5, 0.5, -0.5], [1.0, 1.0]),
+                    ([0.5, 0.5, 0.5], [0.0, 1.0]),
+                ],
+                [1.0, 0.0, 0.0],
+            ),
             // -X
-            ([
-                ([-0.5, -0.5, -0.5], [0.0, 0.0]),
-                ([-0.5, -0.5,  0.5], [1.0, 0.0]),
-                ([-0.5,  0.5,  0.5], [1.0, 1.0]),
-                ([-0.5,  0.5, -0.5], [0.0, 1.0]),
-            ], [-1.0, 0.0, 0.0]),
+            (
+                [
+                    ([-0.5, -0.5, -0.5], [0.0, 0.0]),
+                    ([-0.5, -0.5, 0.5], [1.0, 0.0]),
+                    ([-0.5, 0.5, 0.5], [1.0, 1.0]),
+                    ([-0.5, 0.5, -0.5], [0.0, 1.0]),
+                ],
+                [-1.0, 0.0, 0.0],
+            ),
             // +Y
-            ([
-                ([-0.5,  0.5,  0.5], [0.0, 0.0]),
-                ([ 0.5,  0.5,  0.5], [1.0, 0.0]),
-                ([ 0.5,  0.5, -0.5], [1.0, 1.0]),
-                ([-0.5,  0.5, -0.5], [0.0, 1.0]),
-            ], [0.0, 1.0, 0.0]),
+            (
+                [
+                    ([-0.5, 0.5, 0.5], [0.0, 0.0]),
+                    ([0.5, 0.5, 0.5], [1.0, 0.0]),
+                    ([0.5, 0.5, -0.5], [1.0, 1.0]),
+                    ([-0.5, 0.5, -0.5], [0.0, 1.0]),
+                ],
+                [0.0, 1.0, 0.0],
+            ),
             // -Y
-            ([
-                ([-0.5, -0.5, -0.5], [0.0, 0.0]),
-                ([ 0.5, -0.5, -0.5], [1.0, 0.0]),
-                ([ 0.5, -0.5,  0.5], [1.0, 1.0]),
-                ([-0.5, -0.5,  0.5], [0.0, 1.0]),
-            ], [0.0, -1.0, 0.0]),
+            (
+                [
+                    ([-0.5, -0.5, -0.5], [0.0, 0.0]),
+                    ([0.5, -0.5, -0.5], [1.0, 0.0]),
+                    ([0.5, -0.5, 0.5], [1.0, 1.0]),
+                    ([-0.5, -0.5, 0.5], [0.0, 1.0]),
+                ],
+                [0.0, -1.0, 0.0],
+            ),
         ];
 
         let mut vertices = Vec::with_capacity(24);
-        let mut indices  = Vec::with_capacity(36);
+        let mut indices = Vec::with_capacity(36);
 
         for (corners, normal) in &faces {
             let base = vertices.len() as u32;
             for &(pos, uv) in corners {
-                vertices.push(Vertex { pos, normal: *normal, uv });
+                vertices.push(Vertex {
+                    pos,
+                    normal: *normal,
+                    uv,
+                });
             }
             // Two triangles per quad (CCW): 0-1-2 and 0-2-3.
-            indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
 
         Self { vertices, indices }
@@ -143,20 +169,20 @@ impl MeshData {
     pub fn plane(cols: u32, rows: u32) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        let nx   = (cols + 1) as usize;
-        let nz   = (rows + 1) as usize;
+        let nx = (cols + 1) as usize;
+        let nz = (rows + 1) as usize;
 
         let mut vertices = Vec::with_capacity(nx * nz);
-        let mut indices  = Vec::with_capacity((cols * rows * 6) as usize);
+        let mut indices = Vec::with_capacity((cols * rows * 6) as usize);
 
         for zi in 0..nz {
             for xi in 0..nx {
                 let u = xi as f32 / cols as f32;
                 let v = zi as f32 / rows as f32;
                 vertices.push(Vertex {
-                    pos:    [u - 0.5, 0.0, v - 0.5],
+                    pos: [u - 0.5, 0.0, v - 0.5],
                     normal: [0.0, 1.0, 0.0],
-                    uv:     [u, 1.0 - v],
+                    uv: [u, 1.0 - v],
                 });
             }
         }
@@ -185,15 +211,15 @@ impl MeshData {
 
         let stacks = stacks.max(2);
         let slices = slices.max(3);
-        let row    = slices + 1; // vertices per latitude ring (seam duplicated)
+        let row = slices + 1; // vertices per latitude ring (seam duplicated)
 
         let mut vertices = Vec::with_capacity(((stacks + 1) * row) as usize);
-        let mut indices  = Vec::with_capacity((stacks * slices * 6) as usize);
+        let mut indices = Vec::with_capacity((stacks * slices * 6) as usize);
 
         for si in 0..=stacks {
             let phi = PI * si as f32 / stacks as f32; // 0 (top) → π (bottom)
-            let y   = phi.cos();
-            let r   = phi.sin();
+            let y = phi.cos();
+            let r = phi.sin();
 
             for li in 0..=slices {
                 let theta = 2.0 * PI * li as f32 / slices as f32;
@@ -203,9 +229,9 @@ impl MeshData {
                 let v = si as f32 / stacks as f32;
 
                 vertices.push(Vertex {
-                    pos:    [x, y, z],
+                    pos: [x, y, z],
                     normal: [x, y, z], // unit sphere: pos == normal
-                    uv:     [u, 1.0 - v],
+                    uv: [u, 1.0 - v],
                 });
             }
         }
@@ -238,7 +264,7 @@ impl MeshData {
 pub enum ObjError {
     Io(std::io::Error),
     ParseFloat { line: usize, value: String },
-    ParseInt   { line: usize, value: String },
+    ParseInt { line: usize, value: String },
     InvalidFace { line: usize },
     EmptyMesh,
 }
@@ -246,48 +272,58 @@ pub enum ObjError {
 impl fmt::Display for ObjError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ObjError::Io(e)                      => write!(f, "IO error: {e}"),
-            ObjError::ParseFloat { line, value } => write!(f, "line {line}: expected float, got {value:?}"),
-            ObjError::ParseInt   { line, value } => write!(f, "line {line}: expected integer, got {value:?}"),
-            ObjError::InvalidFace { line }       => write!(f, "line {line}: malformed face"),
-            ObjError::EmptyMesh                  => write!(f, "OBJ contains no geometry"),
+            ObjError::Io(e) => write!(f, "IO error: {e}"),
+            ObjError::ParseFloat { line, value } => {
+                write!(f, "line {line}: expected float, got {value:?}")
+            }
+            ObjError::ParseInt { line, value } => {
+                write!(f, "line {line}: expected integer, got {value:?}")
+            }
+            ObjError::InvalidFace { line } => write!(f, "line {line}: malformed face"),
+            ObjError::EmptyMesh => write!(f, "OBJ contains no geometry"),
         }
     }
 }
 
 impl std::error::Error for ObjError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let ObjError::Io(e) = self { Some(e) } else { None }
+        if let ObjError::Io(e) = self {
+            Some(e)
+        } else {
+            None
+        }
     }
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
 fn load_obj(path: &Path) -> Result<MeshData, ObjError> {
-    let file   = File::open(path).map_err(ObjError::Io)?;
+    let file = File::open(path).map_err(ObjError::Io)?;
     let reader = BufReader::new(file);
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut uvs:       Vec<[f32; 2]> = Vec::new();
-    let mut normals:   Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
 
     // Unified vertex deduplication.
     // Key = (pos_idx, uv_idx, norm_idx) all 1-based; 0 means absent.
     let mut vertex_map: HashMap<(u32, u32, u32), u32> = HashMap::new();
-    let mut vertices:   Vec<Vertex> = Vec::new();
-    let mut indices:    Vec<u32>    = Vec::new();
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
     let mut has_normals = false;
 
     for (ln, line_result) in reader.lines().enumerate() {
         let line_num = ln + 1;
-        let raw      = line_result.map_err(ObjError::Io)?;
-        let line     = raw.trim();
+        let raw = line_result.map_err(ObjError::Io)?;
+        let line = raw.trim();
 
-        if line.starts_with('#') || line.is_empty() { continue; }
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
 
         let (keyword, rest) = match line.split_once(char::is_whitespace) {
             Some((k, r)) => (k, r.trim()),
-            None         => (line, ""),
+            None => (line, ""),
         };
 
         match keyword {
@@ -297,7 +333,8 @@ fn load_obj(path: &Path) -> Result<MeshData, ObjError> {
             "vt" => {
                 let mut it = rest.split_whitespace();
                 let u = parse_f32(it.next(), line_num)?;
-                let v = it.next()
+                let v = it
+                    .next()
                     .map(|s| parse_f32_val(s, line_num))
                     .transpose()?
                     .unwrap_or(0.0);
@@ -316,10 +353,9 @@ fn load_obj(path: &Path) -> Result<MeshData, ObjError> {
                 // Parse each corner into 1-based (pos, uv, norm) indices.
                 let parsed: Vec<(usize, usize, usize)> = corners
                     .iter()
-                    .map(|s| parse_face_vert(s, line_num,
-                                             positions.len(),
-                                             uvs.len(),
-                                             normals.len()))
+                    .map(|s| {
+                        parse_face_vert(s, line_num, positions.len(), uvs.len(), normals.len())
+                    })
                     .collect::<Result<_, _>>()?;
 
                 // Fan-triangulate: triangle fan from corner 0.
@@ -327,10 +363,16 @@ fn load_obj(path: &Path) -> Result<MeshData, ObjError> {
                     for &(pi, ui, ni) in &[parsed[0], parsed[i], parsed[i + 1]] {
                         let key = (pi as u32, ui as u32, ni as u32);
                         let dense_idx = *vertex_map.entry(key).or_insert_with(|| {
-                            let pos    = positions.get(pi.wrapping_sub(1)).copied().unwrap_or([0.0; 3]);
-                            let uv     = uvs.get(ui.wrapping_sub(1)).copied().unwrap_or([0.0; 2]);
-                            let normal = normals.get(ni.wrapping_sub(1)).copied().unwrap_or([0.0, 1.0, 0.0]);
-                            let idx    = vertices.len() as u32;
+                            let pos = positions
+                                .get(pi.wrapping_sub(1))
+                                .copied()
+                                .unwrap_or([0.0; 3]);
+                            let uv = uvs.get(ui.wrapping_sub(1)).copied().unwrap_or([0.0; 2]);
+                            let normal = normals
+                                .get(ni.wrapping_sub(1))
+                                .copied()
+                                .unwrap_or([0.0, 1.0, 0.0]);
+                            let idx = vertices.len() as u32;
                             vertices.push(Vertex { pos, normal, uv });
                             idx
                         });
@@ -370,16 +412,19 @@ fn parse_f32(s: Option<&str>, line: usize) -> Result<f32, ObjError> {
 }
 
 fn parse_f32_val(s: &str, line: usize) -> Result<f32, ObjError> {
-    s.parse::<f32>().map_err(|_| ObjError::ParseFloat { line, value: s.to_owned() })
+    s.parse::<f32>().map_err(|_| ObjError::ParseFloat {
+        line,
+        value: s.to_owned(),
+    })
 }
 
 /// Parse one face vertex token: `v`, `v/vt`, `v//vn`, or `v/vt/vn`.
 /// Returns 1-based indices; 0 means the component was absent.
 fn parse_face_vert(
-    token:  &str,
-    line:   usize,
-    n_pos:  usize,
-    n_uv:   usize,
+    token: &str,
+    line: usize,
+    n_pos: usize,
+    n_uv: usize,
     n_norm: usize,
 ) -> Result<(usize, usize, usize), ObjError> {
     let mut parts = token.split('/');
@@ -387,11 +432,11 @@ fn parse_face_vert(
     let pi = resolve_index(parts.next(), line, n_pos)?;
     let ui = match parts.next() {
         Some(s) if !s.is_empty() => resolve_index(Some(s), line, n_uv)?,
-        _                        => 0,
+        _ => 0,
     };
     let ni = match parts.next() {
         Some(s) if !s.is_empty() => resolve_index(Some(s), line, n_norm)?,
-        _                        => 0,
+        _ => 0,
     };
 
     Ok((pi, ui, ni))
@@ -400,13 +445,17 @@ fn parse_face_vert(
 /// Converts a possibly-negative OBJ index to a 1-based positive index.
 fn resolve_index(s: Option<&str>, line: usize, count: usize) -> Result<usize, ObjError> {
     let s = s.ok_or(ObjError::InvalidFace { line })?;
-    let i: i32 = s.parse()
-        .map_err(|_| ObjError::ParseInt { line, value: s.to_owned() })?;
+    let i: i32 = s.parse().map_err(|_| ObjError::ParseInt {
+        line,
+        value: s.to_owned(),
+    })?;
     if i > 0 {
         Ok(i as usize)
     } else if i < 0 {
         let abs = (-i) as usize;
-        if abs > count { return Err(ObjError::InvalidFace { line }); }
+        if abs > count {
+            return Err(ObjError::InvalidFace { line });
+        }
         Ok(count + 1 - abs)
     } else {
         Err(ObjError::InvalidFace { line })
@@ -428,13 +477,13 @@ fn generate_smooth_normals(vertices: &mut [Vertex], indices: &[u32]) {
         let p1 = vertices[i1].pos;
         let p2 = vertices[i2].pos;
 
-        let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-        let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
 
         // Cross product — magnitude proportional to triangle area (angle-weighted).
-        let nx = e1[1]*e2[2] - e1[2]*e2[1];
-        let ny = e1[2]*e2[0] - e1[0]*e2[2];
-        let nz = e1[0]*e2[1] - e1[1]*e2[0];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
 
         for &i in &[i0, i1, i2] {
             vertices[i].normal[0] += nx;
@@ -445,9 +494,9 @@ fn generate_smooth_normals(vertices: &mut [Vertex], indices: &[u32]) {
 
     for v in vertices.iter_mut() {
         let [nx, ny, nz] = v.normal;
-        let len = (nx*nx + ny*ny + nz*nz).sqrt();
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
         v.normal = if len > 1e-10 {
-            [nx/len, ny/len, nz/len]
+            [nx / len, ny / len, nz / len]
         } else {
             [0.0, 1.0, 0.0]
         };

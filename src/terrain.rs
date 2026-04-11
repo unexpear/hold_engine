@@ -26,29 +26,37 @@ pub struct Heightmap {
     /// Frequency (inverse wavelength) of the base octave.
     pub frequency: f32,
     /// Number of noise octaves.  More = finer detail.
-    pub octaves:   u32,
+    pub octaves: u32,
 }
 
 impl Default for Heightmap {
     fn default() -> Self {
-        Self { amplitude: 6.0, frequency: 0.06, octaves: 4 }
+        Self {
+            amplitude: 6.0,
+            frequency: 0.06,
+            octaves: 4,
+        }
     }
 }
 
 impl Heightmap {
     pub fn new(amplitude: f32, frequency: f32, octaves: u32) -> Self {
-        Self { amplitude, frequency, octaves }
+        Self {
+            amplitude,
+            frequency,
+            octaves,
+        }
     }
 
     /// Sample the height at world-space (x, z).
     pub fn sample(&self, x: f32, z: f32) -> f32 {
         let mut value = 0.0_f32;
-        let mut amp   = self.amplitude;
-        let mut freq  = self.frequency;
+        let mut amp = self.amplitude;
+        let mut freq = self.frequency;
         for _ in 0..self.octaves {
             value += amp * Self::noise2d(x * freq, z * freq);
-            amp   *= 0.5;
-            freq  *= 2.0;
+            amp *= 0.5;
+            freq *= 2.0;
         }
         value
     }
@@ -63,9 +71,9 @@ impl Heightmap {
         let sx = fx * fx * (3.0 - 2.0 * fx);
         let sz = fz * fz * (3.0 - 2.0 * fz);
 
-        let n00 = Self::hash(xi,     zi);
+        let n00 = Self::hash(xi, zi);
         let n10 = Self::hash(xi + 1, zi);
-        let n01 = Self::hash(xi,     zi + 1);
+        let n01 = Self::hash(xi, zi + 1);
         let n11 = Self::hash(xi + 1, zi + 1);
 
         let nx0 = n00 + (n10 - n00) * sx;
@@ -77,8 +85,7 @@ impl Heightmap {
     #[inline]
     fn hash(x: i32, z: i32) -> f32 {
         // Robert Jenkins style integer hash.
-        let mut n = (x.wrapping_mul(374761393))
-            .wrapping_add(z.wrapping_mul(668265263));
+        let mut n = (x.wrapping_mul(374761393)).wrapping_add(z.wrapping_mul(668265263));
         n = (n ^ (n >> 13)).wrapping_mul(1274126177);
         n = n ^ (n >> 16);
         // Map to [-1, 1].
@@ -90,9 +97,9 @@ impl Heightmap {
 
 /// Pre-built triangle mesh for a single terrain chunk.
 pub struct TerrainChunk {
-    pub verts:   Vec<Vec3>,
+    pub verts: Vec<Vec3>,
     pub normals: Vec<Vec3>,
-    pub faces:   Vec<[usize; 3]>,
+    pub faces: Vec<[usize; 3]>,
     /// Chunk grid coordinate (not world-space).
     pub cx: i32,
     pub cz: i32,
@@ -147,7 +154,13 @@ impl TerrainChunk {
             *n = n.normalize();
         }
 
-        Self { verts, normals, faces, cx, cz }
+        Self {
+            verts,
+            normals,
+            faces,
+            cx,
+            cz,
+        }
     }
 }
 
@@ -167,7 +180,12 @@ pub struct Terrain {
 
 impl Terrain {
     pub fn new(heightmap: Heightmap, view_radius: i32, color: Color) -> Self {
-        Self { heightmap, chunks: Vec::new(), view_radius, color }
+        Self {
+            heightmap,
+            chunks: Vec::new(),
+            view_radius,
+            color,
+        }
     }
 
     /// Call once per frame with the camera's world-space position.
@@ -178,22 +196,24 @@ impl Terrain {
         let r = self.view_radius;
 
         // Remove chunks outside the radius.
-        self.chunks.retain(|c| {
-            (c.cx - cam_cx).abs() <= r && (c.cz - cam_cz).abs() <= r
-        });
+        self.chunks
+            .retain(|c| (c.cx - cam_cx).abs() <= r && (c.cz - cam_cz).abs() <= r);
 
         // Add missing chunks.
         for cz in (cam_cz - r)..=(cam_cz + r) {
             for cx in (cam_cx - r)..=(cam_cx + r) {
                 if !self.chunks.iter().any(|c| c.cx == cx && c.cz == cz) {
-                    self.chunks.push(TerrainChunk::build(&self.heightmap, cx, cz));
+                    self.chunks
+                        .push(TerrainChunk::build(&self.heightmap, cx, cz));
                 }
             }
         }
     }
 
     /// Total number of currently loaded chunks.
-    pub fn chunk_count(&self) -> usize { self.chunks.len() }
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
 
     /// Height at an arbitrary world-space (x, z) — delegates to the heightmap.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
@@ -201,5 +221,7 @@ impl Terrain {
     }
 
     /// World-space size of one chunk edge.
-    pub fn chunk_size() -> f32 { CHUNK_SIZE }
+    pub fn chunk_size() -> f32 {
+        CHUNK_SIZE
+    }
 }

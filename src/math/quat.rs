@@ -1,5 +1,5 @@
+use super::{Mat4, Vec3};
 use std::ops::Mul;
-use super::{Vec3, Mat4};
 
 /// Unit quaternion for rotation. Stored as (x, y, z, w).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -11,7 +11,12 @@ pub struct Quat {
 }
 
 impl Quat {
-    pub const IDENTITY: Self = Self { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+    pub const IDENTITY: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    };
 
     #[inline]
     pub fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
@@ -23,7 +28,12 @@ impl Quat {
         let axis = axis.normalize();
         let half = angle_rad * 0.5;
         let (s, c) = half.sin_cos();
-        Self { x: axis.x * s, y: axis.y * s, z: axis.z * s, w: c }
+        Self {
+            x: axis.x * s,
+            y: axis.y * s,
+            z: axis.z * s,
+            w: c,
+        }
     }
 
     /// Build from Euler angles (radians), applied in Z → Y → X order (extrinsic XYZ).
@@ -43,7 +53,12 @@ impl Quat {
         let len = self.length_sq().sqrt();
         if len > 1e-10 {
             let inv = 1.0 / len;
-            Self { x: self.x * inv, y: self.y * inv, z: self.z * inv, w: self.w * inv }
+            Self {
+                x: self.x * inv,
+                y: self.y * inv,
+                z: self.z * inv,
+                w: self.w * inv,
+            }
         } else {
             Self::IDENTITY
         }
@@ -51,7 +66,12 @@ impl Quat {
 
     #[inline]
     pub fn conjugate(self) -> Self {
-        Self { x: -self.x, y: -self.y, z: -self.z, w: self.w }
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
     }
 
     #[inline]
@@ -71,7 +91,12 @@ impl Quat {
 
     /// Rotate a vector by this quaternion: q * (0, v) * q*.
     pub fn rotate_vec3(self, v: Vec3) -> Vec3 {
-        let qv = Self { x: v.x, y: v.y, z: v.z, w: 0.0 };
+        let qv = Self {
+            x: v.x,
+            y: v.y,
+            z: v.z,
+            w: 0.0,
+        };
         let result = self.hamilton(qv).hamilton(self.conjugate());
         Vec3::new(result.x, result.y, result.z)
     }
@@ -94,10 +119,10 @@ impl Quat {
 
         Mat4 {
             cols: [
-                [1.0 - (yy + zz), xy + wz,         xz - wy,         0.0],
-                [xy - wz,         1.0 - (xx + zz),  yz + wx,         0.0],
-                [xz + wy,         yz - wx,           1.0 - (xx + yy), 0.0],
-                [0.0,             0.0,               0.0,             1.0],
+                [1.0 - (yy + zz), xy + wz, xz - wy, 0.0],
+                [xy - wz, 1.0 - (xx + zz), yz + wx, 0.0],
+                [xz + wy, yz - wx, 1.0 - (xx + yy), 0.0],
+                [0.0, 0.0, 0.0, 1.0],
             ],
         }
     }
@@ -108,7 +133,12 @@ impl Quat {
         // If dot < 0, negate one quaternion to take the shorter arc.
         let other = if dot < 0.0 {
             dot = -dot;
-            Self { x: -other.x, y: -other.y, z: -other.z, w: -other.w }
+            Self {
+                x: -other.x,
+                y: -other.y,
+                z: -other.z,
+                w: -other.w,
+            }
         } else {
             other
         };
