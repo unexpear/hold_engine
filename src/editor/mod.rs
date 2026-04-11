@@ -2,6 +2,7 @@
 //! This module is runtime-agnostic and keeps a dynamic editing layer on top
 //! of typed ECS/runtime data.
 
+mod host;
 mod session;
 
 use std::collections::{HashMap, HashSet};
@@ -19,6 +20,7 @@ use crate::scene::{
     SceneData, SceneError, StatsDef, TransformDef,
 };
 
+pub use host::EditorRuntimeHost;
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 
 /// Basic project metadata and folder layout.

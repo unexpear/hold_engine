@@ -44,6 +44,7 @@ pub use editor::{
     apply_scene_document_to_world, load_and_apply_scene_from_hsc,
     load_and_apply_scene_from_project, load_project, load_scene_doc, load_scene_doc_from_hsc,
     save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorEntity,
-    EditorIoError, EditorPipelineError, EditorPlayState, EditorSceneSession, EditorSessionError,
-    InspectorComponent, InspectorField, InspectorValue, Project, SceneBridgeError, SceneDocument,
+    EditorIoError, EditorPipelineError, EditorPlayState, EditorRuntimeHost, EditorSceneSession,
+    EditorSessionError, InspectorComponent, InspectorField, InspectorValue, Project,
+    SceneBridgeError, SceneDocument,
 };
