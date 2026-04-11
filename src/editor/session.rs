@@ -16,6 +16,7 @@ pub struct EditorSceneSession {
     source_path: Option<PathBuf>,
     scene: SceneDocument,
     selected_entity_id: Option<u64>,
+    last_world_map: Vec<(u64, Entity)>,
 }
 
 impl EditorSceneSession {
@@ -24,6 +25,7 @@ impl EditorSceneSession {
             source_path: None,
             scene,
             selected_entity_id: None,
+            last_world_map: Vec::new(),
         }
     }
 
@@ -34,6 +36,7 @@ impl EditorSceneSession {
             source_path: Some(path.to_path_buf()),
             scene,
             selected_entity_id: None,
+            last_world_map: Vec::new(),
         })
     }
 
@@ -51,6 +54,20 @@ impl EditorSceneSession {
 
     pub fn selected_entity_id(&self) -> Option<u64> {
         self.selected_entity_id
+    }
+
+    pub fn last_world_map(&self) -> &[(u64, Entity)] {
+        &self.last_world_map
+    }
+
+    pub fn applied_entity(&self, editor_entity_id: u64) -> Result<Entity, EditorSessionError> {
+        self.last_world_map
+            .iter()
+            .find(|(id, _)| *id == editor_entity_id)
+            .map(|(_, entity)| *entity)
+            .ok_or(EditorSessionError::UnappliedEntityId {
+                entity_id: editor_entity_id,
+            })
     }
 
     pub fn selected_entity(&self) -> Result<&EditorEntity, EditorSessionError> {
@@ -124,6 +141,16 @@ impl EditorSceneSession {
     }
 
     pub fn apply_to_world(
+        &mut self,
+        world: &mut World,
+    ) -> Result<Vec<(u64, Entity)>, EditorSessionError> {
+        let map =
+            apply_scene_document_to_world(world, &self.scene).map_err(EditorSessionError::Apply)?;
+        self.last_world_map = map.clone();
+        Ok(map)
+    }
+
+    pub fn apply_to_world_without_tracking(
         &self,
         world: &mut World,
     ) -> Result<Vec<(u64, Entity)>, EditorSessionError> {
@@ -138,6 +165,7 @@ pub enum EditorSessionError {
     MissingSourcePath,
     NoSelection,
     UnknownEntityId { entity_id: u64 },
+    UnappliedEntityId { entity_id: u64 },
     MissingComponent { component: String },
 }
 
@@ -154,6 +182,10 @@ impl std::fmt::Display for EditorSessionError {
                     "editor session error: entity id {entity_id} was not found"
                 )
             }
+            Self::UnappliedEntityId { entity_id } => write!(
+                f,
+                "editor session error: entity id {entity_id} has not been applied to the World"
+            ),
             Self::MissingComponent { component } => write!(
                 f,
                 "editor session error: no entity with component {component} was found"
@@ -218,7 +250,7 @@ entity "camera" {
             .unwrap();
         session.save_hsc(&output_path).unwrap();
 
-        let edited = EditorSceneSession::open_hsc(&output_path).unwrap();
+        let mut edited = EditorSceneSession::open_hsc(&output_path).unwrap();
         assert_eq!(
             edited.scene().get_value(camera_id, "Camera", "fov_deg"),
             Some(&InspectorValue::Number(72.0))
@@ -226,11 +258,8 @@ entity "camera" {
 
         let mut world = World::new();
         let map = edited.apply_to_world(&mut world).unwrap();
-        let camera = map
-            .iter()
-            .find(|(id, _)| *id == camera_id)
-            .map(|(_, entity)| *entity)
-            .unwrap();
+        assert_eq!(edited.last_world_map(), map.as_slice());
+        let camera = edited.applied_entity(camera_id).unwrap();
 
         assert!(world.has_component::<Transform>(camera));
         assert!(world.has_component::<Camera>(camera));

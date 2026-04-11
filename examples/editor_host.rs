@@ -46,22 +46,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     session.save_hsc(&output_path)?;
 
-    let applied_session = EditorSceneSession::open_hsc(&output_path)?;
+    let mut applied_session = EditorSceneSession::open_hsc(&output_path)?;
     let mut world = World::new();
     let map = applied_session.apply_to_world(&mut world)?;
-    let camera_entity = map
-        .iter()
-        .find(|(id, _)| *id == selected_entity_id)
-        .map(|(_, entity)| *entity)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "editor entity id {} was not applied to the World",
-                    selected_entity_id
-                ),
-            )
-        })?;
+    let camera_entity = applied_session.applied_entity(selected_entity_id)?;
 
     assert!(world.has_component::<Transform>(camera_entity));
     assert!(world.has_component::<Camera>(camera_entity));
