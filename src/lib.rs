@@ -22,8 +22,8 @@ pub use assets::{
 pub use ecs::{
     ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem, Children, DialogueChoice,
     DialogueNode, DialogueTree, DirectionalLight, Entity, GlobalTransform, Inventory, ItemId,
-    ItemStack, Mut, NodeId, Parent, Query2, Query2Mut, Query3, Query3Mut, Quest, QuestId,
-    QuestLog, QuestObjective, QuestState, Stats, System, SystemAccess, SystemSchedule, Transform,
+    ItemStack, Mut, NodeId, Parent, Query2, Query2Mut, Query3, Query3Mut, Quest, QuestId, QuestLog,
+    QuestObjective, QuestState, Stats, System, SystemAccess, SystemSchedule, Transform,
     TransformPropagateSystem, World,
 };
 pub use engine::{App, Engine};
@@ -41,7 +41,9 @@ pub use skybox::Skybox;
 pub use terrain::{Heightmap, Terrain, TerrainChunk};
 
 pub use editor::{
-    apply_scene_document_to_world, load_and_apply_scene_from_project, load_project, load_scene_doc,
-    save_project, save_scene_doc, EditorApplyError, EditorEntity, EditorIoError,
-    EditorPipelineError, InspectorComponent, InspectorField, InspectorValue, Project, SceneDocument,
+    apply_scene_document_to_world, load_and_apply_scene_from_hsc,
+    load_and_apply_scene_from_project, load_project, load_scene_doc, load_scene_doc_from_hsc,
+    save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorEntity,
+    EditorIoError, EditorPipelineError, InspectorComponent, InspectorField, InspectorValue,
+    Project, SceneBridgeError, SceneDocument,
 };

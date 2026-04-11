@@ -2,13 +2,20 @@
 //! This module is runtime-agnostic and keeps a dynamic editing layer on top
 //! of typed ECS/runtime data.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use crate::ecs::components::{Camera, DirectionalLight, Stats, Transform};
+use crate::ecs::components::{
+    ActiveCamera, Camera, DirectionalLight, GlobalTransform, Stats, Transform,
+};
 use crate::ecs::{Entity, World};
 use crate::math::{Quat, Vec3};
 use crate::renderer::Color;
+use crate::scene::{
+    load_scene, parse_scene, save_scene, serialize_scene, CameraDef, EntityDef, LightDef,
+    SceneData, SceneError, StatsDef, TransformDef,
+};
 
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +160,86 @@ pub struct SceneDocument {
 }
 
 impl SceneDocument {
+    pub fn from_scene_data(scene: &SceneData) -> Self {
+        let mut name_to_id = HashMap::with_capacity(scene.entities.len());
+        for (index, entity) in scene.entities.iter().enumerate() {
+            name_to_id.insert(entity.name.clone(), index as u64 + 1);
+        }
+
+        let entities = scene
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| EditorEntity {
+                id: index as u64 + 1,
+                name: entity.name.clone(),
+                components: components_from_scene_entity(entity, &name_to_id),
+            })
+            .collect();
+
+        Self {
+            name: scene.name.clone(),
+            entities,
+        }
+    }
+
+    pub fn to_scene_data(&self) -> Result<SceneData, SceneBridgeError> {
+        let unique_names = unique_scene_names(&self.entities);
+
+        let entities = self
+            .entities
+            .iter()
+            .map(|entity| {
+                Ok(EntityDef {
+                    name: unique_names
+                        .get(&entity.id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Entity{}", entity.id)),
+                    transform: entity
+                        .component("Transform")
+                        .map(|component| bridge_transform(entity.id, component))
+                        .transpose()?,
+                    camera: entity
+                        .component("Camera")
+                        .map(|component| bridge_camera(entity.id, component))
+                        .transpose()?,
+                    active_camera: entity.component("ActiveCamera").is_some(),
+                    light: entity
+                        .component("DirectionalLight")
+                        .or_else(|| entity.component("Light"))
+                        .map(|component| bridge_light(entity.id, component))
+                        .transpose()?,
+                    stats: entity
+                        .component("Stats")
+                        .map(|component| bridge_stats(entity.id, component))
+                        .transpose()?,
+                    parent_name: entity
+                        .component("Parent")
+                        .map(|component| bridge_parent_name(entity.id, component, &unique_names))
+                        .transpose()?
+                        .flatten(),
+                })
+            })
+            .collect::<Result<Vec<_>, SceneBridgeError>>()?;
+
+        Ok(SceneData {
+            name: self.name.clone(),
+            entities,
+        })
+    }
+
+    /// Parse a runtime `.hsc` payload into the editor-facing scene document.
+    pub fn from_hsc_str(src: &str) -> Result<Self, SceneError> {
+        let scene = parse_scene(src)?;
+        Ok(Self::from_scene_data(&scene))
+    }
+
+    /// Export the editor-facing scene document into runtime `.hsc` text.
+    pub fn to_hsc_string(&self) -> Result<String, SceneBridgeError> {
+        let scene = self.to_scene_data()?;
+        Ok(serialize_scene(&scene))
+    }
+
     /// Dynamic path-style getter:
     /// entity -> component -> field -> value
     pub fn get_value(
@@ -220,9 +307,16 @@ impl SceneDocument {
         out.push_str("HOLD_SCENE_DOC_V1\n");
         out.push_str(&format!("name|{}\n", escape_text(&self.name)));
         for entity in &self.entities {
-            out.push_str(&format!("entity|{}|{}\n", entity.id, escape_text(&entity.name)));
+            out.push_str(&format!(
+                "entity|{}|{}\n",
+                entity.id,
+                escape_text(&entity.name)
+            ));
             for component in &entity.components {
-                out.push_str(&format!("component|{}\n", escape_text(&component.type_name)));
+                out.push_str(&format!(
+                    "component|{}\n",
+                    escape_text(&component.type_name)
+                ));
                 for field in &component.fields {
                     out.push_str(&encode_field(field));
                     out.push('\n');
@@ -335,17 +429,360 @@ impl SceneDocument {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneBridgeError {
+    MissingField {
+        entity_id: u64,
+        component: String,
+        field: &'static str,
+    },
+    InvalidFieldType {
+        entity_id: u64,
+        component: String,
+        field: &'static str,
+    },
+    UnknownParentEntityId {
+        entity_id: u64,
+        parent_id: u64,
+    },
+}
+
+impl std::fmt::Display for SceneBridgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField {
+                entity_id,
+                component,
+                field,
+            } => write!(
+                f,
+                "scene bridge error: entity {} missing {}.{}",
+                entity_id, component, field
+            ),
+            Self::InvalidFieldType {
+                entity_id,
+                component,
+                field,
+            } => write!(
+                f,
+                "scene bridge error: entity {} invalid type for {}.{}",
+                entity_id, component, field
+            ),
+            Self::UnknownParentEntityId {
+                entity_id,
+                parent_id,
+            } => write!(
+                f,
+                "scene bridge error: entity {} references unknown parent id {}",
+                entity_id, parent_id
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SceneBridgeError {}
+
+fn components_from_scene_entity(
+    entity: &EntityDef,
+    name_to_id: &HashMap<String, u64>,
+) -> Vec<InspectorComponent> {
+    let mut components = Vec::new();
+
+    if let Some(transform) = &entity.transform {
+        components.push(InspectorComponent {
+            type_name: "Transform".into(),
+            fields: vec![
+                vec3_field(
+                    "position",
+                    [
+                        transform.position.x,
+                        transform.position.y,
+                        transform.position.z,
+                    ],
+                ),
+                vec3_field(
+                    "scale",
+                    [transform.scale.x, transform.scale.y, transform.scale.z],
+                ),
+                number_field("rotation_x", transform.rotation.x),
+                number_field("rotation_y", transform.rotation.y),
+                number_field("rotation_z", transform.rotation.z),
+                number_field("rotation_w", transform.rotation.w),
+            ],
+        });
+    }
+
+    if let Some(camera) = &entity.camera {
+        components.push(InspectorComponent {
+            type_name: "Camera".into(),
+            fields: vec![
+                number_field("fov_deg", camera.fov),
+                number_field("near", camera.near),
+                number_field("far", camera.far),
+            ],
+        });
+    }
+
+    if entity.active_camera {
+        components.push(InspectorComponent {
+            type_name: "ActiveCamera".into(),
+            fields: Vec::new(),
+        });
+    }
+
+    if let Some(light) = &entity.light {
+        components.push(InspectorComponent {
+            type_name: "DirectionalLight".into(),
+            fields: vec![
+                vec3_field(
+                    "direction",
+                    [light.direction.x, light.direction.y, light.direction.z],
+                ),
+                vec3_field("color", [light.color.r, light.color.g, light.color.b]),
+                number_field("color_alpha", light.color.a),
+                number_field("intensity", light.intensity),
+                number_field("ambient", light.ambient),
+            ],
+        });
+    }
+
+    if let Some(stats) = &entity.stats {
+        components.push(InspectorComponent {
+            type_name: "Stats".into(),
+            fields: vec![
+                number_field("health", stats.health),
+                number_field("mana", stats.mana),
+                number_field("attack", stats.attack),
+                number_field("defense", stats.defense),
+                number_field("speed", stats.speed),
+            ],
+        });
+    }
+
+    if let Some(parent_name) = &entity.parent_name {
+        let mut fields = vec![text_field("entity_name", parent_name)];
+        if let Some(parent_id) = name_to_id.get(parent_name) {
+            fields.push(number_field("entity_id", *parent_id as f32));
+        }
+        components.push(InspectorComponent {
+            type_name: "Parent".into(),
+            fields,
+        });
+    }
+
+    components
+}
+
+fn unique_scene_names(entities: &[EditorEntity]) -> HashMap<u64, String> {
+    let mut used = HashSet::new();
+    let mut names = HashMap::with_capacity(entities.len());
+
+    for entity in entities {
+        let base_name = if entity.name.trim().is_empty() {
+            format!("Entity{}", entity.id)
+        } else {
+            entity.name.trim().to_string()
+        };
+        let mut name = base_name.clone();
+        let mut suffix = 2;
+        while used.contains(&name) {
+            name = format!("{} {}", base_name, suffix);
+            suffix += 1;
+        }
+        used.insert(name.clone());
+        names.insert(entity.id, name);
+    }
+
+    names
+}
+
+fn number_field(name: &str, value: f32) -> InspectorField {
+    InspectorField {
+        name: name.into(),
+        value: InspectorValue::Number(value),
+    }
+}
+
+fn text_field(name: &str, value: &str) -> InspectorField {
+    InspectorField {
+        name: name.into(),
+        value: InspectorValue::Text(value.into()),
+    }
+}
+
+fn vec3_field(name: &str, value: [f32; 3]) -> InspectorField {
+    InspectorField {
+        name: name.into(),
+        value: InspectorValue::Vec3(value),
+    }
+}
+
+fn bridge_transform(
+    entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<TransformDef, SceneBridgeError> {
+    let position = required_vec3_bridge(entity_id, component, "position")?;
+    let scale = optional_vec3(component, "scale").unwrap_or(Vec3::ONE);
+    let rotation = bridge_rotation(entity_id, component)?;
+
+    Ok(TransformDef {
+        position,
+        rotation,
+        scale,
+    })
+}
+
+fn bridge_rotation(
+    entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<Quat, SceneBridgeError> {
+    let quat_fields = [
+        optional_number(component, "rotation_x"),
+        optional_number(component, "rotation_y"),
+        optional_number(component, "rotation_z"),
+        optional_number(component, "rotation_w"),
+    ];
+    if quat_fields.iter().any(|value| value.is_some()) {
+        return Ok(Quat::new(
+            required_number_bridge(entity_id, component, "rotation_x")?,
+            required_number_bridge(entity_id, component, "rotation_y")?,
+            required_number_bridge(entity_id, component, "rotation_z")?,
+            required_number_bridge(entity_id, component, "rotation_w")?,
+        ));
+    }
+
+    Ok(optional_vec3(component, "rotation_euler_deg")
+        .map(|e| Quat::from_euler_xyz(e.x.to_radians(), e.y.to_radians(), e.z.to_radians()))
+        .unwrap_or(Quat::IDENTITY))
+}
+
+fn bridge_camera(
+    entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<CameraDef, SceneBridgeError> {
+    Ok(CameraDef {
+        fov: required_number_bridge(entity_id, component, "fov_deg")?,
+        near: optional_number(component, "near").unwrap_or(0.1),
+        far: optional_number(component, "far").unwrap_or(1000.0),
+    })
+}
+
+fn bridge_light(
+    entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<LightDef, SceneBridgeError> {
+    let direction = required_vec3_bridge(entity_id, component, "direction")?;
+    let color = required_vec3_bridge(entity_id, component, "color")?;
+
+    Ok(LightDef {
+        direction,
+        color: Color::new(
+            color.x,
+            color.y,
+            color.z,
+            optional_number(component, "color_alpha").unwrap_or(1.0),
+        ),
+        intensity: optional_number(component, "intensity").unwrap_or(1.0),
+        ambient: optional_number(component, "ambient").unwrap_or(0.15),
+    })
+}
+
+fn bridge_stats(
+    entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<StatsDef, SceneBridgeError> {
+    Ok(StatsDef {
+        health: required_number_bridge(entity_id, component, "health")?,
+        mana: optional_number(component, "mana").unwrap_or(0.0),
+        attack: optional_number(component, "attack").unwrap_or(0.0),
+        defense: optional_number(component, "defense").unwrap_or(0.0),
+        speed: optional_number(component, "speed").unwrap_or(0.0),
+    })
+}
+
+fn bridge_parent_name(
+    entity_id: u64,
+    component: &InspectorComponent,
+    unique_names: &HashMap<u64, String>,
+) -> Result<Option<String>, SceneBridgeError> {
+    if let Some(parent_id) = optional_number(component, "entity_id") {
+        let parent_id = parent_id as u64;
+        return unique_names.get(&parent_id).cloned().map(Some).ok_or(
+            SceneBridgeError::UnknownParentEntityId {
+                entity_id,
+                parent_id,
+            },
+        );
+    }
+
+    Ok(optional_text(component, "entity_name"))
+}
+
+fn required_number_bridge(
+    entity_id: u64,
+    component: &InspectorComponent,
+    field: &'static str,
+) -> Result<f32, SceneBridgeError> {
+    let value = component
+        .get_field(field)
+        .ok_or(SceneBridgeError::MissingField {
+            entity_id,
+            component: component.type_name.clone(),
+            field,
+        })?;
+    match value {
+        InspectorValue::Number(v) => Ok(*v),
+        _ => Err(SceneBridgeError::InvalidFieldType {
+            entity_id,
+            component: component.type_name.clone(),
+            field,
+        }),
+    }
+}
+
+fn required_vec3_bridge(
+    entity_id: u64,
+    component: &InspectorComponent,
+    field: &'static str,
+) -> Result<Vec3, SceneBridgeError> {
+    let value = component
+        .get_field(field)
+        .ok_or(SceneBridgeError::MissingField {
+            entity_id,
+            component: component.type_name.clone(),
+            field,
+        })?;
+    match value {
+        InspectorValue::Vec3(v) => Ok(Vec3::new(v[0], v[1], v[2])),
+        _ => Err(SceneBridgeError::InvalidFieldType {
+            entity_id,
+            component: component.type_name.clone(),
+            field,
+        }),
+    }
+}
+
 fn encode_field(field: &InspectorField) -> String {
     match &field.value {
         InspectorValue::Bool(v) => {
-            format!("field|{}|bool|{}", escape_text(&field.name), if *v { 1 } else { 0 })
+            format!(
+                "field|{}|bool|{}",
+                escape_text(&field.name),
+                if *v { 1 } else { 0 }
+            )
         }
         InspectorValue::Number(v) => format!("field|{}|number|{}", escape_text(&field.name), v),
         InspectorValue::Text(v) => {
             format!("field|{}|text|{}", escape_text(&field.name), escape_text(v))
         }
         InspectorValue::Vec3(v) => {
-            format!("field|{}|vec3|{}|{}|{}", escape_text(&field.name), v[0], v[1], v[2])
+            format!(
+                "field|{}|vec3|{}|{}|{}",
+                escape_text(&field.name),
+                v[0],
+                v[1],
+                v[2]
+            )
         }
     }
 }
@@ -428,6 +865,8 @@ fn unescape_text(input: &str) -> Result<String, &'static str> {
 pub enum EditorIoError {
     Io(std::io::Error),
     Parse(&'static str),
+    Scene(SceneError),
+    Bridge(SceneBridgeError),
 }
 
 impl std::fmt::Display for EditorIoError {
@@ -435,6 +874,8 @@ impl std::fmt::Display for EditorIoError {
         match self {
             Self::Io(e) => write!(f, "editor io error: {e}"),
             Self::Parse(msg) => write!(f, "editor parse error: {msg}"),
+            Self::Scene(err) => write!(f, "editor scene error: {err}"),
+            Self::Bridge(err) => write!(f, "editor scene bridge error: {err}"),
         }
     }
 }
@@ -463,6 +904,21 @@ pub fn load_scene_doc<P: AsRef<Path>>(path: P) -> Result<SceneDocument, EditorIo
     SceneDocument::from_hscene_str(&src).map_err(EditorIoError::Parse)
 }
 
+/// Load a runtime `.hsc` file into the editor-facing scene document.
+pub fn load_scene_doc_from_hsc<P: AsRef<Path>>(path: P) -> Result<SceneDocument, EditorIoError> {
+    let scene = load_scene(path).map_err(EditorIoError::Scene)?;
+    Ok(SceneDocument::from_scene_data(&scene))
+}
+
+/// Export an editor scene document back into a runtime `.hsc` file.
+pub fn save_scene_doc_to_hsc<P: AsRef<Path>>(
+    path: P,
+    scene: &SceneDocument,
+) -> Result<(), EditorIoError> {
+    let runtime_scene = scene.to_scene_data().map_err(EditorIoError::Bridge)?;
+    save_scene(path, &runtime_scene).map_err(EditorIoError::Scene)
+}
+
 #[derive(Debug)]
 pub enum EditorApplyError {
     MissingField {
@@ -474,6 +930,10 @@ pub enum EditorApplyError {
         entity_id: u64,
         component: String,
         field: &'static str,
+    },
+    UnknownParentReference {
+        entity_id: u64,
+        reference: String,
     },
 }
 
@@ -497,6 +957,14 @@ impl std::fmt::Display for EditorApplyError {
                 f,
                 "editor apply error: entity {} invalid type for {}.{}",
                 entity_id, component, field
+            ),
+            Self::UnknownParentReference {
+                entity_id,
+                reference,
+            } => write!(
+                f,
+                "editor apply error: entity {} references unknown parent {}",
+                entity_id, reference
             ),
         }
     }
@@ -533,6 +1001,15 @@ pub fn load_and_apply_scene_from_project<P: AsRef<Path>>(
     apply_scene_document_to_world(world, &scene).map_err(EditorPipelineError::Apply)
 }
 
+/// Load a runtime `.hsc` file through the editor bridge, then apply it to a world.
+pub fn load_and_apply_scene_from_hsc<P: AsRef<Path>>(
+    scene_path: P,
+    world: &mut World,
+) -> Result<Vec<(u64, Entity)>, EditorPipelineError> {
+    let scene = load_scene_doc_from_hsc(scene_path).map_err(EditorPipelineError::Io)?;
+    apply_scene_document_to_world(world, &scene).map_err(EditorPipelineError::Apply)
+}
+
 /// Apply a dynamic editor scene document to typed ECS components in `world`.
 ///
 /// Returns a vector that maps editor entity ids to spawned ECS entities.
@@ -541,10 +1018,15 @@ pub fn apply_scene_document_to_world(
     scene: &SceneDocument,
 ) -> Result<Vec<(u64, Entity)>, EditorApplyError> {
     let mut map = Vec::with_capacity(scene.entities.len());
+    let mut entity_by_id = HashMap::with_capacity(scene.entities.len());
+    let mut entity_by_name = HashMap::with_capacity(scene.entities.len());
+    let mut pending_parents = Vec::new();
 
     for editor_entity in &scene.entities {
         let entity = world.spawn();
         map.push((editor_entity.id, entity));
+        entity_by_id.insert(editor_entity.id, entity);
+        entity_by_name.insert(editor_entity.name.clone(), entity);
 
         for component in &editor_entity.components {
             match component.type_name.as_str() {
@@ -556,9 +1038,47 @@ pub fn apply_scene_document_to_world(
                         "position",
                     )?;
                     let scale = optional_vec3(component, "scale").unwrap_or(Vec3::ONE);
-                    let rotation = optional_vec3(component, "rotation_euler_deg")
-                        .map(|e| Quat::from_euler_xyz(e.x.to_radians(), e.y.to_radians(), e.z.to_radians()))
-                        .unwrap_or(Quat::IDENTITY);
+                    let rotation = if has_any_field(
+                        component,
+                        &["rotation_x", "rotation_y", "rotation_z", "rotation_w"],
+                    ) {
+                        Quat::new(
+                            required_number(
+                                editor_entity.id,
+                                component,
+                                component.type_name.as_str(),
+                                "rotation_x",
+                            )?,
+                            required_number(
+                                editor_entity.id,
+                                component,
+                                component.type_name.as_str(),
+                                "rotation_y",
+                            )?,
+                            required_number(
+                                editor_entity.id,
+                                component,
+                                component.type_name.as_str(),
+                                "rotation_z",
+                            )?,
+                            required_number(
+                                editor_entity.id,
+                                component,
+                                component.type_name.as_str(),
+                                "rotation_w",
+                            )?,
+                        )
+                    } else {
+                        optional_vec3(component, "rotation_euler_deg")
+                            .map(|e| {
+                                Quat::from_euler_xyz(
+                                    e.x.to_radians(),
+                                    e.y.to_radians(),
+                                    e.z.to_radians(),
+                                )
+                            })
+                            .unwrap_or(Quat::IDENTITY)
+                    };
                     world.add_component(
                         entity,
                         Transform {
@@ -567,6 +1087,7 @@ pub fn apply_scene_document_to_world(
                             scale,
                         },
                     );
+                    world.add_component(entity, GlobalTransform::identity());
                 }
                 "Stats" => {
                     let health = required_number(
@@ -581,11 +1102,17 @@ pub fn apply_scene_document_to_world(
                     let speed = optional_number(component, "speed").unwrap_or(0.0);
 
                     let mut stats = Stats::new(health, mana, attack, defense, speed);
-                    stats.health_max = optional_number(component, "health_max").unwrap_or(stats.health_max);
-                    stats.mana_max = optional_number(component, "mana_max").unwrap_or(stats.mana_max);
-                    stats.level = optional_number(component, "level").unwrap_or(stats.level as f32).max(1.0) as u32;
+                    stats.health_max =
+                        optional_number(component, "health_max").unwrap_or(stats.health_max);
+                    stats.mana_max =
+                        optional_number(component, "mana_max").unwrap_or(stats.mana_max);
+                    stats.level = optional_number(component, "level")
+                        .unwrap_or(stats.level as f32)
+                        .max(1.0) as u32;
                     stats.xp = optional_number(component, "xp").unwrap_or(0.0).max(0.0) as u32;
-                    stats.xp_next = optional_number(component, "xp_next").unwrap_or(100.0).max(1.0) as u32;
+                    stats.xp_next = optional_number(component, "xp_next")
+                        .unwrap_or(100.0)
+                        .max(1.0) as u32;
                     world.add_component(entity, stats);
                 }
                 "DirectionalLight" | "Light" => {
@@ -596,7 +1123,14 @@ pub fn apply_scene_document_to_world(
                         "direction",
                     )?;
                     let color = optional_vec3(component, "color")
-                        .map(|v| Color::rgb(v.x, v.y, v.z))
+                        .map(|v| {
+                            Color::new(
+                                v.x,
+                                v.y,
+                                v.z,
+                                optional_number(component, "color_alpha").unwrap_or(1.0),
+                            )
+                        })
                         .unwrap_or(Color::WHITE);
                     let intensity = optional_number(component, "intensity").unwrap_or(1.0);
                     let ambient = optional_number(component, "ambient").unwrap_or(0.15);
@@ -617,9 +1151,46 @@ pub fn apply_scene_document_to_world(
                     let aspect = optional_number(component, "aspect").unwrap_or(16.0 / 9.0);
                     world.add_component(entity, Camera::perspective(fov, aspect, near, far));
                 }
+                "ActiveCamera" => {
+                    world.add_component(entity, ActiveCamera);
+                }
+                "Parent" => {
+                    pending_parents.push((
+                        editor_entity.id,
+                        entity,
+                        optional_number(component, "entity_id").map(|value| value as u64),
+                        optional_text(component, "entity_name"),
+                    ));
+                }
                 _ => {}
             }
         }
+    }
+
+    for (child_id, child, parent_id, parent_name) in pending_parents {
+        let parent = if let Some(parent_id) = parent_id {
+            entity_by_id.get(&parent_id).copied().ok_or(
+                EditorApplyError::UnknownParentReference {
+                    entity_id: child_id,
+                    reference: format!("id {}", parent_id),
+                },
+            )?
+        } else if let Some(parent_name) = parent_name {
+            entity_by_name.get(parent_name.as_str()).copied().ok_or(
+                EditorApplyError::UnknownParentReference {
+                    entity_id: child_id,
+                    reference: format!("name '{}'", parent_name),
+                },
+            )?
+        } else {
+            return Err(EditorApplyError::MissingField {
+                entity_id: child_id,
+                component: "Parent".into(),
+                field: "entity_id",
+            });
+        };
+
+        world.set_parent(child, parent);
     }
 
     Ok(map)
@@ -685,9 +1256,23 @@ fn optional_vec3(component: &InspectorComponent, field: &str) -> Option<Vec3> {
     }
 }
 
+fn optional_text(component: &InspectorComponent, field: &str) -> Option<String> {
+    match component.get_field(field)? {
+        InspectorValue::Text(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn has_any_field(component: &InspectorComponent, fields: &[&str]) -> bool {
+    fields
+        .iter()
+        .any(|field| component.get_field(field).is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::parse_scene;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_test_dir(suffix: &str) -> String {
@@ -812,6 +1397,168 @@ mod tests {
     }
 
     #[test]
+    fn scene_document_hsc_roundtrip_supports_editor_mutation() {
+        let source = r#"
+scene "Workflow"
+
+entity "player" {
+  transform { pos 0 1 0 rot 0 0 0 1 scale 1 1 1 }
+  stats { health 100 mana 25 attack 8 defense 4 speed 3 }
+}
+
+entity "camera" {
+  transform { pos 0 3 8 rot 0 0 0 1 scale 1 1 1 }
+  camera { fov 60 near 0.1 far 1000 }
+  active_camera
+}
+"#;
+
+        let mut doc = SceneDocument::from_hsc_str(source).unwrap();
+        assert_eq!(doc.name, "Workflow");
+        assert_eq!(
+            doc.get_value(1, "Stats", "health"),
+            Some(&InspectorValue::Number(100.0))
+        );
+
+        doc.set_value(1, "Stats", "health", InspectorValue::Number(135.0));
+        doc.set_value(
+            2,
+            "Transform",
+            "position",
+            InspectorValue::Vec3([4.0, 6.0, 12.0]),
+        );
+
+        let exported = doc.to_hsc_string().unwrap();
+        let scene = parse_scene(&exported).unwrap();
+
+        assert_eq!(scene.name, "Workflow");
+        assert_eq!(scene.entities.len(), 2);
+        assert_eq!(scene.entities[0].stats.as_ref().unwrap().health, 135.0);
+        assert_eq!(
+            scene.entities[1].transform.as_ref().unwrap().position,
+            Vec3::new(4.0, 6.0, 12.0)
+        );
+    }
+
+    #[test]
+    fn scene_bridge_roundtrip_preserves_runtime_scene_data() {
+        let scene = SceneData {
+            name: "Bridge".into(),
+            entities: vec![
+                EntityDef {
+                    name: "player".into(),
+                    transform: Some(TransformDef {
+                        position: Vec3::new(1.0, 2.0, 3.0),
+                        rotation: Quat::new(0.0, 0.70710677, 0.0, 0.70710677),
+                        scale: Vec3::new(1.0, 1.5, 1.0),
+                    }),
+                    camera: Some(CameraDef {
+                        fov: 75.0,
+                        near: 0.2,
+                        far: 500.0,
+                    }),
+                    active_camera: true,
+                    light: None,
+                    stats: Some(StatsDef {
+                        health: 100.0,
+                        mana: 50.0,
+                        attack: 12.0,
+                        defense: 6.0,
+                        speed: 4.0,
+                    }),
+                    parent_name: None,
+                },
+                EntityDef {
+                    name: "sun".into(),
+                    transform: None,
+                    camera: None,
+                    active_camera: false,
+                    light: Some(LightDef {
+                        direction: Vec3::new(0.4, -1.0, 0.2),
+                        color: Color::new(1.0, 0.9, 0.8, 0.75),
+                        intensity: 1.5,
+                        ambient: 0.2,
+                    }),
+                    stats: None,
+                    parent_name: None,
+                },
+                EntityDef {
+                    name: "crate".into(),
+                    transform: Some(TransformDef {
+                        position: Vec3::new(5.0, 0.0, -3.0),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::ONE,
+                    }),
+                    camera: None,
+                    active_camera: false,
+                    light: None,
+                    stats: None,
+                    parent_name: Some("player".into()),
+                },
+            ],
+        };
+
+        let doc = SceneDocument::from_scene_data(&scene);
+        let roundtrip = doc.to_scene_data().unwrap();
+
+        assert_eq!(roundtrip.name, scene.name);
+        assert_eq!(roundtrip.entities.len(), 3);
+
+        let player = &roundtrip.entities[0];
+        assert_eq!(player.name, "player");
+        assert!(player.active_camera);
+        let player_transform = player.transform.as_ref().unwrap();
+        assert_eq!(player_transform.position, Vec3::new(1.0, 2.0, 3.0));
+        assert!((player_transform.rotation.y - 0.70710677).abs() < 1e-5);
+        assert_eq!(player.stats.as_ref().unwrap().attack, 12.0);
+
+        let sun = &roundtrip.entities[1];
+        let light = sun.light.as_ref().unwrap();
+        assert!((light.color.a - 0.75).abs() < 1e-5);
+        assert!((light.intensity - 1.5).abs() < 1e-5);
+
+        let crate_entity = &roundtrip.entities[2];
+        assert_eq!(crate_entity.parent_name.as_deref(), Some("player"));
+    }
+
+    #[test]
+    fn scene_document_to_scene_data_deduplicates_names_and_resolves_parent_ids() {
+        let doc = SceneDocument {
+            name: "Deduped".into(),
+            entities: vec![
+                EditorEntity {
+                    id: 1,
+                    name: "Entity".into(),
+                    components: vec![InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([0.0, 0.0, 0.0]),
+                        }],
+                    }],
+                },
+                EditorEntity {
+                    id: 2,
+                    name: "Entity".into(),
+                    components: vec![InspectorComponent {
+                        type_name: "Parent".into(),
+                        fields: vec![InspectorField {
+                            name: "entity_id".into(),
+                            value: InspectorValue::Number(1.0),
+                        }],
+                    }],
+                },
+            ],
+        };
+
+        let scene = doc.to_scene_data().unwrap();
+
+        assert_eq!(scene.entities[0].name, "Entity");
+        assert_eq!(scene.entities[1].name, "Entity 2");
+        assert_eq!(scene.entities[1].parent_name.as_deref(), Some("Entity"));
+    }
+
+    #[test]
     fn project_file_io_roundtrip() {
         let root = unique_test_dir("project");
         fs::create_dir_all(&root).unwrap();
@@ -846,6 +1593,50 @@ mod tests {
 
         save_scene_doc(&scene_path, &doc).unwrap();
         let loaded = load_scene_doc(&scene_path).unwrap();
+        assert_eq!(loaded, doc);
+    }
+
+    #[test]
+    fn scene_document_hsc_file_io_roundtrip() {
+        let root = unique_test_dir("scene_hsc");
+        fs::create_dir_all(&root).unwrap();
+        let scene_path = format!("{root}/level01.hsc");
+
+        let doc = SceneDocument {
+            name: "Level01".into(),
+            entities: vec![EditorEntity {
+                id: 1,
+                name: "Sun".into(),
+                components: vec![InspectorComponent {
+                    type_name: "DirectionalLight".into(),
+                    fields: vec![
+                        InspectorField {
+                            name: "direction".into(),
+                            value: InspectorValue::Vec3([0.3, -1.0, 0.2]),
+                        },
+                        InspectorField {
+                            name: "color".into(),
+                            value: InspectorValue::Vec3([1.0, 0.95, 0.8]),
+                        },
+                        InspectorField {
+                            name: "color_alpha".into(),
+                            value: InspectorValue::Number(1.0),
+                        },
+                        InspectorField {
+                            name: "intensity".into(),
+                            value: InspectorValue::Number(1.0),
+                        },
+                        InspectorField {
+                            name: "ambient".into(),
+                            value: InspectorValue::Number(0.15),
+                        },
+                    ],
+                }],
+            }],
+        };
+
+        save_scene_doc_to_hsc(&scene_path, &doc).unwrap();
+        let loaded = load_scene_doc_from_hsc(&scene_path).unwrap();
         assert_eq!(loaded, doc);
     }
 
@@ -922,9 +1713,80 @@ mod tests {
         let t = world.get::<Transform>(entity).unwrap();
         assert_eq!(t.position, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(t.scale, Vec3::new(2.0, 2.0, 2.0));
+        assert!(world.has_component::<GlobalTransform>(entity));
 
         let stats = world.get::<Stats>(entity).unwrap();
         assert_eq!(stats.health, 120.0);
+    }
+
+    #[test]
+    fn apply_scene_document_to_world_supports_scene_bridge_components() {
+        let scene = SceneData {
+            name: "ApplyBridge".into(),
+            entities: vec![
+                EntityDef {
+                    name: "camera_root".into(),
+                    transform: Some(TransformDef {
+                        position: Vec3::new(0.0, 3.0, 8.0),
+                        rotation: Quat::new(0.0, 0.0, 0.0, 1.0),
+                        scale: Vec3::ONE,
+                    }),
+                    camera: Some(CameraDef {
+                        fov: 70.0,
+                        near: 0.1,
+                        far: 250.0,
+                    }),
+                    active_camera: true,
+                    light: None,
+                    stats: None,
+                    parent_name: None,
+                },
+                EntityDef {
+                    name: "child".into(),
+                    transform: Some(TransformDef {
+                        position: Vec3::new(1.0, 0.0, 0.0),
+                        rotation: Quat::new(0.0, 0.38268343, 0.0, 0.9238795),
+                        scale: Vec3::new(2.0, 2.0, 2.0),
+                    }),
+                    camera: None,
+                    active_camera: false,
+                    light: Some(LightDef {
+                        direction: Vec3::new(0.0, -1.0, 0.0),
+                        color: Color::new(0.5, 0.6, 0.7, 0.8),
+                        intensity: 2.0,
+                        ambient: 0.25,
+                    }),
+                    stats: Some(StatsDef {
+                        health: 80.0,
+                        mana: 10.0,
+                        attack: 5.0,
+                        defense: 2.0,
+                        speed: 1.0,
+                    }),
+                    parent_name: Some("camera_root".into()),
+                },
+            ],
+        };
+
+        let doc = SceneDocument::from_scene_data(&scene);
+        let mut world = World::new();
+        let map = apply_scene_document_to_world(&mut world, &doc).unwrap();
+        let id_to_entity: HashMap<u64, Entity> = map.into_iter().collect();
+
+        let root = id_to_entity[&1];
+        assert!(world.has_component::<GlobalTransform>(root));
+        assert!(world.has_component::<Camera>(root));
+        assert!(world.has_component::<ActiveCamera>(root));
+
+        let child = id_to_entity[&2];
+        let transform = world.get::<Transform>(child).unwrap();
+        assert!((transform.rotation.y - 0.38268343).abs() < 1e-5);
+        assert!(world.has_component::<GlobalTransform>(child));
+        assert!(world.has_component::<DirectionalLight>(child));
+        assert!(world.has_component::<Stats>(child));
+
+        let parent = world.get::<crate::Parent>(child).unwrap();
+        assert_eq!(parent.entity, root);
     }
 
     #[test]
@@ -965,10 +1827,47 @@ mod tests {
         save_scene_doc(scene_path, &scene).unwrap();
 
         let mut world = World::new();
-        let map = load_and_apply_scene_from_project(project.project_file(), scene_file, &mut world).unwrap();
+        let map = load_and_apply_scene_from_project(project.project_file(), scene_file, &mut world)
+            .unwrap();
         assert_eq!(map.len(), 1);
         let entity = map[0].1;
         assert!(world.has_component::<Transform>(entity));
         assert!(world.has_component::<Camera>(entity));
+    }
+
+    #[test]
+    fn load_and_apply_scene_from_hsc_pipeline() {
+        let root = unique_test_dir("pipeline_hsc");
+        fs::create_dir_all(&root).unwrap();
+        let scene_path = format!("{root}/level01.hsc");
+
+        let source = r#"
+scene "Pipeline"
+
+entity "camera" {
+  transform { pos 0 2 10 rot 0 0 0 1 scale 1 1 1 }
+  camera { fov 75 near 0.5 far 300 }
+  active_camera
+}
+
+entity "sun" {
+  light { dir 0.4 -1 0.3 color 1 1 1 1 intensity 1.2 ambient 0.2 }
+}
+"#;
+
+        fs::write(&scene_path, source).unwrap();
+
+        let mut world = World::new();
+        let map = load_and_apply_scene_from_hsc(&scene_path, &mut world).unwrap();
+        assert_eq!(map.len(), 2);
+
+        let id_to_entity: HashMap<u64, Entity> = map.into_iter().collect();
+        let camera = id_to_entity[&1];
+        assert!(world.has_component::<Transform>(camera));
+        assert!(world.has_component::<Camera>(camera));
+        assert!(world.has_component::<ActiveCamera>(camera));
+
+        let sun = id_to_entity[&2];
+        assert!(world.has_component::<DirectionalLight>(sun));
     }
 }
