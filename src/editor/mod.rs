@@ -19,7 +19,7 @@ use crate::scene::{
     SceneData, SceneError, StatsDef, TransformDef,
 };
 
-pub use session::{EditorSceneSession, EditorSessionError};
+pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
