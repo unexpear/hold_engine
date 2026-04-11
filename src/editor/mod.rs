@@ -2,6 +2,8 @@
 //! This module is runtime-agnostic and keeps a dynamic editing layer on top
 //! of typed ECS/runtime data.
 
+mod session;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -16,6 +18,8 @@ use crate::scene::{
     load_scene, parse_scene, save_scene, serialize_scene, CameraDef, EntityDef, LightDef,
     SceneData, SceneError, StatsDef, TransformDef,
 };
+
+pub use session::{EditorSceneSession, EditorSessionError};
 
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
