@@ -8,12 +8,14 @@
 use std::path::PathBuf;
 
 use hold::{
+    decode_editor_event_protocol,
     engine::App,
+    encode_editor_command_protocol,
     input::{vk, InputState},
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
-    EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorPlayState, EditorRuntimeHost,
-    Engine,
+    EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorPlayState,
+    EditorProtocolError, Engine,
 };
 
 const DEFAULT_SCENE: &str = "examples/demo.hsc";
@@ -56,15 +58,15 @@ impl Args {
 }
 
 struct EditorShellApp {
-    host: EditorRuntimeHost,
+    server: EditorBridgeServer,
     backend: BackendKind,
     status: String,
 }
 
 impl EditorShellApp {
-    fn new(host: EditorRuntimeHost, backend: BackendKind) -> Self {
+    fn new(server: EditorBridgeServer, backend: BackendKind) -> Self {
         let mut app = Self {
-            host,
+            server,
             backend,
             status: String::new(),
         };
@@ -73,25 +75,25 @@ impl EditorShellApp {
     }
 
     fn refresh_status(&mut self) {
-        let scene_name = self.host.session().scene().name.clone();
+        let scene_name = self.server.host().session().scene().name.clone();
         let backend = match self.backend {
             BackendKind::Software => "SW",
             BackendKind::OpenGL => "GL",
             BackendKind::Vulkan => "VK",
         };
-        let play_state = match self.host.play_state() {
+        let play_state = match self.server.host().play_state() {
             EditorPlayState::Editing => "EDIT",
             EditorPlayState::Playing => "PLAY",
             EditorPlayState::Paused => "PAUSED",
         };
-        let dirty = if self.host.is_dirty() { "*" } else { "" };
-        let sync_state = if self.host.world_requires_rebuild() {
+        let dirty = if self.server.host().is_dirty() { "*" } else { "" };
+        let sync_state = if self.server.host().world_requires_rebuild() {
             "REBUILD"
         } else {
             "SYNC"
         };
 
-        let cursor_str = match self.host.cursor() {
+        let cursor_str = match self.server.host().cursor() {
             Some(cursor) => {
                 let axis = cursor
                     .axis
@@ -140,7 +142,7 @@ impl EditorShellApp {
         }
 
         if input.key_pressed(vk::F8) {
-            match self.host.play_state() {
+            match self.server.host().play_state() {
                 EditorPlayState::Editing => self.dispatch(EditorCommand::EnterPlayMode),
                 EditorPlayState::Playing | EditorPlayState::Paused => {
                     self.dispatch(EditorCommand::StopPlayMode)
@@ -150,7 +152,7 @@ impl EditorShellApp {
         }
 
         if input.key_pressed(vk::F9) {
-            match self.host.play_state() {
+            match self.server.host().play_state() {
                 EditorPlayState::Playing => self.dispatch(EditorCommand::PausePlayMode),
                 EditorPlayState::Paused => self.dispatch(EditorCommand::ResumePlayMode),
                 EditorPlayState::Editing => {}
@@ -200,10 +202,22 @@ impl EditorShellApp {
     }
 
     fn dispatch(&mut self, command: EditorCommand) {
-        match self.host.execute(command) {
+        match self.dispatch_protocol(command) {
             Ok(events) => self.handle_events(&events),
             Err(err) => self.print_error(&err),
         }
+    }
+
+    fn dispatch_protocol(
+        &mut self,
+        command: EditorCommand,
+    ) -> Result<Vec<EditorEvent>, EditorProtocolError> {
+        let message = encode_editor_command_protocol(&command);
+        let encoded_events = self.server.execute_message(&message)?;
+        encoded_events
+            .iter()
+            .map(|event| decode_editor_event_protocol(event))
+            .collect()
     }
 
     fn handle_events(&mut self, events: &[EditorEvent]) {
@@ -249,7 +263,7 @@ impl EditorShellApp {
         println!("[editor] {}", self.status);
     }
 
-    fn print_error(&self, err: &EditorCommandError) {
+    fn print_error(&self, err: &EditorProtocolError) {
         eprintln!("[editor] {err}");
     }
 }
@@ -262,20 +276,20 @@ impl App for EditorShellApp {
         input: &InputState,
         dt: f32,
     ) {
-        self.host.update_editor_camera(input, dt);
+        self.server.host_mut().update_editor_camera(input, dt);
         self.process_input(input);
 
         let height = renderer.height().max(1) as f32;
         let aspect = renderer.width() as f32 / height;
-        let vp: Mat4 = self.host.active_view_proj(EDITOR_FOV_DEG, aspect);
+        let vp: Mat4 = self.server.host().active_view_proj(EDITOR_FOV_DEG, aspect);
 
         renderer.clear(hold::Color::new(0.10, 0.10, 0.12, 1.0));
 
         let draw_list = hold::generate_draw_list(
-            self.host.world(),
-            self.host.session().last_world_map(),
-            self.host.session().scene(),
-            self.host.cursor().as_ref(),
+            self.server.host().world(),
+            self.server.host().session().last_world_map(),
+            self.server.host().session().scene(),
+            self.server.host().cursor().as_ref(),
         );
         renderer.render_debug_lines(&draw_list.lines, &vp);
     }
@@ -288,8 +302,8 @@ impl App for EditorShellApp {
 fn main() {
     let args = Args::parse();
 
-    let host = match EditorRuntimeHost::open_hsc(&args.scene) {
-        Ok(host) => host,
+    let server = match EditorBridgeServer::open_hsc(&args.scene) {
+        Ok(server) => server,
         Err(err) => {
             eprintln!("error: failed to open '{}': {err}", args.scene.display());
             std::process::exit(1);
@@ -299,13 +313,13 @@ fn main() {
     println!(
         "[editor] opened '{}' ({} entities) | backend={:?}",
         args.scene.display(),
-        host.session().scene().entities.len(),
+        server.host().session().scene().entities.len(),
         args.backend
     );
 
     let title = format!("Hold Editor - {} | {:?}", args.scene.display(), args.backend);
     let engine = Engine::new(&title, 1280, 720);
-    let app = EditorShellApp::new(host, args.backend);
+    let app = EditorShellApp::new(server, args.backend);
 
     println!("[editor] {}", app.status);
     println!(

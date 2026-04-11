@@ -2,6 +2,7 @@
 //! This module is runtime-agnostic and keeps a dynamic editing layer on top
 //! of typed ECS/runtime data.
 
+pub mod bridge;
 pub mod command;
 pub mod drawlist;
 pub mod protocol;
@@ -23,9 +24,8 @@ use crate::scene::{
     SceneData, SceneError, StatsDef, TransformDef,
 };
 
-pub use command::{
-    EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
-};
+pub use bridge::EditorBridgeServer;
+pub use command::{EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor};
 pub use drawlist::{generate_draw_list, EditorDrawList};
 pub use protocol::{
     decode_command as decode_editor_command_protocol,

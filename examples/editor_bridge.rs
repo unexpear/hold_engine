@@ -12,23 +12,21 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use hold::{
-    encode_editor_event_protocol, EditorEvent, EditorInspectorCursor, EditorRuntimeHost,
-};
+use hold::EditorBridgeServer;
 
 const DEFAULT_SCENE: &str = "examples/demo.hsc";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scene_path = parse_scene_arg();
-    let mut host = EditorRuntimeHost::open_hsc(&scene_path)?;
+    let mut server = EditorBridgeServer::open_hsc(&scene_path)?;
 
     eprintln!(
         "[editor-bridge] loaded '{}' ({} entities)",
-        host.session().scene().name,
-        host.session().scene().entities.len()
+        server.host().session().scene().name,
+        server.host().session().scene().entities.len()
     );
 
-    emit_startup_snapshot(&host)?;
+    emit_messages(&server.startup_messages())?;
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -38,12 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        match host.execute_protocol_message(message) {
-            Ok(events) => {
-                for event in events {
-                    println!("{event}");
-                }
-            }
+        match server.execute_message(message) {
+            Ok(messages) => emit_messages(&messages)?,
             Err(err) => {
                 eprintln!("[editor-bridge] {err}");
             }
@@ -68,18 +62,9 @@ fn parse_scene_arg() -> PathBuf {
     scene
 }
 
-fn emit_startup_snapshot(host: &EditorRuntimeHost) -> io::Result<()> {
-    println!("{}", encode_editor_event_protocol(&EditorEvent::WorldRebuilt));
-    if let Some(cursor) = host.cursor() {
-        emit_selection(cursor)?;
+fn emit_messages(messages: &[String]) -> io::Result<()> {
+    for message in messages {
+        println!("{message}");
     }
     io::stdout().flush()
-}
-
-fn emit_selection(cursor: EditorInspectorCursor) -> io::Result<()> {
-    println!(
-        "{}",
-        encode_editor_event_protocol(&EditorEvent::SelectionChanged(cursor))
-    );
-    Ok(())
 }
