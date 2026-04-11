@@ -2,6 +2,8 @@
 //! This module is runtime-agnostic and keeps a dynamic editing layer on top
 //! of typed ECS/runtime data.
 
+pub mod command;
+pub mod drawlist;
 mod host;
 mod session;
 
@@ -20,7 +22,11 @@ use crate::scene::{
     SceneData, SceneError, StatsDef, TransformDef,
 };
 
-pub use host::EditorRuntimeHost;
+pub use command::{
+    EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
+};
+pub use drawlist::{generate_draw_list, EditorDrawList};
+pub use host::{EditorCamera, EditorRuntimeHost};
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 
 /// Basic project metadata and folder layout.

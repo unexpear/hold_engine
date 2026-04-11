@@ -6,7 +6,7 @@
 //! Supports uploading meshes (VAO/VBO/EBO), compiling GLSL shaders,
 //! uploading RGBA8 textures, and issuing indexed draw calls.
 
-use super::{Color, Renderer};
+use super::{opengl_shaders, Color, DebugLine, Renderer};
 use crate::assets::mesh::MeshData;
 use crate::assets::mesh::Vertex;
 use crate::assets::types::{GpuMesh, GpuTexture, Texture, TextureFormat};
@@ -46,6 +46,7 @@ const GL_STATIC_DRAW: GLenum = 0x88B4;
 #[allow(dead_code)]
 const GL_DYNAMIC_DRAW: GLenum = 0x88B8;
 
+const GL_LINES: GLenum = 0x0001;
 const GL_TRIANGLES: GLenum = 0x0004;
 #[allow(dead_code)]
 const GL_UNSIGNED_SHORT: GLenum = 0x1403;
@@ -127,7 +128,6 @@ type GlDeleteProgram = unsafe extern "system" fn(GLuint);
 
 // Draw
 type GlDrawElements = unsafe extern "system" fn(GLenum, GLsizei, GLenum, *const c_void);
-#[allow(dead_code)]
 type GlDrawArrays = unsafe extern "system" fn(GLenum, GLint, GLsizei);
 
 // Uniforms
@@ -165,6 +165,56 @@ type GlDepthFunc = unsafe extern "system" fn(GLenum);
 type GlBlendFunc = unsafe extern "system" fn(GLenum, GLenum);
 #[allow(dead_code)]
 type GlBlendEquation = unsafe extern "system" fn(GLenum);
+
+// ── Module-level GL helpers ───────────────────────────────────────────────────
+
+/// Compile and link a GLSL program from vertex + fragment source.
+///
+/// Used during `OpenGLRenderer::new()` before `self` exists.  Panics on
+/// compile or link error so problems surface immediately.
+unsafe fn compile_gl_program(gl: &GlFns, vert_src: &str, frag_src: &str) -> GLuint {
+    let vert = compile_gl_stage(gl, GL_VERTEX_SHADER, vert_src);
+    let frag = compile_gl_stage(gl, GL_FRAGMENT_SHADER, frag_src);
+
+    let program = (gl.create_program)();
+    (gl.attach_shader)(program, vert);
+    (gl.attach_shader)(program, frag);
+    (gl.link_program)(program);
+
+    let mut status: GLint = 0;
+    (gl.get_programiv)(program, GL_LINK_STATUS, &mut status);
+    if status == 0 {
+        let mut log_len: GLint = 0;
+        (gl.get_programiv)(program, GL_INFO_LOG_LENGTH, &mut log_len);
+        let mut log = vec![0u8; log_len as usize];
+        (gl.get_program_info_log)(program, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
+        panic!("[GL] Line program link error:\n{}", String::from_utf8_lossy(&log));
+    }
+
+    (gl.delete_shader)(vert);
+    (gl.delete_shader)(frag);
+    program
+}
+
+unsafe fn compile_gl_stage(gl: &GlFns, kind: GLenum, src: &str) -> GLuint {
+    let shader = (gl.create_shader)(kind);
+    let ptr = src.as_ptr() as *const GLchar;
+    let length = src.len() as GLint;
+    (gl.shader_source)(shader, 1, &ptr, &length);
+    (gl.compile_shader)(shader);
+
+    let mut status: GLint = 0;
+    (gl.get_shaderiv)(shader, GL_COMPILE_STATUS, &mut status);
+    if status == 0 {
+        let mut log_len: GLint = 0;
+        (gl.get_shaderiv)(shader, GL_INFO_LOG_LENGTH, &mut log_len);
+        let mut log = vec![0u8; log_len as usize];
+        (gl.get_shader_info_log)(shader, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
+        let stage = if kind == GL_VERTEX_SHADER { "vertex" } else { "fragment" };
+        panic!("[GL] {} shader compile error:\n{}", stage, String::from_utf8_lossy(&log));
+    }
+    shader
+}
 
 // ── GL function loader ────────────────────────────────────────────────────────
 
@@ -241,6 +291,7 @@ struct GlFns {
 
     // Draw
     draw_elements: GlDrawElements,
+    draw_arrays: GlDrawArrays,
 
     // Uniforms
     get_uniform_location: GlGetUniformLocation,
@@ -308,6 +359,7 @@ impl GlFns {
         let delete_program = gl_fn!(opengl32, glDeleteProgram, GlDeleteProgram).unwrap();
 
         let draw_elements = gl_fn!(opengl32, glDrawElements, GlDrawElements).unwrap();
+        let draw_arrays = gl_fn!(opengl32, glDrawArrays, GlDrawArrays).unwrap();
 
         let get_uniform_location =
             gl_fn!(opengl32, glGetUniformLocation, GlGetUniformLocation).unwrap();
@@ -354,6 +406,7 @@ impl GlFns {
             use_program,
             delete_program,
             draw_elements,
+            draw_arrays,
             get_uniform_location,
             uniform_matrix4fv,
             uniform1i,
@@ -425,6 +478,11 @@ pub struct OpenGLRenderer {
     /// Uniform location cache keyed by GL program ID.
     /// Populated lazily on first draw with each program.
     uniform_cache: HashMap<u32, CachedUniforms>,
+    /// Compiled line-shader program (position + per-vertex colour).
+    line_program: GLuint,
+    /// VAO and VBO for batched debug line segments (updated each frame).
+    line_vao: GLuint,
+    line_vbo: GLuint,
 }
 
 impl OpenGLRenderer {
@@ -471,6 +529,30 @@ impl OpenGLRenderer {
             // Enable depth test by default.
             (gl.enable)(GL_DEPTH_TEST);
 
+            // ── Compile line shader ────────────────────────────────────────────
+            let line_program =
+                compile_gl_program(&gl, opengl_shaders::LINE_VERT, opengl_shaders::LINE_FRAG);
+
+            // ── Allocate persistent line VAO + VBO ────────────────────────────
+            // Vertex layout: [x y z r g b a] (7 × f32 = 28 bytes per vertex)
+            let mut line_vao: GLuint = 0;
+            (gl.gen_vertex_arrays)(1, &mut line_vao);
+            (gl.bind_vertex_array)(line_vao);
+
+            let mut line_vbo: GLuint = 0;
+            (gl.gen_buffers)(1, &mut line_vbo);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, line_vbo);
+
+            let stride = 7_i32 * 4; // 28 bytes
+            // location 0 — position (vec3, offset 0)
+            (gl.vertex_attrib_pointer)(0, 3, GL_FLOAT, GL_FALSE, stride, 0 as *const c_void);
+            (gl.enable_vertex_attrib_array)(0);
+            // location 1 — colour (vec4, offset 12)
+            (gl.vertex_attrib_pointer)(1, 4, GL_FLOAT, GL_FALSE, stride, 12 as *const c_void);
+            (gl.enable_vertex_attrib_array)(1);
+
+            (gl.bind_vertex_array)(0);
+
             Self {
                 hwnd,
                 hdc,
@@ -480,6 +562,9 @@ impl OpenGLRenderer {
                 height,
                 gl,
                 uniform_cache: HashMap::new(),
+                line_program,
+                line_vao,
+                line_vbo,
             }
         }
     }
@@ -1016,6 +1101,52 @@ impl Renderer for OpenGLRenderer {
             SwapBuffers(self.hdc);
         }
     }
+
+    fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
+        if lines.is_empty() {
+            return;
+        }
+
+        // Build flat vertex buffer: [x y z r g b a] × 2 per line.
+        let mut verts: Vec<f32> = Vec::with_capacity(lines.len() * 14);
+        for line in lines {
+            verts.extend_from_slice(&[
+                line.start.x, line.start.y, line.start.z,
+                line.color.r, line.color.g, line.color.b, line.color.a,
+            ]);
+            verts.extend_from_slice(&[
+                line.end.x, line.end.y, line.end.z,
+                line.color.r, line.color.g, line.color.b, line.color.a,
+            ]);
+        }
+
+        unsafe {
+            let gl = &self.gl;
+
+            (gl.bind_vertex_array)(self.line_vao);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, self.line_vbo);
+            (gl.buffer_data)(
+                GL_ARRAY_BUFFER,
+                (verts.len() * std::mem::size_of::<f32>()) as GLsizeiptr,
+                verts.as_ptr() as *const c_void,
+                GL_DYNAMIC_DRAW,
+            );
+
+            (gl.use_program)(self.line_program);
+
+            // Upload VP matrix.
+            let u_vp = (gl.get_uniform_location)(
+                self.line_program,
+                b"u_vp\0".as_ptr() as *const GLchar,
+            );
+            if u_vp >= 0 {
+                (gl.uniform_matrix4fv)(u_vp, 1, GL_FALSE, vp.cols.as_ptr() as *const GLfloat);
+            }
+
+            (gl.draw_arrays)(GL_LINES, 0, (lines.len() * 2) as GLsizei);
+            (gl.bind_vertex_array)(0);
+        }
+    }
 }
 
 // ── Drop ─────────────────────────────────────────────────────────────────────
@@ -1023,6 +1154,11 @@ impl Renderer for OpenGLRenderer {
 impl Drop for OpenGLRenderer {
     fn drop(&mut self) {
         unsafe {
+            // Free line rendering resources.
+            (self.gl.delete_buffers)(1, &self.line_vbo);
+            (self.gl.delete_vertex_arrays)(1, &self.line_vao);
+            (self.gl.delete_program)(self.line_program);
+
             wglMakeCurrent(null_mut(), null_mut());
             wglDeleteContext(self.hglrc);
             ReleaseDC(self.hwnd, self.hdc);

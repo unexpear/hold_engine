@@ -7,6 +7,14 @@ edition = "2021"
 name = "demo"
 path = "examples/demo.rs"
 
+[[example]]
+name = "editor_host"
+path = "examples/editor_host.rs"
+
+[[example]]
+name = "editor_shell"
+path = "examples/editor_shell.rs"
+
 [lib]
 name = "hold"
 path = "src/lib.rs"

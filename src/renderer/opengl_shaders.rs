@@ -82,6 +82,32 @@ void main() {
 }
 "#;
 
+// ── Debug-line shaders ────────────────────────────────────────────────────────
+
+/// Vertex shader for batched debug line segments.
+///
+/// Vertex layout: position (vec3) at location 0, per-vertex RGBA (vec4) at
+/// location 1.  No normals or UVs — lines are unlit and coloured per vertex.
+pub const LINE_VERT: &str = r#"
+#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec4 a_color;
+uniform mat4 u_vp;
+out vec4 v_color;
+void main() {
+    gl_Position = u_vp * vec4(a_pos, 1.0);
+    v_color = a_color;
+}
+"#;
+
+/// Fragment shader for batched debug line segments.
+pub const LINE_FRAG: &str = r#"
+#version 330 core
+in  vec4 v_color;
+out vec4 frag_color;
+void main() { frag_color = v_color; }
+"#;
+
 // ── Flat / unlit shaders ──────────────────────────────────────────────────────
 
 /// Flat vertex shader — passes position through MVP; normals and UVs ignored.

@@ -167,6 +167,7 @@ pub mod vk {
     pub const F6: u32 = 0x75;
     pub const F7: u32 = 0x76;
     pub const F8: u32 = 0x77;
+    pub const F9: u32 = 0x78;
     pub const F11: u32 = 0x7A;
     pub const F12: u32 = 0x7B;
     // Letters: just cast b'A'..=b'Z' as u32 directly (Win32 uses ASCII).
@@ -176,4 +177,17 @@ pub mod vk {
     pub const D: u32 = b'D' as u32;
     pub const Q: u32 = b'Q' as u32;
     pub const E: u32 = b'E' as u32;
+    pub const R: u32 = b'R' as u32;
+    pub const P: u32 = b'P' as u32;
+    // Digit row (VK_0..VK_9 = ASCII '0'..'9').
+    pub const KEY_1: u32 = b'1' as u32;
+    pub const KEY_2: u32 = b'2' as u32;
+    pub const KEY_3: u32 = b'3' as u32;
+    // OEM keys (US layout).
+    pub const MINUS: u32 = 0xBD;     // VK_OEM_MINUS  (-)
+    pub const EQUALS: u32 = 0xBB;    // VK_OEM_PLUS   (=)
+    pub const LBRACKET: u32 = 0xDB;  // VK_OEM_4      ([)
+    pub const RBRACKET: u32 = 0xDD;  // VK_OEM_6      (])
+    pub const SEMICOLON: u32 = 0xBA; // VK_OEM_1      (;)
+    pub const APOSTROPHE: u32 = 0xDE; // VK_OEM_7     (')
 }

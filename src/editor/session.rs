@@ -186,6 +186,13 @@ impl EditorSceneSession {
         Ok(())
     }
 
+    pub fn resume_play_mode(&mut self) -> Result<(), EditorSessionError> {
+        if self.play_state == EditorPlayState::Paused {
+            self.play_state = EditorPlayState::Playing;
+        }
+        Ok(())
+    }
+
     pub fn stop_play_mode(&mut self, world: &mut World) -> Result<(), EditorSessionError> {
         if self.play_state == EditorPlayState::Editing {
             return Ok(());

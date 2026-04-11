@@ -32,7 +32,7 @@ pub use input::{InputState, MouseButton};
 pub use lod::{ChunkTier, LodChunk, LodLevel, LodMesh, LodTerrain};
 pub use math::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use player::PlayerController;
-pub use renderer::{BackendKind, Color, Renderer};
+pub use renderer::{BackendKind, Color, DebugLine, Renderer};
 pub use scene::{
     load_scene, parse_scene, save_scene, serialize_scene, spawn_scene, CameraDef, EntityDef,
     LightDef, SceneData, SceneError, StatsDef, TransformDef,
@@ -41,10 +41,11 @@ pub use skybox::Skybox;
 pub use terrain::{Heightmap, Terrain, TerrainChunk};
 
 pub use editor::{
-    apply_scene_document_to_world, load_and_apply_scene_from_hsc,
+    apply_scene_document_to_world, generate_draw_list, load_and_apply_scene_from_hsc,
     load_and_apply_scene_from_project, load_project, load_scene_doc, load_scene_doc_from_hsc,
-    save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorEntity,
-    EditorIoError, EditorPipelineError, EditorPlayState, EditorRuntimeHost, EditorSceneSession,
-    EditorSessionError, InspectorComponent, InspectorField, InspectorValue, Project,
-    SceneBridgeError, SceneDocument,
+    save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorAxis,
+    EditorCamera, EditorCommand, EditorCommandError, EditorDrawList, EditorEntity, EditorEvent,
+    EditorInspectorCursor, EditorIoError, EditorPipelineError, EditorPlayState, EditorRuntimeHost,
+    EditorSceneSession, EditorSessionError, InspectorComponent, InspectorField, InspectorValue,
+    Project, SceneBridgeError, SceneDocument,
 };

@@ -278,6 +278,22 @@ impl SoftwareRenderer {
         }
     }
 
+    /// Project a world-space 3-D line segment and draw it.
+    ///
+    /// Lines that straddle the near plane (w ≤ 0 at either endpoint) are
+    /// silently skipped — a full near-clip implementation is not needed for
+    /// editor debug visualization.
+    pub fn draw_line_3d(&mut self, start: Vec3, end: Vec3, color: Color, vp: &Mat4) {
+        let cs = vp.transform_point(start);
+        let ce = vp.transform_point(end);
+        if cs.w <= 0.0 || ce.w <= 0.0 {
+            return;
+        }
+        let (sx, sy, _) = self.clip_to_screen(cs);
+        let (ex, ey, _) = self.clip_to_screen(ce);
+        self.draw_line(sx as i32, sy as i32, ex as i32, ey as i32, color);
+    }
+
     fn rasterize(
         &mut self,
         s0: (f32, f32, f32),
@@ -347,6 +363,12 @@ impl Renderer for SoftwareRenderer {
                 *p = packed;
                 *d = f32::INFINITY;
             });
+    }
+
+    fn render_debug_lines(&mut self, lines: &[super::DebugLine], vp: &Mat4) {
+        for line in lines {
+            self.draw_line_3d(line.start, line.end, line.color, vp);
+        }
     }
 
     fn end_frame(&mut self) {

@@ -7,6 +7,8 @@ pub use opengl::OpenGLRenderer;
 pub use software::SoftwareRenderer;
 pub use vulkan::VulkanRenderer;
 
+use crate::math::{Mat4, Vec3};
+
 // ── Color ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,6 +76,37 @@ pub trait Renderer {
 
     /// Present the rendered frame to the screen.
     fn end_frame(&mut self);
+
+    /// Draw a batch of world-space debug line segments.
+    ///
+    /// `vp` is the combined view-projection matrix.  Each backend projects
+    /// endpoints through `vp` in its own way — software uses its CPU
+    /// rasterizer, OpenGL issues a `GL_LINES` draw call.
+    ///
+    /// This is a no-op for backends that do not support debug visualization.
+    fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
+        let _ = (lines, vp);
+    }
+}
+
+// ── Debug draw primitive ──────────────────────────────────────────────────────
+
+/// A single 3-D line segment for editor debug visualization.
+///
+/// Passed to [`Renderer::render_debug_lines`] in batches.  Both endpoints are
+/// in world space; the renderer projects them through the supplied VP matrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DebugLine {
+    pub start: Vec3,
+    pub end: Vec3,
+    pub color: Color,
+}
+
+impl DebugLine {
+    #[inline]
+    pub fn new(start: Vec3, end: Vec3, color: Color) -> Self {
+        Self { start, end, color }
+    }
 }
 
 // ── Backend selector ──────────────────────────────────────────────────────────
