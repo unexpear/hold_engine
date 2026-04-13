@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ecs::components::{
-    ActiveCamera, Camera, DirectionalLight, GlobalTransform, Parent, Stats, Transform,
+    ActiveCamera, Camera, DirectionalLight, GlobalTransform, Parent, ParticleEmitter, RigidBody,
+    SphereCollider, Stats, Transform, Velocity,
 };
 use crate::ecs::{Entity, World};
 use crate::math::{Quat, Vec3};
@@ -333,6 +334,10 @@ fn ensure_supported_components(editor_entity: &EditorEntity) -> Result<(), Edito
             component.type_name.as_str(),
             "Transform"
                 | "GlobalTransform"
+                | "Velocity"
+                | "RigidBody"
+                | "SphereCollider"
+                | "ParticleEmitter"
                 | "Camera"
                 | "ActiveCamera"
                 | "DirectionalLight"
@@ -381,6 +386,10 @@ fn patch_local_components(
     runtime_entity: Entity,
 ) -> Result<(), EditorSessionError> {
     patch_transform_component(world, editor_entity, runtime_entity)?;
+    patch_velocity_component(world, editor_entity, runtime_entity);
+    patch_rigid_body_component(world, editor_entity, runtime_entity);
+    patch_sphere_collider_component(world, editor_entity, runtime_entity);
+    patch_particle_emitter_component(world, editor_entity, runtime_entity);
     patch_camera_component(world, editor_entity, runtime_entity)?;
     patch_active_camera_component(world, editor_entity, runtime_entity);
     patch_light_component(world, editor_entity, runtime_entity)?;
@@ -446,6 +455,139 @@ fn patch_camera_component(
     }
 
     Ok(())
+}
+
+fn patch_velocity_component(
+    world: &mut World,
+    editor_entity: &EditorEntity,
+    runtime_entity: Entity,
+) {
+    if let Some(component) = editor_entity.component("Velocity") {
+        world.add_component(
+            runtime_entity,
+            Velocity {
+                linear: optional_vec3(component, "linear").unwrap_or(Vec3::ZERO),
+                angular: optional_vec3(component, "angular").unwrap_or(Vec3::ZERO),
+            },
+        );
+    } else {
+        world.remove_component::<Velocity>(runtime_entity);
+    }
+}
+
+fn patch_rigid_body_component(
+    world: &mut World,
+    editor_entity: &EditorEntity,
+    runtime_entity: Entity,
+) {
+    if let Some(component) = editor_entity.component("RigidBody") {
+        let default = RigidBody::default();
+        world.add_component(
+            runtime_entity,
+            RigidBody {
+                gravity_scale: optional_number(component, "gravity_scale")
+                    .unwrap_or(default.gravity_scale),
+                linear_damping: optional_number(component, "linear_damping")
+                    .unwrap_or(default.linear_damping),
+                angular_damping: optional_number(component, "angular_damping")
+                    .unwrap_or(default.angular_damping),
+                restitution: optional_number(component, "restitution")
+                    .unwrap_or(default.restitution),
+            },
+        );
+    } else {
+        world.remove_component::<RigidBody>(runtime_entity);
+    }
+}
+
+fn patch_sphere_collider_component(
+    world: &mut World,
+    editor_entity: &EditorEntity,
+    runtime_entity: Entity,
+) {
+    if let Some(component) = editor_entity.component("SphereCollider") {
+        world.add_component(
+            runtime_entity,
+            SphereCollider::new(optional_number(component, "radius").unwrap_or(0.5)),
+        );
+    } else {
+        world.remove_component::<SphereCollider>(runtime_entity);
+    }
+}
+
+fn patch_particle_emitter_component(
+    world: &mut World,
+    editor_entity: &EditorEntity,
+    runtime_entity: Entity,
+) {
+    if let Some(component) = editor_entity.component("ParticleEmitter") {
+        let default = ParticleEmitter::spark_fountain();
+        let accumulator = world
+            .get::<ParticleEmitter>(runtime_entity)
+            .map(|emitter| emitter.accumulator)
+            .unwrap_or(0.0);
+        world.add_component(
+            runtime_entity,
+            ParticleEmitter {
+                emitting: optional_number(component, "emitting").unwrap_or(if default.emitting {
+                    1.0
+                } else {
+                    0.0
+                }) > 0.0,
+                rate_per_second: optional_number(component, "rate_per_second")
+                    .or_else(|| optional_number(component, "rate"))
+                    .unwrap_or(default.rate_per_second),
+                max_particles: optional_number(component, "max_particles")
+                    .or_else(|| optional_number(component, "max"))
+                    .unwrap_or(default.max_particles as f32)
+                    .max(0.0) as u32,
+                spawn_radius: optional_number(component, "spawn_radius")
+                    .unwrap_or(default.spawn_radius),
+                direction: optional_vec3(component, "direction").unwrap_or(default.direction),
+                spread: optional_number(component, "spread").unwrap_or(default.spread),
+                speed_min: optional_number(component, "speed_min").unwrap_or(default.speed_min),
+                speed_max: optional_number(component, "speed_max").unwrap_or(default.speed_max),
+                lifetime_min: optional_number(component, "lifetime_min")
+                    .unwrap_or(default.lifetime_min),
+                lifetime_max: optional_number(component, "lifetime_max")
+                    .unwrap_or(default.lifetime_max),
+                gravity_scale: optional_number(component, "gravity_scale")
+                    .unwrap_or(default.gravity_scale),
+                linear_damping: optional_number(component, "linear_damping")
+                    .unwrap_or(default.linear_damping),
+                start_size: optional_number(component, "start_size").unwrap_or(default.start_size),
+                end_size: optional_number(component, "end_size").unwrap_or(default.end_size),
+                start_color: optional_vec3(component, "start_color")
+                    .map(|color| {
+                        Color::new(
+                            color.x,
+                            color.y,
+                            color.z,
+                            optional_number(component, "start_color_alpha")
+                                .unwrap_or(default.start_color.a),
+                        )
+                    })
+                    .unwrap_or(default.start_color),
+                end_color: optional_vec3(component, "end_color")
+                    .map(|color| {
+                        Color::new(
+                            color.x,
+                            color.y,
+                            color.z,
+                            optional_number(component, "end_color_alpha")
+                                .unwrap_or(default.end_color.a),
+                        )
+                    })
+                    .unwrap_or(default.end_color),
+                accumulator,
+                seed: optional_number(component, "seed")
+                    .unwrap_or(default.seed as f32)
+                    .max(0.0) as u32,
+            },
+        );
+    } else {
+        world.remove_component::<ParticleEmitter>(runtime_entity);
+    }
 }
 
 fn patch_active_camera_component(

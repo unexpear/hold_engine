@@ -22,7 +22,8 @@
 //! }
 //! ```
 //!
-//! Supports: transform, camera, active_camera, light, stats, parent.
+//! Supports: transform, velocity, rigid_body, sphere_collider, particle_emitter,
+//! camera, active_camera, light, stats, parent.
 //! Comments start with `#`.  Quoted strings use `"double quotes"`.
 
 use std::collections::HashMap;
@@ -30,7 +31,10 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-use crate::ecs::components::{ActiveCamera, Camera, DirectionalLight, Stats, Transform};
+use crate::ecs::components::{
+    ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
+    SphereCollider, Stats, Transform, Velocity,
+};
 use crate::ecs::Entity;
 use crate::ecs::World;
 use crate::math::{Quat, Vec3};
@@ -77,6 +81,10 @@ pub struct SceneData {
 pub struct EntityDef {
     pub name: String,
     pub transform: Option<TransformDef>,
+    pub velocity: Option<VelocityDef>,
+    pub rigid_body: Option<RigidBodyDef>,
+    pub sphere_collider: Option<SphereColliderDef>,
+    pub particle_emitter: Option<ParticleEmitterDef>,
     pub camera: Option<CameraDef>,
     pub active_camera: bool,
     pub light: Option<LightDef>,
@@ -88,6 +96,42 @@ pub struct TransformDef {
     pub position: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
+}
+
+pub struct VelocityDef {
+    pub linear: Vec3,
+    pub angular: Vec3,
+}
+
+pub struct RigidBodyDef {
+    pub gravity_scale: f32,
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub restitution: f32,
+}
+
+pub struct SphereColliderDef {
+    pub radius: f32,
+}
+
+pub struct ParticleEmitterDef {
+    pub emitting: bool,
+    pub rate_per_second: f32,
+    pub max_particles: u32,
+    pub spawn_radius: f32,
+    pub direction: Vec3,
+    pub spread: f32,
+    pub speed_min: f32,
+    pub speed_max: f32,
+    pub lifetime_min: f32,
+    pub lifetime_max: f32,
+    pub gravity_scale: f32,
+    pub linear_damping: f32,
+    pub start_size: f32,
+    pub end_size: f32,
+    pub start_color: Color,
+    pub end_color: Color,
+    pub seed: u32,
 }
 
 pub struct CameraDef {
@@ -372,6 +416,10 @@ impl<'a> Parser<'a> {
         let mut def = EntityDef {
             name,
             transform: None,
+            velocity: None,
+            rigid_body: None,
+            sphere_collider: None,
+            particle_emitter: None,
             camera: None,
             active_camera: false,
             light: None,
@@ -391,6 +439,14 @@ impl<'a> Parser<'a> {
                     if let Some(Token::Word(w)) = self.next()? {
                         match w {
                             "transform" => def.transform = Some(self.parse_transform()?),
+                            "velocity" => def.velocity = Some(self.parse_velocity()?),
+                            "rigid_body" => def.rigid_body = Some(self.parse_rigid_body()?),
+                            "sphere_collider" => {
+                                def.sphere_collider = Some(self.parse_sphere_collider()?)
+                            }
+                            "particle_emitter" => {
+                                def.particle_emitter = Some(self.parse_particle_emitter()?)
+                            }
                             "camera" => def.camera = Some(self.parse_camera()?),
                             "active_camera" => def.active_camera = true,
                             "light" => def.light = Some(self.parse_light()?),
@@ -525,6 +581,225 @@ impl<'a> Parser<'a> {
         }
 
         Ok(c)
+    }
+
+    fn parse_velocity(&mut self) -> Result<VelocityDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut velocity = VelocityDef {
+            linear: Vec3::ZERO,
+            angular: Vec3::ZERO,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "linear" => {
+                                let x = self.expect_number()?;
+                                let y = self.expect_number()?;
+                                let z = self.expect_number()?;
+                                velocity.linear = Vec3::new(x, y, z);
+                            }
+                            "angular" => {
+                                let x = self.expect_number()?;
+                                let y = self.expect_number()?;
+                                let z = self.expect_number()?;
+                                velocity.angular = Vec3::new(x, y, z);
+                            }
+                            _ => {
+                                return Err(SceneError::new(line, "unknown velocity field"));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected field or '}', got unexpected token",
+                    ));
+                }
+            }
+        }
+
+        Ok(velocity)
+    }
+
+    fn parse_rigid_body(&mut self) -> Result<RigidBodyDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut rigid_body = RigidBodyDef {
+            gravity_scale: 1.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            restitution: 0.5,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "gravity_scale" => rigid_body.gravity_scale = self.expect_number()?,
+                            "linear_damping" => rigid_body.linear_damping = self.expect_number()?,
+                            "angular_damping" => {
+                                rigid_body.angular_damping = self.expect_number()?
+                            }
+                            "restitution" => rigid_body.restitution = self.expect_number()?,
+                            _ => {
+                                return Err(SceneError::new(line, "unknown rigid_body field"));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected field or '}', got unexpected token",
+                    ));
+                }
+            }
+        }
+
+        Ok(rigid_body)
+    }
+
+    fn parse_sphere_collider(&mut self) -> Result<SphereColliderDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut collider = SphereColliderDef { radius: 0.5 };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "radius" => collider.radius = self.expect_number()?,
+                            _ => {
+                                return Err(SceneError::new(line, "unknown sphere_collider field"));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected field or '}', got unexpected token",
+                    ));
+                }
+            }
+        }
+
+        Ok(collider)
+    }
+
+    fn parse_particle_emitter(&mut self) -> Result<ParticleEmitterDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let default = ParticleEmitter::spark_fountain();
+        let mut emitter = ParticleEmitterDef {
+            emitting: default.emitting,
+            rate_per_second: default.rate_per_second,
+            max_particles: default.max_particles,
+            spawn_radius: default.spawn_radius,
+            direction: default.direction,
+            spread: default.spread,
+            speed_min: default.speed_min,
+            speed_max: default.speed_max,
+            lifetime_min: default.lifetime_min,
+            lifetime_max: default.lifetime_max,
+            gravity_scale: default.gravity_scale,
+            linear_damping: default.linear_damping,
+            start_size: default.start_size,
+            end_size: default.end_size,
+            start_color: default.start_color,
+            end_color: default.end_color,
+            seed: default.seed,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "emitting" => emitter.emitting = self.expect_number()? > 0.0,
+                            "rate" | "rate_per_second" => {
+                                emitter.rate_per_second = self.expect_number()?
+                            }
+                            "max" | "max_particles" => {
+                                emitter.max_particles = self.expect_number()?.max(0.0) as u32
+                            }
+                            "spawn_radius" => emitter.spawn_radius = self.expect_number()?,
+                            "dir" | "direction" => {
+                                let x = self.expect_number()?;
+                                let y = self.expect_number()?;
+                                let z = self.expect_number()?;
+                                emitter.direction = Vec3::new(x, y, z);
+                            }
+                            "spread" => emitter.spread = self.expect_number()?,
+                            "speed_min" => emitter.speed_min = self.expect_number()?,
+                            "speed_max" => emitter.speed_max = self.expect_number()?,
+                            "lifetime_min" => emitter.lifetime_min = self.expect_number()?,
+                            "lifetime_max" => emitter.lifetime_max = self.expect_number()?,
+                            "gravity_scale" => emitter.gravity_scale = self.expect_number()?,
+                            "linear_damping" => emitter.linear_damping = self.expect_number()?,
+                            "start_size" => emitter.start_size = self.expect_number()?,
+                            "end_size" => emitter.end_size = self.expect_number()?,
+                            "start_color" => {
+                                let r = self.expect_number()?;
+                                let g = self.expect_number()?;
+                                let b = self.expect_number()?;
+                                let a = self.expect_number()?;
+                                emitter.start_color = Color::new(r, g, b, a);
+                            }
+                            "end_color" => {
+                                let r = self.expect_number()?;
+                                let g = self.expect_number()?;
+                                let b = self.expect_number()?;
+                                let a = self.expect_number()?;
+                                emitter.end_color = Color::new(r, g, b, a);
+                            }
+                            "seed" => emitter.seed = self.expect_number()?.max(0.0) as u32,
+                            _ => {
+                                return Err(SceneError::new(
+                                    line,
+                                    "unknown particle_emitter field",
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected field or '}', got unexpected token",
+                    ));
+                }
+            }
+        }
+
+        Ok(emitter)
     }
 
     fn parse_light(&mut self) -> Result<LightDef, SceneError> {
@@ -663,6 +938,59 @@ pub fn spawn_scene(
                     scale: t.scale,
                 },
             );
+            world.add_component(entity, GlobalTransform::identity());
+        }
+
+        if let Some(velocity) = &def.velocity {
+            world.add_component(
+                entity,
+                Velocity {
+                    linear: velocity.linear,
+                    angular: velocity.angular,
+                },
+            );
+        }
+
+        if let Some(rigid_body) = &def.rigid_body {
+            world.add_component(
+                entity,
+                RigidBody {
+                    gravity_scale: rigid_body.gravity_scale,
+                    linear_damping: rigid_body.linear_damping,
+                    angular_damping: rigid_body.angular_damping,
+                    restitution: rigid_body.restitution,
+                },
+            );
+        }
+
+        if let Some(collider) = &def.sphere_collider {
+            world.add_component(entity, SphereCollider::new(collider.radius));
+        }
+
+        if let Some(emitter) = &def.particle_emitter {
+            world.add_component(
+                entity,
+                ParticleEmitter {
+                    emitting: emitter.emitting,
+                    rate_per_second: emitter.rate_per_second,
+                    max_particles: emitter.max_particles,
+                    spawn_radius: emitter.spawn_radius,
+                    direction: emitter.direction,
+                    spread: emitter.spread,
+                    speed_min: emitter.speed_min,
+                    speed_max: emitter.speed_max,
+                    lifetime_min: emitter.lifetime_min,
+                    lifetime_max: emitter.lifetime_max,
+                    gravity_scale: emitter.gravity_scale,
+                    linear_damping: emitter.linear_damping,
+                    start_size: emitter.start_size,
+                    end_size: emitter.end_size,
+                    start_color: emitter.start_color,
+                    end_color: emitter.end_color,
+                    accumulator: 0.0,
+                    seed: emitter.seed,
+                },
+            );
         }
 
         if let Some(c) = &def.camera {
@@ -756,6 +1084,114 @@ pub fn serialize_scene(scene: &SceneData) -> String {
             out.push_str("  }\n");
         }
 
+        if let Some(velocity) = &def.velocity {
+            out.push_str("  velocity {\n");
+            out.push_str(&format!(
+                "    linear {} {} {}\n",
+                fmt_f32(velocity.linear.x),
+                fmt_f32(velocity.linear.y),
+                fmt_f32(velocity.linear.z),
+            ));
+            out.push_str(&format!(
+                "    angular {} {} {}\n",
+                fmt_f32(velocity.angular.x),
+                fmt_f32(velocity.angular.y),
+                fmt_f32(velocity.angular.z),
+            ));
+            out.push_str("  }\n");
+        }
+
+        if let Some(rigid_body) = &def.rigid_body {
+            out.push_str("  rigid_body {\n");
+            out.push_str(&format!(
+                "    gravity_scale {}\n",
+                fmt_f32(rigid_body.gravity_scale),
+            ));
+            out.push_str(&format!(
+                "    linear_damping {}\n",
+                fmt_f32(rigid_body.linear_damping),
+            ));
+            out.push_str(&format!(
+                "    angular_damping {}\n",
+                fmt_f32(rigid_body.angular_damping),
+            ));
+            out.push_str(&format!(
+                "    restitution {}\n",
+                fmt_f32(rigid_body.restitution),
+            ));
+            out.push_str("  }\n");
+        }
+
+        if let Some(collider) = &def.sphere_collider {
+            out.push_str(&format!(
+                "  sphere_collider {{ radius {} }}\n",
+                fmt_f32(collider.radius),
+            ));
+        }
+
+        if let Some(emitter) = &def.particle_emitter {
+            out.push_str("  particle_emitter {\n");
+            out.push_str(&format!(
+                "    emitting {}\n",
+                if emitter.emitting { "1" } else { "0" },
+            ));
+            out.push_str(&format!(
+                "    rate_per_second {}\n",
+                fmt_f32(emitter.rate_per_second),
+            ));
+            out.push_str(&format!(
+                "    max_particles {}\n",
+                fmt_f32(emitter.max_particles as f32),
+            ));
+            out.push_str(&format!(
+                "    spawn_radius {}\n",
+                fmt_f32(emitter.spawn_radius),
+            ));
+            out.push_str(&format!(
+                "    direction {} {} {}\n",
+                fmt_f32(emitter.direction.x),
+                fmt_f32(emitter.direction.y),
+                fmt_f32(emitter.direction.z),
+            ));
+            out.push_str(&format!("    spread {}\n", fmt_f32(emitter.spread)));
+            out.push_str(&format!("    speed_min {}\n", fmt_f32(emitter.speed_min)));
+            out.push_str(&format!("    speed_max {}\n", fmt_f32(emitter.speed_max)));
+            out.push_str(&format!(
+                "    lifetime_min {}\n",
+                fmt_f32(emitter.lifetime_min),
+            ));
+            out.push_str(&format!(
+                "    lifetime_max {}\n",
+                fmt_f32(emitter.lifetime_max),
+            ));
+            out.push_str(&format!(
+                "    gravity_scale {}\n",
+                fmt_f32(emitter.gravity_scale),
+            ));
+            out.push_str(&format!(
+                "    linear_damping {}\n",
+                fmt_f32(emitter.linear_damping),
+            ));
+            out.push_str(&format!("    start_size {}\n", fmt_f32(emitter.start_size)));
+            out.push_str(&format!("    end_size {}\n", fmt_f32(emitter.end_size)));
+            out.push_str(&format!(
+                "    start_color {} {} {} {}\n",
+                fmt_f32(emitter.start_color.r),
+                fmt_f32(emitter.start_color.g),
+                fmt_f32(emitter.start_color.b),
+                fmt_f32(emitter.start_color.a),
+            ));
+            out.push_str(&format!(
+                "    end_color {} {} {} {}\n",
+                fmt_f32(emitter.end_color.r),
+                fmt_f32(emitter.end_color.g),
+                fmt_f32(emitter.end_color.b),
+                fmt_f32(emitter.end_color.a),
+            ));
+            out.push_str(&format!("    seed {}\n", fmt_f32(emitter.seed as f32)));
+            out.push_str("  }\n");
+        }
+
         if let Some(c) = &def.camera {
             out.push_str(&format!(
                 "  camera {{ fov {} near {} far {} }}\n",
@@ -844,9 +1280,36 @@ scene "Test Level"
 # A comment
 entity "player" {
   transform { pos 0 1 0  rot 0 0 0 1  scale 1 1 1 }
+  velocity { linear 0 0 0  angular 0 1.2 0 }
+  rigid_body { gravity_scale 1 linear_damping 0.2 angular_damping 0.1 restitution 0.6 }
+  sphere_collider { radius 0.5 }
   camera { fov 60 near 0.1 far 1000 }
   active_camera
   stats { health 100 mana 50 attack 10 defense 5 speed 3 }
+}
+
+entity "fx" {
+  transform { pos 0 2.6 0 }
+  particle_emitter {
+    emitting 1
+    rate_per_second 24
+    max_particles 96
+    spawn_radius 0.1
+    direction 0 1 0
+    spread 0.35
+    speed_min 1.5
+    speed_max 3
+    lifetime_min 0.5
+    lifetime_max 1.2
+    gravity_scale 0.8
+    linear_damping 1.4
+    start_size 0.14
+    end_size 0.02
+    start_color 1 0.8 0.2 1
+    end_color 1 0.25 0.05 0
+    seed 9
+  }
+  parent "player"
 }
 
 entity "sun" {
@@ -863,22 +1326,29 @@ entity "crate" {
     fn parse_roundtrip() {
         let scene = parse_scene(SAMPLE).unwrap();
         assert_eq!(scene.name, "Test Level");
-        assert_eq!(scene.entities.len(), 3);
+        assert_eq!(scene.entities.len(), 4);
 
         let player = &scene.entities[0];
         assert_eq!(player.name, "player");
         assert!(player.transform.is_some());
+        assert!(player.velocity.is_some());
+        assert!(player.rigid_body.is_some());
+        assert!(player.sphere_collider.is_some());
         assert!(player.camera.is_some());
         assert!(player.active_camera);
         assert!(player.stats.is_some());
 
-        let sun = &scene.entities[1];
+        let fx = &scene.entities[1];
+        assert!(fx.particle_emitter.is_some());
+        assert_eq!(fx.parent_name.as_deref(), Some("player"));
+
+        let sun = &scene.entities[2];
         assert_eq!(sun.name, "sun");
         assert!(sun.light.is_some());
         let l = sun.light.as_ref().unwrap();
         assert!((l.direction.y - (-1.0)).abs() < 0.001);
 
-        let crate_e = &scene.entities[2];
+        let crate_e = &scene.entities[3];
         assert_eq!(crate_e.name, "crate");
         assert_eq!(crate_e.parent_name.as_deref(), Some("player"));
 
@@ -895,12 +1365,21 @@ entity "crate" {
         let mut world = World::new();
         let map = spawn_scene(&mut world, &scene).unwrap();
 
-        assert_eq!(map.len(), 3);
+        assert_eq!(map.len(), 4);
         let player = map["player"];
         assert!(world.has_component::<Transform>(player));
+        assert!(world.has_component::<GlobalTransform>(player));
+        assert!(world.has_component::<Velocity>(player));
+        assert!(world.has_component::<RigidBody>(player));
+        assert!(world.has_component::<SphereCollider>(player));
         assert!(world.has_component::<Camera>(player));
         assert!(world.has_component::<ActiveCamera>(player));
         assert!(world.has_component::<Stats>(player));
+
+        let fx = map["fx"];
+        assert!(world.has_component::<ParticleEmitter>(fx));
+        let fx_parent = world.get::<Parent>(fx).unwrap();
+        assert_eq!(fx_parent.entity, player);
 
         let sun = map["sun"];
         assert!(world.has_component::<DirectionalLight>(sun));

@@ -104,23 +104,20 @@ fn build_demo_runtime(
         return Err("Scene camera setup requires 'camera' to be the active camera.".into());
     }
 
-    if is_playing {
-        world.add_component(
-            model_entity,
-            Velocity::from_angular(Vec3::new(0.4, 1.2, 0.0)),
-        );
+    if !is_playing {
+        world.remove_component::<Velocity>(model_entity);
     }
 
-    let emitter_entity = world.spawn();
-    let emitter_origin = world
-        .get::<Transform>(model_entity)
-        .map(|transform| transform.position + Vec3::new(0.0, 1.6, 0.0))
-        .unwrap_or(Vec3::new(0.0, 1.6, 0.0));
-    world.add_component(emitter_entity, Transform::from_position(emitter_origin));
-    world.add_component(
-        emitter_entity,
-        ParticleEmitter::spark_fountain().with_emitting(is_playing),
-    );
+    let emitter_entities: Vec<Entity> = world
+        .query::<ParticleEmitter>()
+        .map(|(entity, _)| entity)
+        .collect();
+    for emitter_entity in emitter_entities {
+        if let Some(emitter) = world.get_mut::<ParticleEmitter>(emitter_entity) {
+            emitter.emitting = is_playing;
+            emitter.accumulator = 0.0;
+        }
+    }
 
     world.add_component(
         cam_entity,

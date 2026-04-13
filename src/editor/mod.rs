@@ -5,8 +5,8 @@
 pub mod bridge;
 pub mod command;
 pub mod drawlist;
-pub mod protocol;
 mod host;
+pub mod protocol;
 mod session;
 
 use std::collections::{HashMap, HashSet};
@@ -14,27 +14,29 @@ use std::fs;
 use std::path::Path;
 
 use crate::ecs::components::{
-    ActiveCamera, Camera, DirectionalLight, GlobalTransform, Stats, Transform,
+    ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
+    SphereCollider, Stats, Transform, Velocity,
 };
 use crate::ecs::{Entity, World};
 use crate::math::{Quat, Vec3};
 use crate::renderer::Color;
 use crate::scene::{
     load_scene, parse_scene, save_scene, serialize_scene, CameraDef, EntityDef, LightDef,
-    SceneData, SceneError, StatsDef, TransformDef,
+    ParticleEmitterDef, RigidBodyDef, SceneData, SceneError, SphereColliderDef, StatsDef,
+    TransformDef, VelocityDef,
 };
 
 pub use bridge::EditorBridgeServer;
-pub use command::{EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor};
+pub use command::{
+    EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
+};
 pub use drawlist::{generate_draw_list, EditorDrawList};
+pub use host::{EditorCamera, EditorRuntimeHost};
 pub use protocol::{
-    decode_command as decode_editor_command_protocol,
-    decode_event as decode_editor_event_protocol,
-    encode_command as encode_editor_command_protocol,
-    encode_event as encode_editor_event_protocol,
+    decode_command as decode_editor_command_protocol, decode_event as decode_editor_event_protocol,
+    encode_command as encode_editor_command_protocol, encode_event as encode_editor_event_protocol,
     EditorProtocolError,
 };
-pub use host::{EditorCamera, EditorRuntimeHost};
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 
 /// Basic project metadata and folder layout.
@@ -218,6 +220,22 @@ impl SceneDocument {
                     transform: entity
                         .component("Transform")
                         .map(|component| bridge_transform(entity.id, component))
+                        .transpose()?,
+                    velocity: entity
+                        .component("Velocity")
+                        .map(|component| bridge_velocity(entity.id, component))
+                        .transpose()?,
+                    rigid_body: entity
+                        .component("RigidBody")
+                        .map(|component| bridge_rigid_body(entity.id, component))
+                        .transpose()?,
+                    sphere_collider: entity
+                        .component("SphereCollider")
+                        .map(|component| bridge_sphere_collider(entity.id, component))
+                        .transpose()?,
+                    particle_emitter: entity
+                        .component("ParticleEmitter")
+                        .map(|component| bridge_particle_emitter(entity.id, component))
                         .transpose()?,
                     camera: entity
                         .component("Camera")
@@ -532,6 +550,89 @@ fn components_from_scene_entity(
         });
     }
 
+    if let Some(velocity) = &entity.velocity {
+        components.push(InspectorComponent {
+            type_name: "Velocity".into(),
+            fields: vec![
+                vec3_field(
+                    "linear",
+                    [velocity.linear.x, velocity.linear.y, velocity.linear.z],
+                ),
+                vec3_field(
+                    "angular",
+                    [velocity.angular.x, velocity.angular.y, velocity.angular.z],
+                ),
+            ],
+        });
+    }
+
+    if let Some(rigid_body) = &entity.rigid_body {
+        components.push(InspectorComponent {
+            type_name: "RigidBody".into(),
+            fields: vec![
+                number_field("gravity_scale", rigid_body.gravity_scale),
+                number_field("linear_damping", rigid_body.linear_damping),
+                number_field("angular_damping", rigid_body.angular_damping),
+                number_field("restitution", rigid_body.restitution),
+            ],
+        });
+    }
+
+    if let Some(collider) = &entity.sphere_collider {
+        components.push(InspectorComponent {
+            type_name: "SphereCollider".into(),
+            fields: vec![number_field("radius", collider.radius)],
+        });
+    }
+
+    if let Some(emitter) = &entity.particle_emitter {
+        components.push(InspectorComponent {
+            type_name: "ParticleEmitter".into(),
+            fields: vec![
+                number_field("emitting", if emitter.emitting { 1.0 } else { 0.0 }),
+                number_field("rate_per_second", emitter.rate_per_second),
+                number_field("max_particles", emitter.max_particles as f32),
+                number_field("spawn_radius", emitter.spawn_radius),
+                vec3_field(
+                    "direction",
+                    [
+                        emitter.direction.x,
+                        emitter.direction.y,
+                        emitter.direction.z,
+                    ],
+                ),
+                number_field("spread", emitter.spread),
+                number_field("speed_min", emitter.speed_min),
+                number_field("speed_max", emitter.speed_max),
+                number_field("lifetime_min", emitter.lifetime_min),
+                number_field("lifetime_max", emitter.lifetime_max),
+                number_field("gravity_scale", emitter.gravity_scale),
+                number_field("linear_damping", emitter.linear_damping),
+                number_field("start_size", emitter.start_size),
+                number_field("end_size", emitter.end_size),
+                vec3_field(
+                    "start_color",
+                    [
+                        emitter.start_color.r,
+                        emitter.start_color.g,
+                        emitter.start_color.b,
+                    ],
+                ),
+                number_field("start_color_alpha", emitter.start_color.a),
+                vec3_field(
+                    "end_color",
+                    [
+                        emitter.end_color.r,
+                        emitter.end_color.g,
+                        emitter.end_color.b,
+                    ],
+                ),
+                number_field("end_color_alpha", emitter.end_color.a),
+                number_field("seed", emitter.seed as f32),
+            ],
+        });
+    }
+
     if let Some(camera) = &entity.camera {
         components.push(InspectorComponent {
             type_name: "Camera".into(),
@@ -684,6 +785,97 @@ fn bridge_camera(
         fov: required_number_bridge(entity_id, component, "fov_deg")?,
         near: optional_number(component, "near").unwrap_or(0.1),
         far: optional_number(component, "far").unwrap_or(1000.0),
+    })
+}
+
+fn bridge_velocity(
+    _entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<VelocityDef, SceneBridgeError> {
+    Ok(VelocityDef {
+        linear: optional_vec3(component, "linear").unwrap_or(Vec3::ZERO),
+        angular: optional_vec3(component, "angular").unwrap_or(Vec3::ZERO),
+    })
+}
+
+fn bridge_rigid_body(
+    _entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<RigidBodyDef, SceneBridgeError> {
+    let default = RigidBody::default();
+    Ok(RigidBodyDef {
+        gravity_scale: optional_number(component, "gravity_scale").unwrap_or(default.gravity_scale),
+        linear_damping: optional_number(component, "linear_damping")
+            .unwrap_or(default.linear_damping),
+        angular_damping: optional_number(component, "angular_damping")
+            .unwrap_or(default.angular_damping),
+        restitution: optional_number(component, "restitution").unwrap_or(default.restitution),
+    })
+}
+
+fn bridge_sphere_collider(
+    _entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<SphereColliderDef, SceneBridgeError> {
+    Ok(SphereColliderDef {
+        radius: optional_number(component, "radius").unwrap_or(0.5),
+    })
+}
+
+fn bridge_particle_emitter(
+    _entity_id: u64,
+    component: &InspectorComponent,
+) -> Result<ParticleEmitterDef, SceneBridgeError> {
+    let default = ParticleEmitter::spark_fountain();
+    Ok(ParticleEmitterDef {
+        emitting: optional_number(component, "emitting").unwrap_or(if default.emitting {
+            1.0
+        } else {
+            0.0
+        }) > 0.0,
+        rate_per_second: optional_number(component, "rate_per_second")
+            .or_else(|| optional_number(component, "rate"))
+            .unwrap_or(default.rate_per_second),
+        max_particles: optional_number(component, "max_particles")
+            .or_else(|| optional_number(component, "max"))
+            .unwrap_or(default.max_particles as f32)
+            .max(0.0) as u32,
+        spawn_radius: optional_number(component, "spawn_radius").unwrap_or(default.spawn_radius),
+        direction: optional_vec3(component, "direction").unwrap_or(default.direction),
+        spread: optional_number(component, "spread").unwrap_or(default.spread),
+        speed_min: optional_number(component, "speed_min").unwrap_or(default.speed_min),
+        speed_max: optional_number(component, "speed_max").unwrap_or(default.speed_max),
+        lifetime_min: optional_number(component, "lifetime_min").unwrap_or(default.lifetime_min),
+        lifetime_max: optional_number(component, "lifetime_max").unwrap_or(default.lifetime_max),
+        gravity_scale: optional_number(component, "gravity_scale").unwrap_or(default.gravity_scale),
+        linear_damping: optional_number(component, "linear_damping")
+            .unwrap_or(default.linear_damping),
+        start_size: optional_number(component, "start_size").unwrap_or(default.start_size),
+        end_size: optional_number(component, "end_size").unwrap_or(default.end_size),
+        start_color: optional_vec3(component, "start_color")
+            .map(|color| {
+                Color::new(
+                    color.x,
+                    color.y,
+                    color.z,
+                    optional_number(component, "start_color_alpha")
+                        .unwrap_or(default.start_color.a),
+                )
+            })
+            .unwrap_or(default.start_color),
+        end_color: optional_vec3(component, "end_color")
+            .map(|color| {
+                Color::new(
+                    color.x,
+                    color.y,
+                    color.z,
+                    optional_number(component, "end_color_alpha").unwrap_or(default.end_color.a),
+                )
+            })
+            .unwrap_or(default.end_color),
+        seed: optional_number(component, "seed")
+            .unwrap_or(default.seed as f32)
+            .max(0.0) as u32,
     })
 }
 
@@ -1109,6 +1301,102 @@ pub fn apply_scene_document_to_world(
                     );
                     world.add_component(entity, GlobalTransform::identity());
                 }
+                "Velocity" => {
+                    world.add_component(
+                        entity,
+                        Velocity {
+                            linear: optional_vec3(component, "linear").unwrap_or(Vec3::ZERO),
+                            angular: optional_vec3(component, "angular").unwrap_or(Vec3::ZERO),
+                        },
+                    );
+                }
+                "RigidBody" => {
+                    let default = RigidBody::default();
+                    world.add_component(
+                        entity,
+                        RigidBody {
+                            gravity_scale: optional_number(component, "gravity_scale")
+                                .unwrap_or(default.gravity_scale),
+                            linear_damping: optional_number(component, "linear_damping")
+                                .unwrap_or(default.linear_damping),
+                            angular_damping: optional_number(component, "angular_damping")
+                                .unwrap_or(default.angular_damping),
+                            restitution: optional_number(component, "restitution")
+                                .unwrap_or(default.restitution),
+                        },
+                    );
+                }
+                "SphereCollider" => {
+                    world.add_component(
+                        entity,
+                        SphereCollider::new(optional_number(component, "radius").unwrap_or(0.5)),
+                    );
+                }
+                "ParticleEmitter" => {
+                    let default = ParticleEmitter::spark_fountain();
+                    world.add_component(
+                        entity,
+                        ParticleEmitter {
+                            emitting: optional_number(component, "emitting")
+                                .unwrap_or(if default.emitting { 1.0 } else { 0.0 })
+                                > 0.0,
+                            rate_per_second: optional_number(component, "rate_per_second")
+                                .or_else(|| optional_number(component, "rate"))
+                                .unwrap_or(default.rate_per_second),
+                            max_particles: optional_number(component, "max_particles")
+                                .or_else(|| optional_number(component, "max"))
+                                .unwrap_or(default.max_particles as f32)
+                                .max(0.0) as u32,
+                            spawn_radius: optional_number(component, "spawn_radius")
+                                .unwrap_or(default.spawn_radius),
+                            direction: optional_vec3(component, "direction")
+                                .unwrap_or(default.direction),
+                            spread: optional_number(component, "spread").unwrap_or(default.spread),
+                            speed_min: optional_number(component, "speed_min")
+                                .unwrap_or(default.speed_min),
+                            speed_max: optional_number(component, "speed_max")
+                                .unwrap_or(default.speed_max),
+                            lifetime_min: optional_number(component, "lifetime_min")
+                                .unwrap_or(default.lifetime_min),
+                            lifetime_max: optional_number(component, "lifetime_max")
+                                .unwrap_or(default.lifetime_max),
+                            gravity_scale: optional_number(component, "gravity_scale")
+                                .unwrap_or(default.gravity_scale),
+                            linear_damping: optional_number(component, "linear_damping")
+                                .unwrap_or(default.linear_damping),
+                            start_size: optional_number(component, "start_size")
+                                .unwrap_or(default.start_size),
+                            end_size: optional_number(component, "end_size")
+                                .unwrap_or(default.end_size),
+                            start_color: optional_vec3(component, "start_color")
+                                .map(|color| {
+                                    Color::new(
+                                        color.x,
+                                        color.y,
+                                        color.z,
+                                        optional_number(component, "start_color_alpha")
+                                            .unwrap_or(default.start_color.a),
+                                    )
+                                })
+                                .unwrap_or(default.start_color),
+                            end_color: optional_vec3(component, "end_color")
+                                .map(|color| {
+                                    Color::new(
+                                        color.x,
+                                        color.y,
+                                        color.z,
+                                        optional_number(component, "end_color_alpha")
+                                            .unwrap_or(default.end_color.a),
+                                    )
+                                })
+                                .unwrap_or(default.end_color),
+                            accumulator: 0.0,
+                            seed: optional_number(component, "seed")
+                                .unwrap_or(default.seed as f32)
+                                .max(0.0) as u32,
+                        },
+                    );
+                }
                 "Stats" => {
                     let health = required_number(
                         editor_entity.id,
@@ -1472,6 +1760,18 @@ entity "camera" {
                         rotation: Quat::new(0.0, 0.70710677, 0.0, 0.70710677),
                         scale: Vec3::new(1.0, 1.5, 1.0),
                     }),
+                    velocity: Some(VelocityDef {
+                        linear: Vec3::new(0.0, 0.5, 0.0),
+                        angular: Vec3::new(0.0, 1.25, 0.0),
+                    }),
+                    rigid_body: Some(RigidBodyDef {
+                        gravity_scale: 1.0,
+                        linear_damping: 0.2,
+                        angular_damping: 0.1,
+                        restitution: 0.6,
+                    }),
+                    sphere_collider: Some(SphereColliderDef { radius: 0.75 }),
+                    particle_emitter: None,
                     camera: Some(CameraDef {
                         fov: 75.0,
                         near: 0.2,
@@ -1491,6 +1791,10 @@ entity "camera" {
                 EntityDef {
                     name: "sun".into(),
                     transform: None,
+                    velocity: None,
+                    rigid_body: None,
+                    sphere_collider: None,
+                    particle_emitter: None,
                     camera: None,
                     active_camera: false,
                     light: Some(LightDef {
@@ -1508,6 +1812,28 @@ entity "camera" {
                         position: Vec3::new(5.0, 0.0, -3.0),
                         rotation: Quat::IDENTITY,
                         scale: Vec3::ONE,
+                    }),
+                    velocity: None,
+                    rigid_body: None,
+                    sphere_collider: None,
+                    particle_emitter: Some(ParticleEmitterDef {
+                        emitting: true,
+                        rate_per_second: 20.0,
+                        max_particles: 64,
+                        spawn_radius: 0.2,
+                        direction: Vec3::Y,
+                        spread: 0.3,
+                        speed_min: 1.5,
+                        speed_max: 2.5,
+                        lifetime_min: 0.4,
+                        lifetime_max: 0.9,
+                        gravity_scale: 0.7,
+                        linear_damping: 1.1,
+                        start_size: 0.15,
+                        end_size: 0.03,
+                        start_color: Color::new(1.0, 0.8, 0.2, 1.0),
+                        end_color: Color::new(1.0, 0.1, 0.05, 0.0),
+                        seed: 7,
                     }),
                     camera: None,
                     active_camera: false,
@@ -1530,6 +1856,8 @@ entity "camera" {
         let player_transform = player.transform.as_ref().unwrap();
         assert_eq!(player_transform.position, Vec3::new(1.0, 2.0, 3.0));
         assert!((player_transform.rotation.y - 0.70710677).abs() < 1e-5);
+        assert_eq!(player.velocity.as_ref().unwrap().angular.y, 1.25);
+        assert_eq!(player.sphere_collider.as_ref().unwrap().radius, 0.75);
         assert_eq!(player.stats.as_ref().unwrap().attack, 12.0);
 
         let sun = &roundtrip.entities[1];
@@ -1539,6 +1867,14 @@ entity "camera" {
 
         let crate_entity = &roundtrip.entities[2];
         assert_eq!(crate_entity.parent_name.as_deref(), Some("player"));
+        assert_eq!(
+            crate_entity
+                .particle_emitter
+                .as_ref()
+                .unwrap()
+                .max_particles,
+            64
+        );
     }
 
     #[test]
@@ -1751,6 +2087,10 @@ entity "camera" {
                         rotation: Quat::new(0.0, 0.0, 0.0, 1.0),
                         scale: Vec3::ONE,
                     }),
+                    velocity: None,
+                    rigid_body: None,
+                    sphere_collider: None,
+                    particle_emitter: None,
                     camera: Some(CameraDef {
                         fov: 70.0,
                         near: 0.1,
@@ -1767,6 +2107,36 @@ entity "camera" {
                         position: Vec3::new(1.0, 0.0, 0.0),
                         rotation: Quat::new(0.0, 0.38268343, 0.0, 0.9238795),
                         scale: Vec3::new(2.0, 2.0, 2.0),
+                    }),
+                    velocity: Some(VelocityDef {
+                        linear: Vec3::new(0.0, 0.0, 1.0),
+                        angular: Vec3::new(0.0, 1.0, 0.0),
+                    }),
+                    rigid_body: Some(RigidBodyDef {
+                        gravity_scale: 1.0,
+                        linear_damping: 0.15,
+                        angular_damping: 0.05,
+                        restitution: 0.4,
+                    }),
+                    sphere_collider: Some(SphereColliderDef { radius: 0.5 }),
+                    particle_emitter: Some(ParticleEmitterDef {
+                        emitting: true,
+                        rate_per_second: 12.0,
+                        max_particles: 48,
+                        spawn_radius: 0.1,
+                        direction: Vec3::new(0.0, 1.0, 0.0),
+                        spread: 0.2,
+                        speed_min: 1.0,
+                        speed_max: 2.0,
+                        lifetime_min: 0.3,
+                        lifetime_max: 0.8,
+                        gravity_scale: 0.6,
+                        linear_damping: 1.0,
+                        start_size: 0.1,
+                        end_size: 0.02,
+                        start_color: Color::new(0.8, 0.9, 1.0, 1.0),
+                        end_color: Color::new(0.3, 0.4, 1.0, 0.0),
+                        seed: 11,
                     }),
                     camera: None,
                     active_camera: false,
@@ -1802,6 +2172,10 @@ entity "camera" {
         let transform = world.get::<Transform>(child).unwrap();
         assert!((transform.rotation.y - 0.38268343).abs() < 1e-5);
         assert!(world.has_component::<GlobalTransform>(child));
+        assert!(world.has_component::<Velocity>(child));
+        assert!(world.has_component::<RigidBody>(child));
+        assert!(world.has_component::<SphereCollider>(child));
+        assert!(world.has_component::<ParticleEmitter>(child));
         assert!(world.has_component::<DirectionalLight>(child));
         assert!(world.has_component::<Stats>(child));
 
