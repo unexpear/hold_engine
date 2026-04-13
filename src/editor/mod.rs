@@ -44,7 +44,10 @@ pub use protocol::{
     EditorProtocolError,
 };
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
-pub use viewport::{build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportOverlay};
+pub use viewport::{
+    build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportGizmoMode,
+    EditorViewportOverlay,
+};
 
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +537,7 @@ fn components_from_scene_entity(
     let mut components = Vec::new();
 
     if let Some(transform) = &entity.transform {
+        let euler = transform.rotation.to_euler_xyz();
         components.push(InspectorComponent {
             type_name: "Transform".into(),
             fields: vec![
@@ -549,10 +553,10 @@ fn components_from_scene_entity(
                     "scale",
                     [transform.scale.x, transform.scale.y, transform.scale.z],
                 ),
-                number_field("rotation_x", transform.rotation.x),
-                number_field("rotation_y", transform.rotation.y),
-                number_field("rotation_z", transform.rotation.z),
-                number_field("rotation_w", transform.rotation.w),
+                vec3_field(
+                    "rotation_euler_deg",
+                    [euler.x.to_degrees(), euler.y.to_degrees(), euler.z.to_degrees()],
+                ),
             ],
         });
     }

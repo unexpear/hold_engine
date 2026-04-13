@@ -43,6 +43,30 @@ impl Quat {
             * Self::from_axis_angle(Vec3::X, x)
     }
 
+    /// Convert this quaternion into Euler angles in radians.
+    ///
+    /// Returns `(x, y, z)` matching [`Self::from_euler_xyz`].
+    pub fn to_euler_xyz(self) -> Vec3 {
+        let q = self.normalize();
+
+        let sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
+        let cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
+        let x = sinr_cosp.atan2(cosr_cosp);
+
+        let sinp = 2.0 * (q.w * q.y - q.z * q.x);
+        let y = if sinp.abs() >= 1.0 {
+            sinp.signum() * std::f32::consts::FRAC_PI_2
+        } else {
+            sinp.asin()
+        };
+
+        let siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+        let cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+        let z = siny_cosp.atan2(cosy_cosp);
+
+        Vec3::new(x, y, z)
+    }
+
     #[inline]
     pub fn length_sq(&self) -> f32 {
         self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
@@ -179,5 +203,22 @@ impl Mul<Quat> for Quat {
 impl std::fmt::Display for Quat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {}, {}, {})", self.x, self.y, self.z, self.w)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Quat;
+
+    #[test]
+    fn euler_roundtrip_matches_from_euler_xyz() {
+        let source = Quat::from_euler_xyz(0.35, -0.62, 0.48).normalize();
+        let euler = source.to_euler_xyz();
+        let roundtrip = Quat::from_euler_xyz(euler.x, euler.y, euler.z).normalize();
+
+        assert!(
+            source.dot(roundtrip).abs() > 0.9999,
+            "quat roundtrip drifted too far"
+        );
     }
 }

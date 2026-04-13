@@ -15,7 +15,8 @@ use hold::{
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
     EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorNativeUiState,
-    EditorPlayState, EditorProtocolError, EditorViewportGizmoHandle, Engine,
+    EditorPlayState, EditorProtocolError, EditorViewportGizmoHandle, EditorViewportGizmoMode,
+    Engine,
 };
 
 const DEFAULT_SCENE: &str = "examples/demo.hsc";
@@ -62,6 +63,9 @@ struct EditorShellApp {
     backend: BackendKind,
     status: String,
     ui_state: EditorNativeUiState,
+    gizmo_mode: EditorViewportGizmoMode,
+    hovered_entity: Option<u64>,
+    hovered_axis: Option<EditorAxis>,
     viewport_drag: Option<ViewportDragState>,
 }
 
@@ -78,6 +82,9 @@ impl EditorShellApp {
             backend,
             status: String::new(),
             ui_state: EditorNativeUiState::default(),
+            gizmo_mode: EditorViewportGizmoMode::Translate,
+            hovered_entity: None,
+            hovered_axis: None,
             viewport_drag: None,
         };
         app.refresh_status();
@@ -122,8 +129,8 @@ impl EditorShellApp {
         };
 
         self.status = format!(
-            "{}{} | {} | {} | {}{}",
-            scene_name, dirty, backend, play_state, sync_state, cursor_str
+            "{}{} | {} | {} | {} | {}{}",
+            scene_name, dirty, backend, play_state, self.gizmo_mode, sync_state, cursor_str
         );
     }
 
@@ -131,9 +138,26 @@ impl EditorShellApp {
         let ctrl = input.key(vk::CTRL);
         let shift = input.key(vk::SHIFT);
         let ui = build_native_ui(self.server.host(), width, height, &mut self.ui_state);
-        let viewport = build_viewport_overlay(self.server.host(), vp, width, height);
+        let viewport = build_viewport_overlay(
+            self.server.host(),
+            vp,
+            width,
+            height,
+            self.gizmo_mode,
+            self.hovered_entity,
+            self.hovered_axis,
+        );
         let (mx, my) = input.mouse_pos();
         let wheel = input.mouse_wheel();
+        let pointer_over_panel = ui.panel_at(mx, my).is_some();
+
+        if pointer_over_panel {
+            self.hovered_entity = None;
+            self.hovered_axis = None;
+        } else {
+            self.hovered_axis = viewport.pick_gizmo_handle(mx, my).map(|handle| handle.axis);
+            self.hovered_entity = viewport.pick_entity(mx, my);
+        }
 
         if input.mouse_released(MouseButton::Left) {
             self.viewport_drag = None;
@@ -149,6 +173,28 @@ impl EditorShellApp {
                 };
                 self.ui_state.scroll_lines(panel, lines);
             }
+        }
+
+        if input.key_pressed(vk::F1) {
+            self.gizmo_mode = EditorViewportGizmoMode::Translate;
+            self.refresh_status();
+            println!("[editor] gizmo mode -> {}", self.gizmo_mode);
+            println!("[editor] {}", self.status);
+            return;
+        }
+        if input.key_pressed(vk::F2) {
+            self.gizmo_mode = EditorViewportGizmoMode::Rotate;
+            self.refresh_status();
+            println!("[editor] gizmo mode -> {}", self.gizmo_mode);
+            println!("[editor] {}", self.status);
+            return;
+        }
+        if input.key_pressed(vk::F3) {
+            self.gizmo_mode = EditorViewportGizmoMode::Scale;
+            self.refresh_status();
+            println!("[editor] gizmo mode -> {}", self.gizmo_mode);
+            println!("[editor] {}", self.status);
+            return;
         }
 
         if let Some(drag) = &mut self.viewport_drag {
@@ -401,8 +447,15 @@ impl App for EditorShellApp {
             self.server.host().session().scene(),
             self.server.host().cursor().as_ref(),
         );
-        let viewport =
-            build_viewport_overlay(self.server.host(), &vp, renderer.width(), renderer.height());
+        let viewport = build_viewport_overlay(
+            self.server.host(),
+            &vp,
+            renderer.width(),
+            renderer.height(),
+            self.gizmo_mode,
+            self.hovered_entity,
+            self.hovered_axis,
+        );
         draw_list.lines.extend(viewport.debug_lines.iter().copied());
         renderer.render_debug_lines(&draw_list.lines, &vp);
         renderer.render_screen_quads(&viewport.quads);
@@ -449,9 +502,9 @@ fn main() {
 
     println!("[editor] {}", app.status);
     println!(
-        "[editor] Tab/S+Tab=entity  [/]=component  ;/'=field  1/2/3=axis  -/==delta  F7=reload  F8=play  F9=pause  Ctrl+S/P/R=save/patch/rebuild  Esc=quit"
+        "[editor] Tab/S+Tab=entity  [/]=component  ;/'=field  1/2/3=axis  -/==delta  F1/F2/F3=move/rotate/scale  F7=reload  F8=play  F9=pause  Ctrl+S/P/R=save/patch/rebuild  Esc=quit"
     );
-    println!("[editor] Left-click viewport=select  drag axis handle=move Transform.position");
+    println!("[editor] Left-click viewport=select  drag gizmo handle=edit selected Transform");
 
     match args.backend {
         BackendKind::Software => {
