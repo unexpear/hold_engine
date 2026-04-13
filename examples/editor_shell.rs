@@ -8,10 +8,9 @@
 use std::path::PathBuf;
 
 use hold::{
-    decode_editor_event_protocol,
+    build_native_ui, decode_editor_event_protocol, encode_editor_command_protocol,
     engine::App,
-    encode_editor_command_protocol,
-    input::{vk, InputState},
+    input::{vk, InputState, MouseButton},
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
     EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorPlayState,
@@ -86,7 +85,11 @@ impl EditorShellApp {
             EditorPlayState::Playing => "PLAY",
             EditorPlayState::Paused => "PAUSED",
         };
-        let dirty = if self.server.host().is_dirty() { "*" } else { "" };
+        let dirty = if self.server.host().is_dirty() {
+            "*"
+        } else {
+            ""
+        };
         let sync_state = if self.server.host().world_requires_rebuild() {
             "REBUILD"
         } else {
@@ -113,9 +116,18 @@ impl EditorShellApp {
         );
     }
 
-    fn process_input(&mut self, input: &InputState) {
+    fn process_input(&mut self, input: &InputState, width: u32, height: u32) {
         let ctrl = input.key(vk::CTRL);
         let shift = input.key(vk::SHIFT);
+        let ui = build_native_ui(self.server.host(), width, height);
+
+        if input.mouse_pressed(MouseButton::Left) {
+            let (mx, my) = input.mouse_pos();
+            if let Some(commands) = ui.commands_at(mx, my) {
+                self.dispatch_many(commands);
+                return;
+            }
+        }
 
         if input.key_pressed(vk::ESCAPE) {
             std::process::exit(0);
@@ -201,6 +213,23 @@ impl EditorShellApp {
         }
     }
 
+    fn dispatch_many(&mut self, commands: Vec<EditorCommand>) {
+        let mut all_events = Vec::new();
+        for command in commands {
+            match self.dispatch_protocol(command) {
+                Ok(events) => all_events.extend(events),
+                Err(err) => {
+                    self.print_error(&err);
+                    break;
+                }
+            }
+        }
+
+        if !all_events.is_empty() {
+            self.handle_events(&all_events);
+        }
+    }
+
     fn dispatch(&mut self, command: EditorCommand) {
         match self.dispatch_protocol(command) {
             Ok(events) => self.handle_events(&events),
@@ -277,7 +306,7 @@ impl App for EditorShellApp {
         dt: f32,
     ) {
         self.server.host_mut().update_editor_camera(input, dt);
-        self.process_input(input);
+        self.process_input(input, renderer.width(), renderer.height());
 
         let height = renderer.height().max(1) as f32;
         let aspect = renderer.width() as f32 / height;
@@ -292,6 +321,9 @@ impl App for EditorShellApp {
             self.server.host().cursor().as_ref(),
         );
         renderer.render_debug_lines(&draw_list.lines, &vp);
+
+        let ui = build_native_ui(self.server.host(), renderer.width(), renderer.height());
+        renderer.render_screen_quads(&ui.quads);
     }
 
     fn window_title(&self) -> Option<String> {
@@ -317,7 +349,11 @@ fn main() {
         args.backend
     );
 
-    let title = format!("Hold Editor - {} | {:?}", args.scene.display(), args.backend);
+    let title = format!(
+        "Hold Editor - {} | {:?}",
+        args.scene.display(),
+        args.backend
+    );
     let engine = Engine::new(&title, 1280, 720);
     let app = EditorShellApp::new(server, args.backend);
 
@@ -328,12 +364,20 @@ fn main() {
 
     match args.backend {
         BackendKind::Software => {
-            let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
+            let (hwnd, w, h) = (
+                engine.window.hwnd,
+                engine.window.width(),
+                engine.window.height(),
+            );
             let renderer = SoftwareRenderer::new(hwnd, w, h);
             engine.run_app(renderer, app);
         }
         BackendKind::OpenGL => {
-            let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
+            let (hwnd, w, h) = (
+                engine.window.hwnd,
+                engine.window.width(),
+                engine.window.height(),
+            );
             let renderer = OpenGLRenderer::new(hwnd, w, h);
             engine.run_app(renderer, app);
         }

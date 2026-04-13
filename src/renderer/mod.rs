@@ -87,6 +87,14 @@ pub trait Renderer {
     fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
         let _ = (lines, vp);
     }
+
+    /// Draw a batch of screen-space solid rectangles.
+    ///
+    /// Coordinates use a top-left origin in pixel space. This is intended for
+    /// native editor overlays such as hierarchy and inspector panels.
+    fn render_screen_quads(&mut self, quads: &[ScreenQuad]) {
+        let _ = quads;
+    }
 }
 
 // ── Debug draw primitive ──────────────────────────────────────────────────────
@@ -106,6 +114,25 @@ impl DebugLine {
     #[inline]
     pub fn new(start: Vec3, end: Vec3, color: Color) -> Self {
         Self { start, end, color }
+    }
+}
+
+/// A single screen-space filled rectangle.
+///
+/// Coordinates are expressed in pixels using a top-left origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenQuad {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: Color,
+}
+
+impl ScreenQuad {
+    #[inline]
+    pub fn new(x: f32, y: f32, w: f32, h: f32, color: Color) -> Self {
+        Self { x, y, w, h, color }
     }
 }
 

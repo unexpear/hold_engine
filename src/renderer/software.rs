@@ -1,7 +1,7 @@
 //! CPU software renderer with a barycentric triangle rasterizer.
 //! Blits each frame to the window via Win32 StretchDIBits -- no GPU required.
 
-use super::{Color, Renderer};
+use super::{Color, Renderer, ScreenQuad};
 use crate::math::{Mat4, Vec3, Vec4};
 use crate::platform::ffi::*;
 
@@ -368,6 +368,18 @@ impl Renderer for SoftwareRenderer {
     fn render_debug_lines(&mut self, lines: &[super::DebugLine], vp: &Mat4) {
         for line in lines {
             self.draw_line_3d(line.start, line.end, line.color, vp);
+        }
+    }
+
+    fn render_screen_quads(&mut self, quads: &[ScreenQuad]) {
+        for quad in quads {
+            self.fill_rect(
+                quad.x.round() as i32,
+                quad.y.round() as i32,
+                quad.w.round().max(0.0) as i32,
+                quad.h.round().max(0.0) as i32,
+                quad.color,
+            );
         }
     }
 

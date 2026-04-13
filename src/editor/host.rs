@@ -238,13 +238,19 @@ impl EditorRuntimeHost {
         let idx = self.cursor_entity_idx?;
         let scene = self.session.scene();
         let entity = scene.entities.get(idx)?;
-        let component = entity.components.get(self.cursor_component_idx)?;
-        let field = component.fields.get(self.cursor_field_idx)?;
+        let component = entity.components.get(self.cursor_component_idx);
+        let field = component.and_then(|component| component.fields.get(self.cursor_field_idx));
         Some(EditorInspectorCursor {
             entity_id: entity.id,
-            component_name: component.type_name.clone(),
-            field_name: field.name.clone(),
-            axis: self.cursor_axis,
+            component_name: component
+                .map(|component| component.type_name.clone())
+                .unwrap_or_default(),
+            field_name: field.map(|field| field.name.clone()).unwrap_or_default(),
+            axis: if field.is_some() {
+                self.cursor_axis
+            } else {
+                None
+            },
         })
     }
 
@@ -271,8 +277,9 @@ impl EditorRuntimeHost {
     }
 
     pub fn selected_runtime_entity(&self) -> Result<Entity, EditorSessionError> {
-        let editor_entity_id =
-            self.selected_entity_id().ok_or(EditorSessionError::NoSelection)?;
+        let editor_entity_id = self
+            .selected_entity_id()
+            .ok_or(EditorSessionError::NoSelection)?;
         self.session.applied_entity(editor_entity_id)
     }
 
@@ -388,10 +395,20 @@ impl EditorRuntimeHost {
         match command {
             EditorCommand::SelectNextEntity => self.cmd_cycle_entity(1),
             EditorCommand::SelectPrevEntity => self.cmd_cycle_entity(-1),
+            EditorCommand::SelectEntity { entity_id } => self.cmd_select_entity(entity_id),
             EditorCommand::SelectNextComponent => self.cmd_cycle_component(1),
             EditorCommand::SelectPrevComponent => self.cmd_cycle_component(-1),
+            EditorCommand::SelectComponent {
+                entity_id,
+                component_name,
+            } => self.cmd_select_component(entity_id, &component_name),
             EditorCommand::SelectNextField => self.cmd_cycle_field(1),
             EditorCommand::SelectPrevField => self.cmd_cycle_field(-1),
+            EditorCommand::SelectField {
+                entity_id,
+                component_name,
+                field_name,
+            } => self.cmd_select_field(entity_id, &component_name, &field_name),
             EditorCommand::SetAxis(axis) => self.cmd_set_axis(axis),
             EditorCommand::ApplyDelta(delta) => self.cmd_apply_delta(delta),
             EditorCommand::EnterPlayMode => self.cmd_enter_play_mode(),
@@ -412,7 +429,9 @@ impl EditorRuntimeHost {
         message: &str,
     ) -> Result<Vec<String>, EditorProtocolError> {
         let command = decode_command(message)?;
-        let events = self.execute(command).map_err(EditorProtocolError::Command)?;
+        let events = self
+            .execute(command)
+            .map_err(EditorProtocolError::Command)?;
         Ok(events.iter().map(encode_event).collect())
     }
 
@@ -425,25 +444,80 @@ impl EditorRuntimeHost {
             self.cursor_entity_idx = None;
             return;
         }
-        self.cursor_entity_idx = Some(0);
-        self.cursor_component_idx = 0;
-        self.cursor_field_idx = 0;
-        self.cursor_axis = None;
-
-        // Sync session selection.
-        let id = self.session.scene().entities[0].id;
-        let _ = self.session.select_entity(id);
+        self.apply_cursor_selection(0, 0, 0);
     }
 
     /// Apply a selection (entity index already validated) and sync session.
     fn apply_cursor_entity(&mut self, idx: usize) {
-        self.cursor_entity_idx = Some(idx);
-        self.cursor_component_idx = 0;
-        self.cursor_field_idx = 0;
-        self.cursor_axis = None;
+        self.apply_cursor_selection(idx, 0, 0);
+    }
 
-        let id = self.session.scene().entities[idx].id;
+    fn apply_cursor_selection(
+        &mut self,
+        entity_idx: usize,
+        component_idx: usize,
+        field_idx: usize,
+    ) {
+        let entity = &self.session.scene().entities[entity_idx];
+        let component_count = entity.components.len();
+        let next_component_idx = if component_count == 0 {
+            0
+        } else {
+            component_idx.min(component_count - 1)
+        };
+        let next_field_idx = entity
+            .components
+            .get(next_component_idx)
+            .map(|component| {
+                if component.fields.is_empty() {
+                    0
+                } else {
+                    field_idx.min(component.fields.len() - 1)
+                }
+            })
+            .unwrap_or(0);
+        let id = entity.id;
+
+        self.cursor_entity_idx = Some(entity_idx);
+        self.cursor_component_idx = next_component_idx;
+        self.cursor_field_idx = next_field_idx;
+        self.cursor_axis = None;
         let _ = self.session.select_entity(id);
+    }
+
+    fn find_entity_index(&self, entity_id: u64) -> Option<usize> {
+        self.session
+            .scene()
+            .entities
+            .iter()
+            .position(|entity| entity.id == entity_id)
+    }
+
+    fn find_component_index(&self, entity_idx: usize, component_name: &str) -> Option<usize> {
+        self.session
+            .scene()
+            .entities
+            .get(entity_idx)?
+            .components
+            .iter()
+            .position(|component| component.type_name == component_name)
+    }
+
+    fn find_field_index(
+        &self,
+        entity_idx: usize,
+        component_idx: usize,
+        field_name: &str,
+    ) -> Option<usize> {
+        self.session
+            .scene()
+            .entities
+            .get(entity_idx)?
+            .components
+            .get(component_idx)?
+            .fields
+            .iter()
+            .position(|field| field.name == field_name)
     }
 
     /// Current field value, resolved from cursor indices.
@@ -452,9 +526,7 @@ impl EditorRuntimeHost {
         let scene = self.session.scene();
         let entity = scene.entities.get(idx)?;
         let comp = entity.components.get(self.cursor_component_idx)?;
-        comp.fields
-            .get(self.cursor_field_idx)
-            .map(|f| &f.value)
+        comp.fields.get(self.cursor_field_idx).map(|f| &f.value)
     }
 
     /// Current (component_name, field_name) pair.
@@ -485,7 +557,6 @@ impl EditorRuntimeHost {
         let entity_idx = target_entity_id
             .and_then(|id| entities.iter().position(|e| e.id == id))
             .unwrap_or(0);
-        self.cursor_entity_idx = Some(entity_idx);
 
         // Find component by name; clamp to 0 if not found.
         let entity = &entities[entity_idx];
@@ -494,7 +565,6 @@ impl EditorRuntimeHost {
             .iter()
             .position(|c| c.type_name == target_component)
             .unwrap_or(0);
-        self.cursor_component_idx = comp_idx;
 
         // Find field by name; clamp to 0 if not found.
         let field_idx = entity
@@ -502,12 +572,7 @@ impl EditorRuntimeHost {
             .get(comp_idx)
             .and_then(|c| c.fields.iter().position(|f| f.name == target_field))
             .unwrap_or(0);
-        self.cursor_field_idx = field_idx;
-        self.cursor_axis = None;
-
-        // Sync session.
-        let id = entities[entity_idx].id;
-        let _ = self.session.select_entity(id);
+        self.apply_cursor_selection(entity_idx, comp_idx, field_idx);
     }
 
     /// Auto-attempt `patch_world`; translate the result into events.
@@ -537,32 +602,63 @@ impl EditorRuntimeHost {
         let next = ((current as i32 + dir).rem_euclid(count as i32)) as usize;
         self.apply_cursor_entity(next);
 
-        Ok(vec![EditorEvent::SelectionChanged(
-            self.cursor().unwrap(),
-        )])
+        Ok(vec![EditorEvent::SelectionChanged(self.cursor().unwrap())])
+    }
+
+    fn cmd_select_entity(
+        &mut self,
+        entity_id: u64,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        self.session
+            .entity(entity_id)
+            .map_err(EditorCommandError::Session)?;
+        let entity_idx = self
+            .find_entity_index(entity_id)
+            .ok_or(EditorCommandError::NoSelection)?;
+        self.apply_cursor_selection(entity_idx, 0, 0);
+        Ok(vec![EditorEvent::SelectionChanged(self.cursor().unwrap())])
     }
 
     fn cmd_cycle_component(&mut self, dir: i32) -> Result<Vec<EditorEvent>, EditorCommandError> {
-        let idx = self.cursor_entity_idx.ok_or(EditorCommandError::NoSelection)?;
+        let idx = self
+            .cursor_entity_idx
+            .ok_or(EditorCommandError::NoSelection)?;
         let entity = &self.session.scene().entities[idx];
         let count = entity.components.len();
         if count == 0 {
             return Ok(vec![]);
         }
 
-        let next =
-            ((self.cursor_component_idx as i32 + dir).rem_euclid(count as i32)) as usize;
+        let next = ((self.cursor_component_idx as i32 + dir).rem_euclid(count as i32)) as usize;
         self.cursor_component_idx = next;
         self.cursor_field_idx = 0;
         self.cursor_axis = None;
 
-        Ok(vec![EditorEvent::SelectionChanged(
-            self.cursor().unwrap(),
-        )])
+        Ok(vec![EditorEvent::SelectionChanged(self.cursor().unwrap())])
+    }
+
+    fn cmd_select_component(
+        &mut self,
+        entity_id: u64,
+        component_name: &str,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        self.session
+            .entity(entity_id)
+            .map_err(EditorCommandError::Session)?;
+        let entity_idx = self
+            .find_entity_index(entity_id)
+            .ok_or(EditorCommandError::NoSelection)?;
+        let component_idx = self
+            .find_component_index(entity_idx, component_name)
+            .ok_or(EditorCommandError::NoField)?;
+        self.apply_cursor_selection(entity_idx, component_idx, 0);
+        Ok(vec![EditorEvent::SelectionChanged(self.cursor().unwrap())])
     }
 
     fn cmd_cycle_field(&mut self, dir: i32) -> Result<Vec<EditorEvent>, EditorCommandError> {
-        let idx = self.cursor_entity_idx.ok_or(EditorCommandError::NoSelection)?;
+        let idx = self
+            .cursor_entity_idx
+            .ok_or(EditorCommandError::NoSelection)?;
         let entity = &self.session.scene().entities[idx];
         let comp = entity
             .components
@@ -577,9 +673,29 @@ impl EditorRuntimeHost {
         self.cursor_field_idx = next;
         self.cursor_axis = None;
 
-        Ok(vec![EditorEvent::SelectionChanged(
-            self.cursor().unwrap(),
-        )])
+        Ok(vec![EditorEvent::SelectionChanged(self.cursor().unwrap())])
+    }
+
+    fn cmd_select_field(
+        &mut self,
+        entity_id: u64,
+        component_name: &str,
+        field_name: &str,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        self.session
+            .entity(entity_id)
+            .map_err(EditorCommandError::Session)?;
+        let entity_idx = self
+            .find_entity_index(entity_id)
+            .ok_or(EditorCommandError::NoSelection)?;
+        let component_idx = self
+            .find_component_index(entity_idx, component_name)
+            .ok_or(EditorCommandError::NoField)?;
+        let field_idx = self
+            .find_field_index(entity_idx, component_idx, field_name)
+            .ok_or(EditorCommandError::NoField)?;
+        self.apply_cursor_selection(entity_idx, component_idx, field_idx);
+        Ok(vec![EditorEvent::SelectionChanged(self.cursor().unwrap())])
     }
 
     fn cmd_set_axis(&mut self, axis: EditorAxis) -> Result<Vec<EditorEvent>, EditorCommandError> {
@@ -681,7 +797,9 @@ impl EditorRuntimeHost {
                 state: self.play_state(),
             });
         }
-        self.session.pause_play_mode().map_err(EditorCommandError::Session)?;
+        self.session
+            .pause_play_mode()
+            .map_err(EditorCommandError::Session)?;
         Ok(vec![EditorEvent::PlayModeChanged(EditorPlayState::Paused)])
     }
 
@@ -692,7 +810,9 @@ impl EditorRuntimeHost {
                 state: self.play_state(),
             });
         }
-        self.session.resume_play_mode().map_err(EditorCommandError::Session)?;
+        self.session
+            .resume_play_mode()
+            .map_err(EditorCommandError::Session)?;
         Ok(vec![EditorEvent::PlayModeChanged(EditorPlayState::Playing)])
     }
 
@@ -738,7 +858,9 @@ impl EditorRuntimeHost {
         if self.session.source_path().is_none() {
             return Err(EditorCommandError::MissingSourcePath);
         }
-        self.session.save_source_hsc().map_err(EditorCommandError::Session)?;
+        self.session
+            .save_source_hsc()
+            .map_err(EditorCommandError::Session)?;
         self.persistent_dirty = false;
         Ok(vec![EditorEvent::Saved])
     }
@@ -761,7 +883,8 @@ impl EditorRuntimeHost {
             .map(|c| (Some(c.entity_id), c.component_name, c.field_name))
             .unwrap_or((None, String::new(), String::new()));
 
-        self.session = EditorSceneSession::open_hsc(&source_path).map_err(EditorCommandError::Session)?;
+        self.session =
+            EditorSceneSession::open_hsc(&source_path).map_err(EditorCommandError::Session)?;
         self.session
             .rebuild_world(&mut self.world)
             .map_err(EditorCommandError::Session)?;
@@ -806,11 +929,19 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────
 
     fn nanos() -> u128 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 
     fn tmp_dir(suffix: &str) -> String {
-        format!("{}/hold_host_m2_{}_{}", std::env::temp_dir().display(), suffix, nanos())
+        format!(
+            "{}/hold_host_m2_{}_{}",
+            std::env::temp_dir().display(),
+            suffix,
+            nanos()
+        )
     }
 
     fn write_two_entity_scene(suffix: &str) -> String {
@@ -912,7 +1043,65 @@ entity "cam" {
         // Manually advance the field.
         host.cursor_field_idx = 2;
         host.execute(EditorCommand::SelectNextComponent).unwrap();
-        assert_eq!(host.cursor_field_idx, 0, "component change must reset field to 0");
+        assert_eq!(
+            host.cursor_field_idx, 0,
+            "component change must reset field to 0"
+        );
+    }
+
+    #[test]
+    fn select_component_command_supports_fieldless_components() {
+        let path = write_two_entity_scene("fieldless_component");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let camera_id = host
+            .session()
+            .scene()
+            .entities
+            .iter()
+            .find(|entity| entity.name == "camera")
+            .unwrap()
+            .id;
+
+        let events = host
+            .execute(EditorCommand::SelectComponent {
+                entity_id: camera_id,
+                component_name: "ActiveCamera".into(),
+            })
+            .unwrap();
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::SelectionChanged(_))));
+        let cursor = host.cursor().unwrap();
+        assert_eq!(cursor.entity_id, camera_id);
+        assert_eq!(cursor.component_name, "ActiveCamera");
+        assert!(cursor.field_name.is_empty());
+    }
+
+    #[test]
+    fn select_field_command_targets_named_field() {
+        let path = write_two_entity_scene("select_field");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let player_id = host
+            .session()
+            .scene()
+            .entities
+            .iter()
+            .find(|entity| entity.name == "player")
+            .unwrap()
+            .id;
+
+        host.execute(EditorCommand::SelectField {
+            entity_id: player_id,
+            component_name: "Stats".into(),
+            field_name: "health".into(),
+        })
+        .unwrap();
+
+        let cursor = host.cursor().unwrap();
+        assert_eq!(cursor.entity_id, player_id);
+        assert_eq!(cursor.component_name, "Stats");
+        assert_eq!(cursor.field_name, "health");
     }
 
     // ── Scalar edits ──────────────────────────────────────────────────────
@@ -935,7 +1124,13 @@ entity "cam" {
             .unwrap()
             .id;
         host.select_entity(cam_id).unwrap();
-        let cam_idx = host.session().scene().entities.iter().position(|e| e.id == cam_id).unwrap();
+        let cam_idx = host
+            .session()
+            .scene()
+            .entities
+            .iter()
+            .position(|e| e.id == cam_id)
+            .unwrap();
         host.cursor_entity_idx = Some(cam_idx);
 
         // Find Camera component.
@@ -958,7 +1153,9 @@ entity "cam" {
 
         // FieldEdited must be present.
         assert!(
-            events.iter().any(|e| matches!(e, EditorEvent::FieldEdited { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, EditorEvent::FieldEdited { .. })),
             "ApplyDelta must emit FieldEdited"
         );
 
@@ -983,7 +1180,9 @@ entity "cam" {
         host.cursor_axis = Some(EditorAxis::Y);
 
         let events = host.execute(EditorCommand::ApplyDelta(3.0)).unwrap();
-        assert!(events.iter().any(|e| matches!(e, EditorEvent::FieldEdited { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EditorEvent::FieldEdited { .. })));
 
         // Scene doc position.y should be 5 + 3 = 8.
         let cam_id = host.session().scene().entities[0].id;
@@ -993,7 +1192,11 @@ entity "cam" {
             .get_value(cam_id, "Transform", "position")
             .unwrap();
         if let InspectorValue::Vec3(arr) = pos {
-            assert!((arr[1] - 8.0).abs() < 0.01, "Y should be 8.0, got {}", arr[1]);
+            assert!(
+                (arr[1] - 8.0).abs() < 0.01,
+                "Y should be 8.0, got {}",
+                arr[1]
+            );
         } else {
             panic!("expected Vec3");
         }
@@ -1011,10 +1214,7 @@ entity "cam" {
         let path = write_single_entity_scene("text_field");
         let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
 
-        host.session
-            .scene_mut()
-            .entities[0]
-            .components[0]
+        host.session.scene_mut().entities[0].components[0]
             .fields
             .push(crate::editor::InspectorField {
                 name: "label".into(),
@@ -1022,10 +1222,7 @@ entity "cam" {
             });
         host.cursor_entity_idx = Some(0);
         host.cursor_component_idx = 0;
-        host.cursor_field_idx = host.session.scene().entities[0].components[0]
-            .fields
-            .len()
-            - 1;
+        host.cursor_field_idx = host.session.scene().entities[0].components[0].fields.len() - 1;
 
         let err = host.execute(EditorCommand::ApplyDelta(1.0)).unwrap_err();
         match err {
@@ -1043,22 +1240,30 @@ entity "cam" {
 
         // Enter play.
         let evs = host.execute(EditorCommand::EnterPlayMode).unwrap();
-        assert!(evs.iter().any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Playing))));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Playing))));
         assert_eq!(host.play_state(), EditorPlayState::Playing);
 
         // Pause.
         let evs = host.execute(EditorCommand::PausePlayMode).unwrap();
-        assert!(evs.iter().any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Paused))));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Paused))));
         assert_eq!(host.play_state(), EditorPlayState::Paused);
 
         // Resume.
         let evs = host.execute(EditorCommand::ResumePlayMode).unwrap();
-        assert!(evs.iter().any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Playing))));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Playing))));
         assert_eq!(host.play_state(), EditorPlayState::Playing);
 
         // Stop.
         let evs = host.execute(EditorCommand::StopPlayMode).unwrap();
-        assert!(evs.iter().any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Editing))));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, EditorEvent::PlayModeChanged(EditorPlayState::Editing))));
         assert_eq!(host.play_state(), EditorPlayState::Editing);
     }
 
@@ -1069,8 +1274,10 @@ entity "cam" {
 
         let cam_id = host.session().scene().entities[0].id;
         let orig_fov = {
-            if let Some(InspectorValue::Number(n)) =
-                host.session().scene().get_value(cam_id, "Camera", "fov_deg")
+            if let Some(InspectorValue::Number(n)) = host
+                .session()
+                .scene()
+                .get_value(cam_id, "Camera", "fov_deg")
             {
                 *n
             } else {
@@ -1110,7 +1317,8 @@ entity "cam" {
         assert_eq!(
             restored_fov,
             Some(InspectorValue::Number(orig_fov)),
-            "fov_deg must revert to {} after stop", orig_fov
+            "fov_deg must revert to {} after stop",
+            orig_fov
         );
     }
 
@@ -1122,7 +1330,7 @@ entity "cam" {
         // Dirty the scene in Editing.
         host.cursor_entity_idx = Some(0);
         host.cursor_component_idx = 0; // Transform
-        host.cursor_field_idx = 0;     // position
+        host.cursor_field_idx = 0; // position
         host.cursor_axis = Some(EditorAxis::X);
         host.execute(EditorCommand::ApplyDelta(1.0)).unwrap();
         assert!(host.is_dirty(), "should be dirty after edit");
@@ -1243,8 +1451,12 @@ entity "cam" {
         assert!(host.is_dirty());
 
         let events = host.execute(EditorCommand::ReloadSource).unwrap();
-        assert!(events.iter().any(|event| matches!(event, EditorEvent::Reloaded)));
-        assert!(events.iter().any(|event| matches!(event, EditorEvent::WorldRebuilt)));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::Reloaded)));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::WorldRebuilt)));
         assert!(!host.is_dirty());
         assert!(!host.world_requires_rebuild());
         assert_eq!(
@@ -1264,10 +1476,9 @@ entity "cam" {
         host.world_mut().despawn(runtime_entity);
         let events = host.execute(EditorCommand::ForcePatch).unwrap();
 
-        assert!(events.iter().any(|event| matches!(
-            event,
-            EditorEvent::PatchRequiresRebuild { .. }
-        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::PatchRequiresRebuild { .. })));
         assert!(host.world_requires_rebuild());
     }
 
@@ -1309,7 +1520,8 @@ entity "cam" {
         let camera_id = host.select_first_with_component("Camera").unwrap();
         let runtime_camera = host.applied_entity(camera_id).unwrap();
 
-        host.set_selected_value("Camera", "fov_deg", InspectorValue::Number(75.0)).unwrap();
+        host.set_selected_value("Camera", "fov_deg", InspectorValue::Number(75.0))
+            .unwrap();
         host.set_selected_value(
             "Transform",
             "position",
@@ -1333,14 +1545,17 @@ entity "cam" {
 
         host.enter_play_mode().unwrap();
         assert_eq!(host.play_state(), EditorPlayState::Playing);
-        host.set_selected_value("Camera", "fov_deg", InspectorValue::Number(95.0)).unwrap();
+        host.set_selected_value("Camera", "fov_deg", InspectorValue::Number(95.0))
+            .unwrap();
         host.pause_play_mode().unwrap();
         assert_eq!(host.play_state(), EditorPlayState::Paused);
 
         host.stop_play_mode().unwrap();
         assert_eq!(host.play_state(), EditorPlayState::Editing);
         assert_eq!(
-            host.session().scene().get_value(camera_id, "Camera", "fov_deg"),
+            host.session()
+                .scene()
+                .get_value(camera_id, "Camera", "fov_deg"),
             Some(&InspectorValue::Number(60.0))
         );
     }

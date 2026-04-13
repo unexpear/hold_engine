@@ -44,10 +44,29 @@ pub fn encode_command(command: &EditorCommand) -> String {
     match command {
         EditorCommand::SelectNextEntity => "cmd|SelectNextEntity".into(),
         EditorCommand::SelectPrevEntity => "cmd|SelectPrevEntity".into(),
+        EditorCommand::SelectEntity { entity_id } => format!("cmd|SelectEntity|{entity_id}"),
         EditorCommand::SelectNextComponent => "cmd|SelectNextComponent".into(),
         EditorCommand::SelectPrevComponent => "cmd|SelectPrevComponent".into(),
+        EditorCommand::SelectComponent {
+            entity_id,
+            component_name,
+        } => format!(
+            "cmd|SelectComponent|{}|{}",
+            entity_id,
+            escape_token(component_name)
+        ),
         EditorCommand::SelectNextField => "cmd|SelectNextField".into(),
         EditorCommand::SelectPrevField => "cmd|SelectPrevField".into(),
+        EditorCommand::SelectField {
+            entity_id,
+            component_name,
+            field_name,
+        } => format!(
+            "cmd|SelectField|{}|{}|{}",
+            entity_id,
+            escape_token(component_name),
+            escape_token(field_name)
+        ),
         EditorCommand::SetAxis(axis) => format!("cmd|SetAxis|{}", encode_axis(*axis)),
         EditorCommand::ApplyDelta(delta) => format!("cmd|ApplyDelta|{delta}"),
         EditorCommand::EnterPlayMode => "cmd|EnterPlayMode".into(),
@@ -74,12 +93,45 @@ pub fn decode_command(message: &str) -> Result<EditorCommand, EditorProtocolErro
         .ok_or_else(|| invalid_message("missing command kind"))?;
 
     match kind.as_str() {
-        "SelectNextEntity" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextEntity),
-        "SelectPrevEntity" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevEntity),
-        "SelectNextComponent" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextComponent),
-        "SelectPrevComponent" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevComponent),
-        "SelectNextField" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextField),
-        "SelectPrevField" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevField),
+        "SelectNextEntity" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextEntity)
+        }
+        "SelectPrevEntity" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevEntity)
+        }
+        "SelectEntity" => {
+            expect_len(tokens.as_slice(), 3)?;
+            Ok(EditorCommand::SelectEntity {
+                entity_id: parse_u64(&tokens[2])?,
+            })
+        }
+        "SelectNextComponent" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextComponent)
+        }
+        "SelectPrevComponent" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevComponent)
+        }
+        "SelectComponent" => {
+            expect_len(tokens.as_slice(), 4)?;
+            Ok(EditorCommand::SelectComponent {
+                entity_id: parse_u64(&tokens[2])?,
+                component_name: tokens[3].clone(),
+            })
+        }
+        "SelectNextField" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextField)
+        }
+        "SelectPrevField" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevField)
+        }
+        "SelectField" => {
+            expect_len(tokens.as_slice(), 5)?;
+            Ok(EditorCommand::SelectField {
+                entity_id: parse_u64(&tokens[2])?,
+                component_name: tokens[3].clone(),
+                field_name: tokens[4].clone(),
+            })
+        }
         "SetAxis" => {
             expect_len(tokens.as_slice(), 3)?;
             Ok(EditorCommand::SetAxis(parse_axis(&tokens[2])?))
@@ -107,10 +159,7 @@ pub fn encode_event(event: &EditorEvent) -> String {
             cursor.entity_id,
             escape_token(&cursor.component_name),
             escape_token(&cursor.field_name),
-            cursor
-                .axis
-                .map(encode_axis)
-                .unwrap_or_default()
+            cursor.axis.map(encode_axis).unwrap_or_default()
         ),
         EditorEvent::FieldEdited { cursor, new_value } => {
             let mut tokens = vec![
@@ -384,6 +433,16 @@ mod tests {
     fn command_roundtrip_handles_paramless_and_param_commands() {
         let commands = vec![
             EditorCommand::SelectNextEntity,
+            EditorCommand::SelectEntity { entity_id: 7 },
+            EditorCommand::SelectComponent {
+                entity_id: 9,
+                component_name: "Directional|Light".into(),
+            },
+            EditorCommand::SelectField {
+                entity_id: 11,
+                component_name: "Transform".into(),
+                field_name: "position".into(),
+            },
             EditorCommand::SetAxis(EditorAxis::Z),
             EditorCommand::ApplyDelta(-1.25),
             EditorCommand::ReloadSource,
@@ -393,8 +452,44 @@ mod tests {
         for command in commands {
             let encoded = encode_command(&command);
             let decoded = decode_command(&encoded).unwrap();
-            assert_eq!(std::mem::discriminant(&decoded), std::mem::discriminant(&command));
+            assert_eq!(
+                std::mem::discriminant(&decoded),
+                std::mem::discriminant(&command)
+            );
             match (command, decoded) {
+                (
+                    EditorCommand::SelectEntity { entity_id: a },
+                    EditorCommand::SelectEntity { entity_id: b },
+                ) => assert_eq!(a, b),
+                (
+                    EditorCommand::SelectComponent {
+                        entity_id: entity_a,
+                        component_name: component_a,
+                    },
+                    EditorCommand::SelectComponent {
+                        entity_id: entity_b,
+                        component_name: component_b,
+                    },
+                ) => {
+                    assert_eq!(entity_a, entity_b);
+                    assert_eq!(component_a, component_b);
+                }
+                (
+                    EditorCommand::SelectField {
+                        entity_id: entity_a,
+                        component_name: component_a,
+                        field_name: field_a,
+                    },
+                    EditorCommand::SelectField {
+                        entity_id: entity_b,
+                        component_name: component_b,
+                        field_name: field_b,
+                    },
+                ) => {
+                    assert_eq!(entity_a, entity_b);
+                    assert_eq!(component_a, component_b);
+                    assert_eq!(field_a, field_b);
+                }
                 (EditorCommand::SetAxis(a), EditorCommand::SetAxis(b)) => assert_eq!(a, b),
                 (EditorCommand::ApplyDelta(a), EditorCommand::ApplyDelta(b)) => {
                     assert!((a - b).abs() < 0.0001)

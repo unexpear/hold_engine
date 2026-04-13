@@ -59,14 +59,27 @@ pub enum EditorCommand {
     SelectNextEntity,
     /// Retreat entity selection by one (Shift+Tab).
     SelectPrevEntity,
+    /// Select a specific entity by editor entity ID.
+    SelectEntity { entity_id: u64 },
     /// Advance component selection within the current entity ([).
     SelectNextComponent,
     /// Retreat component selection within the current entity (]).
     SelectPrevComponent,
+    /// Select a specific component on a specific entity.
+    SelectComponent {
+        entity_id: u64,
+        component_name: String,
+    },
     /// Advance field selection within the current component (;).
     SelectNextField,
     /// Retreat field selection within the current component (').
     SelectPrevField,
+    /// Select a specific field on a specific entity/component.
+    SelectField {
+        entity_id: u64,
+        component_name: String,
+        field_name: String,
+    },
     /// Set the active Vec3 axis (keys 1/2/3). No-op for non-Vec3 fields.
     SetAxis(EditorAxis),
     /// Apply a numeric delta to the current field (-/=).
@@ -154,7 +167,10 @@ impl std::fmt::Display for EditorCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedFieldKind { field } => {
-                write!(f, "field '{field}' is not editable (only Number and Vec3 are supported)")
+                write!(
+                    f,
+                    "field '{field}' is not editable (only Number and Vec3 are supported)"
+                )
             }
             Self::UnsupportedCommandState { command, state } => {
                 write!(f, "command '{command}' is not valid in {:?} state", state)
@@ -162,7 +178,10 @@ impl std::fmt::Display for EditorCommandError {
             Self::Session(err) => write!(f, "session error: {err}"),
             Self::NoSelection => write!(f, "no entity is selected"),
             Self::NoField => write!(f, "cursor does not resolve to a valid field"),
-            Self::MissingSourcePath => write!(f, "session has no source path — use save_hsc() with an explicit path"),
+            Self::MissingSourcePath => write!(
+                f,
+                "session has no source path — use save_hsc() with an explicit path"
+            ),
         }
     }
 }

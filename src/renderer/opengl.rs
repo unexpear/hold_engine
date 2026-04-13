@@ -6,7 +6,7 @@
 //! Supports uploading meshes (VAO/VBO/EBO), compiling GLSL shaders,
 //! uploading RGBA8 textures, and issuing indexed draw calls.
 
-use super::{opengl_shaders, Color, DebugLine, Renderer};
+use super::{opengl_shaders, Color, DebugLine, Renderer, ScreenQuad};
 use crate::assets::mesh::MeshData;
 use crate::assets::mesh::Vertex;
 use crate::assets::types::{GpuMesh, GpuTexture, Texture, TextureFormat};
@@ -187,8 +187,16 @@ unsafe fn compile_gl_program(gl: &GlFns, vert_src: &str, frag_src: &str) -> GLui
         let mut log_len: GLint = 0;
         (gl.get_programiv)(program, GL_INFO_LOG_LENGTH, &mut log_len);
         let mut log = vec![0u8; log_len as usize];
-        (gl.get_program_info_log)(program, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
-        panic!("[GL] Line program link error:\n{}", String::from_utf8_lossy(&log));
+        (gl.get_program_info_log)(
+            program,
+            log_len,
+            null_mut(),
+            log.as_mut_ptr() as *mut GLchar,
+        );
+        panic!(
+            "[GL] Line program link error:\n{}",
+            String::from_utf8_lossy(&log)
+        );
     }
 
     (gl.delete_shader)(vert);
@@ -210,8 +218,16 @@ unsafe fn compile_gl_stage(gl: &GlFns, kind: GLenum, src: &str) -> GLuint {
         (gl.get_shaderiv)(shader, GL_INFO_LOG_LENGTH, &mut log_len);
         let mut log = vec![0u8; log_len as usize];
         (gl.get_shader_info_log)(shader, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
-        let stage = if kind == GL_VERTEX_SHADER { "vertex" } else { "fragment" };
-        panic!("[GL] {} shader compile error:\n{}", stage, String::from_utf8_lossy(&log));
+        let stage = if kind == GL_VERTEX_SHADER {
+            "vertex"
+        } else {
+            "fragment"
+        };
+        panic!(
+            "[GL] {} shader compile error:\n{}",
+            stage,
+            String::from_utf8_lossy(&log)
+        );
     }
     shader
 }
@@ -544,7 +560,7 @@ impl OpenGLRenderer {
             (gl.bind_buffer)(GL_ARRAY_BUFFER, line_vbo);
 
             let stride = 7_i32 * 4; // 28 bytes
-            // location 0 — position (vec3, offset 0)
+                                    // location 0 — position (vec3, offset 0)
             (gl.vertex_attrib_pointer)(0, 3, GL_FLOAT, GL_FALSE, stride, 0 as *const c_void);
             (gl.enable_vertex_attrib_array)(0);
             // location 1 — colour (vec4, offset 12)
@@ -1111,12 +1127,22 @@ impl Renderer for OpenGLRenderer {
         let mut verts: Vec<f32> = Vec::with_capacity(lines.len() * 14);
         for line in lines {
             verts.extend_from_slice(&[
-                line.start.x, line.start.y, line.start.z,
-                line.color.r, line.color.g, line.color.b, line.color.a,
+                line.start.x,
+                line.start.y,
+                line.start.z,
+                line.color.r,
+                line.color.g,
+                line.color.b,
+                line.color.a,
             ]);
             verts.extend_from_slice(&[
-                line.end.x, line.end.y, line.end.z,
-                line.color.r, line.color.g, line.color.b, line.color.a,
+                line.end.x,
+                line.end.y,
+                line.end.z,
+                line.color.r,
+                line.color.g,
+                line.color.b,
+                line.color.a,
             ]);
         }
 
@@ -1135,15 +1161,83 @@ impl Renderer for OpenGLRenderer {
             (gl.use_program)(self.line_program);
 
             // Upload VP matrix.
-            let u_vp = (gl.get_uniform_location)(
-                self.line_program,
-                b"u_vp\0".as_ptr() as *const GLchar,
-            );
+            let u_vp =
+                (gl.get_uniform_location)(self.line_program, b"u_vp\0".as_ptr() as *const GLchar);
             if u_vp >= 0 {
                 (gl.uniform_matrix4fv)(u_vp, 1, GL_FALSE, vp.cols.as_ptr() as *const GLfloat);
             }
 
             (gl.draw_arrays)(GL_LINES, 0, (lines.len() * 2) as GLsizei);
+            (gl.bind_vertex_array)(0);
+        }
+    }
+
+    fn render_screen_quads(&mut self, quads: &[ScreenQuad]) {
+        if quads.is_empty() {
+            return;
+        }
+
+        let width = self.width.max(1) as f32;
+        let height = self.height.max(1) as f32;
+        let mut verts: Vec<f32> = Vec::with_capacity(quads.len() * 42);
+
+        for quad in quads {
+            let x0 = quad.x;
+            let y0 = quad.y;
+            let x1 = quad.x + quad.w;
+            let y1 = quad.y + quad.h;
+
+            let nx0 = x0 / width * 2.0 - 1.0;
+            let nx1 = x1 / width * 2.0 - 1.0;
+            let ny0 = 1.0 - y0 / height * 2.0;
+            let ny1 = 1.0 - y1 / height * 2.0;
+            let z = -1.0;
+
+            let color = [quad.color.r, quad.color.g, quad.color.b, quad.color.a];
+            let p0 = [nx0, ny0, z];
+            let p1 = [nx1, ny0, z];
+            let p2 = [nx1, ny1, z];
+            let p3 = [nx0, ny1, z];
+
+            for position in [p0, p1, p2, p0, p2, p3] {
+                verts.extend_from_slice(&[
+                    position[0],
+                    position[1],
+                    position[2],
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3],
+                ]);
+            }
+        }
+
+        unsafe {
+            let gl = &self.gl;
+
+            (gl.bind_vertex_array)(self.line_vao);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, self.line_vbo);
+            (gl.buffer_data)(
+                GL_ARRAY_BUFFER,
+                (verts.len() * std::mem::size_of::<f32>()) as GLsizeiptr,
+                verts.as_ptr() as *const c_void,
+                GL_DYNAMIC_DRAW,
+            );
+
+            (gl.use_program)(self.line_program);
+
+            let u_vp =
+                (gl.get_uniform_location)(self.line_program, b"u_vp\0".as_ptr() as *const GLchar);
+            if u_vp >= 0 {
+                (gl.uniform_matrix4fv)(
+                    u_vp,
+                    1,
+                    GL_FALSE,
+                    Mat4::IDENTITY.cols.as_ptr() as *const GLfloat,
+                );
+            }
+
+            (gl.draw_arrays)(GL_TRIANGLES, 0, (quads.len() * 6) as GLsizei);
             (gl.bind_vertex_array)(0);
         }
     }
