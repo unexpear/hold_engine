@@ -33,7 +33,10 @@ pub use command::{
 };
 pub use drawlist::{generate_draw_list, EditorDrawList};
 pub use host::{EditorCamera, EditorRuntimeHost};
-pub use native_ui::{build_native_ui, EditorNativeUi, EditorUiHitRegion};
+pub use native_ui::{
+    build_native_ui, EditorNativeUi, EditorNativeUiState, EditorUiHitRegion, EditorUiPanel,
+    EditorUiPanelRegion,
+};
 pub use protocol::{
     decode_command as decode_editor_command_protocol, decode_event as decode_editor_event_protocol,
     encode_command as encode_editor_command_protocol, encode_event as encode_editor_event_protocol,

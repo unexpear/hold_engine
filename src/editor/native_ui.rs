@@ -5,9 +5,13 @@
 //! quads in either software or OpenGL and dispatch mouse clicks back through
 //! the existing command surface.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::renderer::{Color, ScreenQuad};
 
-use super::{EditorAxis, EditorCommand, EditorPlayState, EditorRuntimeHost, InspectorValue};
+use super::{
+    EditorAxis, EditorCommand, EditorEntity, EditorPlayState, EditorRuntimeHost, InspectorValue,
+};
 
 const TOOLBAR_H: i32 = 34;
 const STATUS_H: i32 = 24;
@@ -38,6 +42,7 @@ const TEXT_WARNING: Color = Color::new(0.98, 0.78, 0.28, 1.0);
 pub struct EditorNativeUi {
     pub quads: Vec<ScreenQuad>,
     pub hit_regions: Vec<EditorUiHitRegion>,
+    pub panel_regions: Vec<EditorUiPanelRegion>,
 }
 
 impl EditorNativeUi {
@@ -47,6 +52,14 @@ impl EditorNativeUi {
             .rev()
             .find(|region| region.contains(x, y))
             .map(|region| region.commands.clone())
+    }
+
+    pub fn panel_at(&self, x: i32, y: i32) -> Option<EditorUiPanel> {
+        self.panel_regions
+            .iter()
+            .rev()
+            .find(|region| region.contains(x, y))
+            .map(|region| region.panel)
     }
 }
 
@@ -65,7 +78,54 @@ impl EditorUiHitRegion {
     }
 }
 
-pub fn build_native_ui(host: &EditorRuntimeHost, width: u32, height: u32) -> EditorNativeUi {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorUiPanel {
+    Hierarchy,
+    Inspector,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorUiPanelRegion {
+    pub panel: EditorUiPanel,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl EditorUiPanelRegion {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EditorNativeUiState {
+    pub hierarchy_scroll: usize,
+    pub inspector_scroll: usize,
+}
+
+impl EditorNativeUiState {
+    pub fn scroll_lines(&mut self, panel: EditorUiPanel, lines: i32) {
+        let scroll = match panel {
+            EditorUiPanel::Hierarchy => &mut self.hierarchy_scroll,
+            EditorUiPanel::Inspector => &mut self.inspector_scroll,
+        };
+
+        if lines < 0 {
+            *scroll = scroll.saturating_sub(lines.unsigned_abs() as usize);
+        } else {
+            *scroll = scroll.saturating_add(lines as usize);
+        }
+    }
+}
+
+pub fn build_native_ui(
+    host: &EditorRuntimeHost,
+    width: u32,
+    height: u32,
+    state: &mut EditorNativeUiState,
+) -> EditorNativeUi {
     let mut ui = EditorNativeUi::default();
     let width = width as i32;
     let height = height as i32;
@@ -75,14 +135,63 @@ pub fn build_native_ui(host: &EditorRuntimeHost, width: u32, height: u32) -> Edi
     let right_x = (width - inspector_w).max(hierarchy_w + 24);
     let panel_top = TOOLBAR_H;
     let panel_h = (height - TOOLBAR_H - STATUS_H).max(120);
+    let hierarchy_view_rows = panel_visible_rows(panel_h);
+    let inspector_view_rows = panel_visible_rows(panel_h);
+    let (hierarchy_rows, selected_hierarchy_row) = collect_hierarchy_rows(host);
+    let (inspector_rows, selected_inspector_row) = collect_inspector_rows(host);
+
+    sync_scroll_to_selection(
+        &mut state.hierarchy_scroll,
+        selected_hierarchy_row,
+        hierarchy_rows.len(),
+        hierarchy_view_rows,
+    );
+    sync_scroll_to_selection(
+        &mut state.inspector_scroll,
+        selected_inspector_row,
+        inspector_rows.len(),
+        inspector_view_rows,
+    );
 
     fill_rect(&mut ui, 0, 0, width, height, UI_BG);
     draw_toolbar(&mut ui, host, width);
     draw_panel(&mut ui, 0, panel_top, hierarchy_w, panel_h);
     draw_panel(&mut ui, right_x, panel_top, inspector_w, panel_h);
+    ui.panel_regions.push(EditorUiPanelRegion {
+        panel: EditorUiPanel::Hierarchy,
+        x: 0,
+        y: panel_top,
+        w: hierarchy_w,
+        h: panel_h,
+    });
+    ui.panel_regions.push(EditorUiPanelRegion {
+        panel: EditorUiPanel::Inspector,
+        x: right_x,
+        y: panel_top,
+        w: inspector_w,
+        h: panel_h,
+    });
     draw_status(&mut ui, host, width, height);
-    draw_hierarchy(&mut ui, host, 0, panel_top, hierarchy_w, panel_h);
-    draw_inspector(&mut ui, host, right_x, panel_top, inspector_w, panel_h);
+    draw_hierarchy(
+        &mut ui,
+        host,
+        &hierarchy_rows,
+        state.hierarchy_scroll,
+        0,
+        panel_top,
+        hierarchy_w,
+        panel_h,
+    );
+    draw_inspector(
+        &mut ui,
+        host,
+        &inspector_rows,
+        state.inspector_scroll,
+        right_x,
+        panel_top,
+        inspector_w,
+        panel_h,
+    );
 
     ui
 }
@@ -197,9 +306,39 @@ fn draw_toolbar(ui: &mut EditorNativeUi, host: &EditorRuntimeHost, width: i32) {
     let _ = x;
 }
 
+#[derive(Debug, Clone)]
+struct HierarchyRow {
+    entity_id: u64,
+    label: String,
+    depth: usize,
+    selected: bool,
+}
+
+#[derive(Debug, Clone)]
+enum InspectorRow {
+    Message { label: String, color: Color },
+    Title { label: String },
+    Component {
+        entity_id: u64,
+        component_name: String,
+        selected: bool,
+    },
+    Field {
+        entity_id: u64,
+        component_name: String,
+        field_name: String,
+        value: InspectorValue,
+        selected: bool,
+        active_axis: Option<EditorAxis>,
+        editable: bool,
+    },
+}
+
 fn draw_hierarchy(
     ui: &mut EditorNativeUi,
     host: &EditorRuntimeHost,
+    rows: &[HierarchyRow],
+    scroll: usize,
     x: i32,
     y: i32,
     w: i32,
@@ -208,30 +347,42 @@ fn draw_hierarchy(
     let inner_x = x + PANEL_PAD;
     let inner_w = w - PANEL_PAD * 2;
     let header_y = y + PANEL_PAD;
+    let visible_rows = panel_visible_rows(h);
+    let start = scroll.min(rows.len().saturating_sub(visible_rows));
+    let end = (start + visible_rows).min(rows.len());
 
     fill_rect(ui, inner_x, header_y, inner_w, HEADER_H, HEADER_BG);
     draw_text(ui, inner_x + 8, header_y + 5, 1, "HIERARCHY", TEXT_PRIMARY);
+    draw_text(
+        ui,
+        inner_x + inner_w - text_pixel_width(&format!("{end}/{}", rows.len()), 1) - 8,
+        header_y + 5,
+        1,
+        &format!("{end}/{}", rows.len()),
+        TEXT_MUTED,
+    );
 
-    let selected_entity_id = host.cursor().map(|cursor| cursor.entity_id);
-    let mut row_y = header_y + HEADER_H + 6;
-    let max_y = y + h - PANEL_PAD - ROW_H;
-
-    for (index, entity) in host.session().scene().entities.iter().enumerate() {
-        if row_y > max_y {
-            break;
-        }
-
-        let row_color = if Some(entity.id) == selected_entity_id {
+    let row_step = ROW_H + 2;
+    for (visible_index, row) in rows[start..end].iter().enumerate() {
+        let row_y = header_y + HEADER_H + 6 + visible_index as i32 * row_step;
+        let row_color = if row.selected {
             SELECTED_BG
-        } else if index % 2 == 0 {
+        } else if (start + visible_index) % 2 == 0 {
             ROW_BG
         } else {
             ROW_ALT_BG
         };
         fill_rect(ui, inner_x, row_y, inner_w, ROW_H, row_color);
 
-        let label = format!("E{} {}", entity.id, entity.name);
-        draw_text(ui, inner_x + 6, row_y + 4, 1, &label, TEXT_PRIMARY);
+        let indent = (row.depth.min(6) as i32) * 14;
+        draw_text(
+            ui,
+            inner_x + 6 + indent,
+            row_y + 4,
+            1,
+            &row.label,
+            TEXT_PRIMARY,
+        );
 
         ui.hit_regions.push(EditorUiHitRegion {
             x: inner_x,
@@ -239,17 +390,19 @@ fn draw_hierarchy(
             w: inner_w,
             h: ROW_H,
             commands: vec![EditorCommand::SelectEntity {
-                entity_id: entity.id,
+                entity_id: row.entity_id,
             }],
         });
-
-        row_y += ROW_H + 2;
     }
+
+    let _ = host;
 }
 
 fn draw_inspector(
     ui: &mut EditorNativeUi,
     host: &EditorRuntimeHost,
+    rows: &[InspectorRow],
+    scroll: usize,
     x: i32,
     y: i32,
     w: i32,
@@ -258,20 +411,244 @@ fn draw_inspector(
     let inner_x = x + PANEL_PAD;
     let inner_w = w - PANEL_PAD * 2;
     let header_y = y + PANEL_PAD;
+    let visible_rows = panel_visible_rows(h);
+    let start = scroll.min(rows.len().saturating_sub(visible_rows));
+    let end = (start + visible_rows).min(rows.len());
 
     fill_rect(ui, inner_x, header_y, inner_w, HEADER_H, HEADER_BG);
     draw_text(ui, inner_x + 8, header_y + 5, 1, "INSPECTOR", TEXT_PRIMARY);
+    draw_text(
+        ui,
+        inner_x + inner_w - text_pixel_width(&format!("{end}/{}", rows.len()), 1) - 8,
+        header_y + 5,
+        1,
+        &format!("{end}/{}", rows.len()),
+        TEXT_MUTED,
+    );
 
+    let row_step = ROW_H + 2;
+    for (visible_index, row) in rows[start..end].iter().enumerate() {
+        let row_y = header_y + HEADER_H + 6 + visible_index as i32 * row_step;
+        match row {
+            InspectorRow::Message { label, color } => {
+                draw_text(ui, inner_x + 8, row_y + 4, 1, label, *color);
+            }
+            InspectorRow::Title { label } => {
+                draw_text(ui, inner_x + 4, row_y + 4, 1, label, TEXT_ACCENT);
+            }
+            InspectorRow::Component {
+                entity_id,
+                component_name,
+                selected,
+            } => {
+                fill_rect(
+                    ui,
+                    inner_x,
+                    row_y,
+                    inner_w,
+                    ROW_H,
+                    if *selected {
+                        SELECTED_COMPONENT_BG
+                    } else {
+                        ROW_BG
+                    },
+                );
+                draw_text(ui, inner_x + 6, row_y + 4, 1, component_name, TEXT_PRIMARY);
+                ui.hit_regions.push(EditorUiHitRegion {
+                    x: inner_x,
+                    y: row_y,
+                    w: inner_w,
+                    h: ROW_H,
+                    commands: vec![EditorCommand::SelectComponent {
+                        entity_id: *entity_id,
+                        component_name: component_name.clone(),
+                    }],
+                });
+            }
+            InspectorRow::Field {
+                entity_id,
+                component_name,
+                field_name,
+                value,
+                selected,
+                active_axis,
+                editable,
+            } => {
+                fill_rect(
+                    ui,
+                    inner_x + 12,
+                    row_y,
+                    inner_w - 12,
+                    ROW_H,
+                    if *selected { SELECTED_BG } else { ROW_ALT_BG },
+                );
+
+                draw_text(
+                    ui,
+                    inner_x + 18,
+                    row_y + 4,
+                    1,
+                    &format_field_label(field_name, value),
+                    TEXT_PRIMARY,
+                );
+
+                let select_field = EditorCommand::SelectField {
+                    entity_id: *entity_id,
+                    component_name: component_name.clone(),
+                    field_name: field_name.clone(),
+                };
+                ui.hit_regions.push(EditorUiHitRegion {
+                    x: inner_x + 12,
+                    y: row_y,
+                    w: inner_w - 12,
+                    h: ROW_H,
+                    commands: vec![select_field.clone()],
+                });
+
+                if *editable {
+                    match value {
+                        InspectorValue::Number(_) => {
+                            let minus_x = inner_x + inner_w - 50;
+                            let plus_x = inner_x + inner_w - 26;
+                            push_small_button(
+                                ui,
+                                minus_x,
+                                row_y + 1,
+                                "-",
+                                vec![select_field.clone(), EditorCommand::ApplyDelta(-0.1)],
+                                false,
+                            );
+                            push_small_button(
+                                ui,
+                                plus_x,
+                                row_y + 1,
+                                "+",
+                                vec![select_field.clone(), EditorCommand::ApplyDelta(0.1)],
+                                false,
+                            );
+                        }
+                        InspectorValue::Vec3(_) => {
+                            let active_axis = active_axis.unwrap_or(EditorAxis::X);
+                            let axis_base_x = inner_x + inner_w - 94;
+                            for (offset, axis) in
+                                [(0, EditorAxis::X), (18, EditorAxis::Y), (36, EditorAxis::Z)]
+                            {
+                                push_small_button(
+                                    ui,
+                                    axis_base_x + offset,
+                                    row_y + 1,
+                                    match axis {
+                                        EditorAxis::X => "X",
+                                        EditorAxis::Y => "Y",
+                                        EditorAxis::Z => "Z",
+                                    },
+                                    vec![select_field.clone(), EditorCommand::SetAxis(axis)],
+                                    *selected && active_axis == axis,
+                                );
+                            }
+                            push_small_button(
+                                ui,
+                                inner_x + inner_w - 50,
+                                row_y + 1,
+                                "-",
+                                vec![
+                                    select_field.clone(),
+                                    EditorCommand::SetAxis(active_axis),
+                                    EditorCommand::ApplyDelta(-0.1),
+                                ],
+                                false,
+                            );
+                            push_small_button(
+                                ui,
+                                inner_x + inner_w - 26,
+                                row_y + 1,
+                                "+",
+                                vec![
+                                    select_field.clone(),
+                                    EditorCommand::SetAxis(active_axis),
+                                    EditorCommand::ApplyDelta(0.1),
+                                ],
+                                false,
+                            );
+                        }
+                        InspectorValue::Text(_) | InspectorValue::Bool(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = host;
+}
+
+fn panel_visible_rows(panel_h: i32) -> usize {
+    let available = (panel_h - PANEL_PAD * 2 - HEADER_H - 6).max(ROW_H);
+    (available / (ROW_H + 2)).max(1) as usize
+}
+
+fn sync_scroll_to_selection(
+    scroll: &mut usize,
+    selected_index: Option<usize>,
+    total_rows: usize,
+    visible_rows: usize,
+) {
+    let max_scroll = total_rows.saturating_sub(visible_rows);
+    *scroll = (*scroll).min(max_scroll);
+
+    if let Some(selected_index) = selected_index {
+        if selected_index < *scroll {
+            *scroll = selected_index;
+        } else if selected_index >= *scroll + visible_rows {
+            *scroll = selected_index + 1 - visible_rows;
+        }
+    }
+
+    *scroll = (*scroll).min(max_scroll);
+}
+
+fn collect_hierarchy_rows(host: &EditorRuntimeHost) -> (Vec<HierarchyRow>, Option<usize>) {
+    let scene = host.session().scene();
+    let selected_entity_id = host.cursor().map(|cursor| cursor.entity_id);
+    let name_to_id: HashMap<&str, u64> = scene
+        .entities
+        .iter()
+        .map(|entity| (entity.name.as_str(), entity.id))
+        .collect();
+    let parent_by_id: HashMap<u64, Option<u64>> = scene
+        .entities
+        .iter()
+        .map(|entity| (entity.id, find_parent_entity_id(entity, &name_to_id)))
+        .collect();
+    let mut depth_cache = HashMap::new();
+    let mut rows = Vec::with_capacity(scene.entities.len());
+    let mut selected_index = None;
+
+    for (index, entity) in scene.entities.iter().enumerate() {
+        let depth =
+            hierarchy_depth(entity.id, &parent_by_id, &mut depth_cache, &mut HashSet::new());
+        if Some(entity.id) == selected_entity_id {
+            selected_index = Some(index);
+        }
+        rows.push(HierarchyRow {
+            entity_id: entity.id,
+            label: format!("E{} {}", entity.id, entity.name),
+            depth: depth.min(6),
+            selected: Some(entity.id) == selected_entity_id,
+        });
+    }
+
+    (rows, selected_index)
+}
+
+fn collect_inspector_rows(host: &EditorRuntimeHost) -> (Vec<InspectorRow>, Option<usize>) {
     let Some(cursor) = host.cursor() else {
-        draw_text(
-            ui,
-            inner_x + 8,
-            header_y + HEADER_H + 12,
-            1,
-            "NO SELECTION",
-            TEXT_MUTED,
+        return (
+            vec![InspectorRow::Message {
+                label: "NO SELECTION".into(),
+                color: TEXT_MUTED,
+            }],
+            Some(0),
         );
-        return;
     };
 
     let Some(entity) = host
@@ -281,164 +658,102 @@ fn draw_inspector(
         .iter()
         .find(|entity| entity.id == cursor.entity_id)
     else {
-        draw_text(
-            ui,
-            inner_x + 8,
-            header_y + HEADER_H + 12,
-            1,
-            "SELECTION STALE",
-            TEXT_WARNING,
+        return (
+            vec![InspectorRow::Message {
+                label: "SELECTION STALE".into(),
+                color: TEXT_WARNING,
+            }],
+            Some(0),
         );
-        return;
     };
 
-    let mut row_y = header_y + HEADER_H + 6;
-    let max_y = y + h - PANEL_PAD - ROW_H;
-    let title = format!("ENTITY {} {}", entity.id, entity.name);
-    draw_text(ui, inner_x + 4, row_y, 1, &title, TEXT_ACCENT);
-    row_y += ROW_H;
+    let mut rows = Vec::new();
+    let mut selected_index = Some(0);
+    rows.push(InspectorRow::Title {
+        label: format!("ENTITY {} {}", entity.id, entity.name),
+    });
 
     for component in &entity.components {
-        if row_y > max_y {
-            break;
-        }
-
         let component_selected = component.type_name == cursor.component_name;
-        fill_rect(
-            ui,
-            inner_x,
-            row_y,
-            inner_w,
-            ROW_H,
-            if component_selected {
-                SELECTED_COMPONENT_BG
-            } else {
-                ROW_BG
-            },
-        );
-        draw_text(
-            ui,
-            inner_x + 6,
-            row_y + 4,
-            1,
-            &component.type_name,
-            TEXT_PRIMARY,
-        );
-        ui.hit_regions.push(EditorUiHitRegion {
-            x: inner_x,
-            y: row_y,
-            w: inner_w,
-            h: ROW_H,
-            commands: vec![EditorCommand::SelectComponent {
-                entity_id: entity.id,
-                component_name: component.type_name.clone(),
-            }],
+        if component_selected && cursor.field_name.is_empty() {
+            selected_index = Some(rows.len());
+        }
+        rows.push(InspectorRow::Component {
+            entity_id: entity.id,
+            component_name: component.type_name.clone(),
+            selected: component_selected,
         });
-        row_y += ROW_H + 2;
 
         for field in &component.fields {
-            if row_y > max_y {
-                break;
-            }
-
             let field_selected =
                 component.type_name == cursor.component_name && field.name == cursor.field_name;
-            let row_color = if field_selected {
-                SELECTED_BG
-            } else {
-                ROW_ALT_BG
-            };
-            fill_rect(ui, inner_x + 12, row_y, inner_w - 12, ROW_H, row_color);
-
-            let text = format_field_label(&field.name, &field.value);
-            draw_text(ui, inner_x + 18, row_y + 4, 1, &text, TEXT_PRIMARY);
-
-            let select_field = EditorCommand::SelectField {
+            if field_selected {
+                selected_index = Some(rows.len());
+            }
+            rows.push(InspectorRow::Field {
                 entity_id: entity.id,
                 component_name: component.type_name.clone(),
                 field_name: field.name.clone(),
-            };
-            ui.hit_regions.push(EditorUiHitRegion {
-                x: inner_x + 12,
-                y: row_y,
-                w: inner_w - 12,
-                h: ROW_H,
-                commands: vec![select_field.clone()],
+                value: field.value.clone(),
+                selected: field_selected,
+                active_axis: cursor.axis,
+                editable: host.play_state() != EditorPlayState::Playing,
             });
-
-            if host.play_state() != EditorPlayState::Playing {
-                match &field.value {
-                    InspectorValue::Number(_) => {
-                        let minus_x = inner_x + inner_w - 50;
-                        let plus_x = inner_x + inner_w - 26;
-                        push_small_button(
-                            ui,
-                            minus_x,
-                            row_y + 1,
-                            "-",
-                            vec![select_field.clone(), EditorCommand::ApplyDelta(-0.1)],
-                            false,
-                        );
-                        push_small_button(
-                            ui,
-                            plus_x,
-                            row_y + 1,
-                            "+",
-                            vec![select_field.clone(), EditorCommand::ApplyDelta(0.1)],
-                            false,
-                        );
-                    }
-                    InspectorValue::Vec3(_) => {
-                        let active_axis = cursor.axis.unwrap_or(EditorAxis::X);
-                        let axis_base_x = inner_x + inner_w - 94;
-                        for (offset, axis) in
-                            [(0, EditorAxis::X), (18, EditorAxis::Y), (36, EditorAxis::Z)]
-                        {
-                            push_small_button(
-                                ui,
-                                axis_base_x + offset,
-                                row_y + 1,
-                                match axis {
-                                    EditorAxis::X => "X",
-                                    EditorAxis::Y => "Y",
-                                    EditorAxis::Z => "Z",
-                                },
-                                vec![select_field.clone(), EditorCommand::SetAxis(axis)],
-                                field_selected && active_axis == axis,
-                            );
-                        }
-                        push_small_button(
-                            ui,
-                            inner_x + inner_w - 50,
-                            row_y + 1,
-                            "-",
-                            vec![
-                                select_field.clone(),
-                                EditorCommand::SetAxis(active_axis),
-                                EditorCommand::ApplyDelta(-0.1),
-                            ],
-                            false,
-                        );
-                        push_small_button(
-                            ui,
-                            inner_x + inner_w - 26,
-                            row_y + 1,
-                            "+",
-                            vec![
-                                select_field.clone(),
-                                EditorCommand::SetAxis(active_axis),
-                                EditorCommand::ApplyDelta(0.1),
-                            ],
-                            false,
-                        );
-                    }
-                    InspectorValue::Text(_) | InspectorValue::Bool(_) => {}
-                }
-            }
-
-            row_y += ROW_H + 1;
         }
     }
+
+    (rows, selected_index)
+}
+
+fn find_parent_entity_id(entity: &EditorEntity, name_to_id: &HashMap<&str, u64>) -> Option<u64> {
+    let parent = entity
+        .components
+        .iter()
+        .find(|component| component.type_name == "Parent")?;
+
+    for field in &parent.fields {
+        if field.name == "entity_id" {
+            if let InspectorValue::Number(id) = field.value {
+                return Some(id as u64);
+            }
+        }
+    }
+
+    for field in &parent.fields {
+        if field.name == "entity_name" {
+            if let InspectorValue::Text(ref name) = field.value {
+                return name_to_id.get(name.as_str()).copied();
+            }
+        }
+    }
+
+    None
+}
+
+fn hierarchy_depth(
+    entity_id: u64,
+    parent_by_id: &HashMap<u64, Option<u64>>,
+    depth_cache: &mut HashMap<u64, usize>,
+    visiting: &mut HashSet<u64>,
+) -> usize {
+    if let Some(depth) = depth_cache.get(&entity_id).copied() {
+        return depth;
+    }
+
+    if !visiting.insert(entity_id) {
+        return 0;
+    }
+
+    let depth = parent_by_id
+        .get(&entity_id)
+        .copied()
+        .flatten()
+        .map(|parent_id| hierarchy_depth(parent_id, parent_by_id, depth_cache, visiting) + 1)
+        .unwrap_or(0);
+
+    visiting.remove(&entity_id);
+    depth_cache.insert(entity_id, depth);
+    depth
 }
 
 fn draw_status(ui: &mut EditorNativeUi, host: &EditorRuntimeHost, width: i32, height: i32) {
@@ -720,7 +1035,8 @@ mod tests {
     #[test]
     fn hierarchy_row_click_maps_to_select_entity_command() {
         let host = test_host();
-        let ui = build_native_ui(&host, 1280, 720);
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 1280, 720, &mut state);
 
         let commands = ui.commands_at(24, 74).unwrap();
         assert!(matches!(
@@ -739,7 +1055,8 @@ mod tests {
         })
         .unwrap();
 
-        let ui = build_native_ui(&host, 1280, 720);
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 1280, 720, &mut state);
         let commands = ui.commands_at(1245, 122).unwrap();
         assert!(commands.len() >= 2);
         assert!(matches!(
@@ -749,5 +1066,76 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| matches!(command, EditorCommand::ApplyDelta(_))));
+    }
+
+    #[test]
+    fn hierarchy_scroll_follows_selected_entity() {
+        let scene = SceneDocument {
+            name: "Ui".into(),
+            entities: (1..=16)
+                .map(|id| EditorEntity {
+                    id,
+                    name: format!("Entity{id}"),
+                    components: vec![InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([id as f32, 0.0, 0.0]),
+                        }],
+                    }],
+                })
+                .collect(),
+        };
+        let mut host = EditorRuntimeHost::new(EditorSceneSession::new(scene)).unwrap();
+        host.execute(EditorCommand::SelectEntity { entity_id: 16 })
+            .unwrap();
+
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 480, 220, &mut state);
+
+        assert!(state.hierarchy_scroll > 0);
+        assert_eq!(ui.panel_at(40, 60), Some(EditorUiPanel::Hierarchy));
+    }
+
+    #[test]
+    fn inspector_scroll_follows_selected_field() {
+        let scene = SceneDocument {
+            name: "Ui".into(),
+            entities: vec![EditorEntity {
+                id: 1,
+                name: "Camera".into(),
+                components: vec![
+                    InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([0.0, 2.0, 10.0]),
+                        }],
+                    },
+                    InspectorComponent {
+                        type_name: "DebugBlock".into(),
+                        fields: (0..12)
+                            .map(|index| InspectorField {
+                                name: format!("value_{index}"),
+                                value: InspectorValue::Number(index as f32),
+                            })
+                            .collect(),
+                    },
+                ],
+            }],
+        };
+        let mut host = EditorRuntimeHost::new(EditorSceneSession::new(scene)).unwrap();
+        host.execute(EditorCommand::SelectField {
+            entity_id: 1,
+            component_name: "DebugBlock".into(),
+            field_name: "value_11".into(),
+        })
+        .unwrap();
+
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 640, 220, &mut state);
+
+        assert!(state.inspector_scroll > 0);
+        assert_eq!(ui.panel_at(560, 60), Some(EditorUiPanel::Inspector));
     }
 }

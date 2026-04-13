@@ -13,7 +13,8 @@ use hold::{
     input::{vk, InputState, MouseButton},
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
-    EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorPlayState,
+    EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorNativeUiState,
+    EditorPlayState,
     EditorProtocolError, Engine,
 };
 
@@ -60,6 +61,7 @@ struct EditorShellApp {
     server: EditorBridgeServer,
     backend: BackendKind,
     status: String,
+    ui_state: EditorNativeUiState,
 }
 
 impl EditorShellApp {
@@ -68,6 +70,7 @@ impl EditorShellApp {
             server,
             backend,
             status: String::new(),
+            ui_state: EditorNativeUiState::default(),
         };
         app.refresh_status();
         app
@@ -119,10 +122,23 @@ impl EditorShellApp {
     fn process_input(&mut self, input: &InputState, width: u32, height: u32) {
         let ctrl = input.key(vk::CTRL);
         let shift = input.key(vk::SHIFT);
-        let ui = build_native_ui(self.server.host(), width, height);
+        let ui = build_native_ui(self.server.host(), width, height, &mut self.ui_state);
+        let (mx, my) = input.mouse_pos();
+        let wheel = input.mouse_wheel();
+
+        if wheel.abs() > f32::EPSILON {
+            if let Some(panel) = ui.panel_at(mx, my) {
+                let notches = wheel.abs().round().max(1.0) as i32;
+                let lines = if wheel > 0.0 {
+                    -3 * notches
+                } else {
+                    3 * notches
+                };
+                self.ui_state.scroll_lines(panel, lines);
+            }
+        }
 
         if input.mouse_pressed(MouseButton::Left) {
-            let (mx, my) = input.mouse_pos();
             if let Some(commands) = ui.commands_at(mx, my) {
                 self.dispatch_many(commands);
                 return;
@@ -322,7 +338,12 @@ impl App for EditorShellApp {
         );
         renderer.render_debug_lines(&draw_list.lines, &vp);
 
-        let ui = build_native_ui(self.server.host(), renderer.width(), renderer.height());
+        let ui = build_native_ui(
+            self.server.host(),
+            renderer.width(),
+            renderer.height(),
+            &mut self.ui_state,
+        );
         renderer.render_screen_quads(&ui.quads);
     }
 
