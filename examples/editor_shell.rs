@@ -15,14 +15,22 @@ use hold::{
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
     EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorNativeUiState,
-    EditorPlayState, EditorProtocolError, EditorViewportGizmoHandle, EditorViewportGizmoMode,
-    Engine,
+    EditorPlayState, EditorProtocolError, EditorViewportGizmoHandle,
+    EditorViewportGizmoHandleId, EditorViewportGizmoMode, Engine,
 };
 
 const DEFAULT_SCENE: &str = "examples/demo.hsc";
 const EDITOR_FOV_DEG: f32 = 60.0;
 const DELTA_SMALL: f32 = 0.1;
 const DELTA_LARGE: f32 = 1.0;
+
+fn axis_slot(axis: EditorAxis) -> usize {
+    match axis {
+        EditorAxis::X => 0,
+        EditorAxis::Y => 1,
+        EditorAxis::Z => 2,
+    }
+}
 
 struct Args {
     scene: PathBuf,
@@ -65,14 +73,14 @@ struct EditorShellApp {
     ui_state: EditorNativeUiState,
     gizmo_mode: EditorViewportGizmoMode,
     hovered_entity: Option<u64>,
-    hovered_axis: Option<EditorAxis>,
+    hovered_handle: Option<EditorViewportGizmoHandleId>,
     viewport_drag: Option<ViewportDragState>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ViewportDragState {
     handle: EditorViewportGizmoHandle,
-    residual_delta: f32,
+    residual_deltas: [f32; 3],
 }
 
 impl EditorShellApp {
@@ -84,7 +92,7 @@ impl EditorShellApp {
             ui_state: EditorNativeUiState::default(),
             gizmo_mode: EditorViewportGizmoMode::Translate,
             hovered_entity: None,
-            hovered_axis: None,
+            hovered_handle: None,
             viewport_drag: None,
         };
         app.refresh_status();
@@ -134,6 +142,20 @@ impl EditorShellApp {
         );
     }
 
+    fn apply_drag_deltas(&mut self, drag: &mut ViewportDragState, dx: i32, dy: i32) {
+        for (axis, delta) in drag.handle.world_deltas_for_mouse_delta(dx, dy) {
+            let slot = axis_slot(axis);
+            let total_delta = drag.residual_deltas[slot] + delta;
+            if total_delta.abs() >= 0.0005 {
+                drag.residual_deltas[slot] = 0.0;
+                self.dispatch_silent(EditorCommand::SetAxis(axis));
+                self.dispatch_silent(EditorCommand::ApplyDelta(total_delta));
+            } else {
+                drag.residual_deltas[slot] = total_delta;
+            }
+        }
+    }
+
     fn process_input(&mut self, input: &InputState, width: u32, height: u32, vp: &Mat4) {
         let ctrl = input.key(vk::CTRL);
         let shift = input.key(vk::SHIFT);
@@ -145,7 +167,7 @@ impl EditorShellApp {
             height,
             self.gizmo_mode,
             self.hovered_entity,
-            self.hovered_axis,
+            self.hovered_handle,
         );
         let (mx, my) = input.mouse_pos();
         let wheel = input.mouse_wheel();
@@ -153,10 +175,14 @@ impl EditorShellApp {
 
         if pointer_over_panel {
             self.hovered_entity = None;
-            self.hovered_axis = None;
+            self.hovered_handle = None;
         } else {
-            self.hovered_axis = viewport.pick_gizmo_handle(mx, my).map(|handle| handle.axis);
-            self.hovered_entity = viewport.pick_entity(mx, my);
+            self.hovered_handle = viewport.pick_gizmo_handle(mx, my).map(|handle| handle.id());
+            self.hovered_entity = if self.hovered_handle.is_some() {
+                None
+            } else {
+                viewport.pick_entity(mx, my)
+            };
         }
 
         if input.mouse_released(MouseButton::Left) {
@@ -197,22 +223,15 @@ impl EditorShellApp {
             return;
         }
 
-        if let Some(drag) = &mut self.viewport_drag {
+        if let Some(mut drag) = self.viewport_drag.take() {
             if self.server.host().play_state() == EditorPlayState::Playing
                 || !input.mouse_button(MouseButton::Left)
             {
-                self.viewport_drag = None;
+                self.hovered_handle = None;
             } else {
                 let (dx, dy) = input.mouse_delta();
-                if let Some(delta) = drag.handle.world_delta_for_mouse_delta(dx, dy) {
-                    let total_delta = drag.residual_delta + delta;
-                    if total_delta.abs() >= 0.0005 {
-                        drag.residual_delta = 0.0;
-                        self.dispatch_silent(EditorCommand::ApplyDelta(total_delta));
-                    } else {
-                        drag.residual_delta = total_delta;
-                    }
-                }
+                self.apply_drag_deltas(&mut drag, dx, dy);
+                self.viewport_drag = Some(drag);
                 return;
             }
         }
@@ -225,9 +244,10 @@ impl EditorShellApp {
 
             if let Some(handle) = viewport.pick_gizmo_handle(mx, my) {
                 self.dispatch_many(handle.activation_commands());
+                self.hovered_handle = Some(handle.id());
                 self.viewport_drag = Some(ViewportDragState {
                     handle,
-                    residual_delta: 0.0,
+                    residual_deltas: [0.0; 3],
                 });
                 return;
             }
@@ -380,7 +400,7 @@ impl EditorShellApp {
                             .map(|axis| format!(" axis={}", axis))
                             .unwrap_or_default();
                         println!(
-                            "[editor] selected entity {} · {} · {}{}",
+                            "[editor] selected entity {} - {} - {}{}",
                             cursor.entity_id, cursor.component_name, cursor.field_name, axis
                         );
                     }
@@ -454,7 +474,7 @@ impl App for EditorShellApp {
             renderer.height(),
             self.gizmo_mode,
             self.hovered_entity,
-            self.hovered_axis,
+            self.hovered_handle,
         );
         draw_list.lines.extend(viewport.debug_lines.iter().copied());
         renderer.render_debug_lines(&draw_list.lines, &vp);

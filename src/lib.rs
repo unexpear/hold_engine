@@ -52,7 +52,7 @@ pub use editor::{
     EditorEntity, EditorEvent, EditorInspectorCursor, EditorIoError, EditorNativeUi,
     EditorNativeUiState, EditorPipelineError, EditorPlayState, EditorProtocolError,
     EditorRuntimeHost, EditorSceneSession, EditorSessionError, EditorUiHitRegion, EditorUiPanel,
-    EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportGizmoMode,
-    EditorViewportOverlay, InspectorComponent, InspectorField, InspectorValue, Project,
-    SceneBridgeError, SceneDocument,
+    EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
+    EditorViewportGizmoMode, EditorViewportOverlay, InspectorComponent, InspectorField,
+    InspectorValue, Project, SceneBridgeError, SceneDocument,
 };

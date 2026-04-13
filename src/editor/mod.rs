@@ -45,8 +45,8 @@ pub use protocol::{
 };
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 pub use viewport::{
-    build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportGizmoMode,
-    EditorViewportOverlay,
+    build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
+    EditorViewportGizmoMode, EditorViewportOverlay,
 };
 
 /// Basic project metadata and folder layout.

@@ -5,7 +5,7 @@
 //! - click-select entities directly in the viewport,
 //! - show hover/selection feedback in screen space, and
 //! - manipulate `Transform.position`, `Transform.rotation_euler_deg`, and
-//!   `Transform.scale` through simple axis gizmos.
+//!   `Transform.scale` through axis, plane, and ring gizmos.
 
 use crate::ecs::components::Transform;
 use crate::math::{Mat4, Vec3};
@@ -14,11 +14,16 @@ use crate::renderer::{Color, DebugLine, ScreenQuad};
 use super::{EditorAxis, EditorCommand, EditorPlayState, EditorRuntimeHost};
 
 const ENTITY_PICK_RADIUS_PX: f32 = 14.0;
+const PICK_DEPTH_BIAS_PX_SQ: f32 = 52.0;
 const GIZMO_HANDLE_HALF_PX: f32 = 7.0;
+const GIZMO_PLANE_HALF_PX: f32 = 10.0;
+const GIZMO_RING_PICK_RADIUS_PX: f32 = 8.0;
 const GIZMO_DISTANCE_SCALE: f32 = 0.08;
 const GIZMO_MIN_WORLD_SIZE: f32 = 0.8;
 const GIZMO_MAX_WORLD_SIZE: f32 = 3.5;
-const ROTATE_DEGREES_PER_DRAG: f32 = 90.0;
+const PLANE_HANDLE_INNER: f32 = 0.20;
+const PLANE_HANDLE_OUTER: f32 = 0.46;
+const RING_BACKFACE_TINT: f32 = 0.62;
 
 const AXIS_X_COLOR: Color = Color::new(1.0, 0.28, 0.28, 1.0);
 const AXIS_Y_COLOR: Color = Color::new(0.30, 0.95, 0.36, 1.0);
@@ -45,6 +50,14 @@ impl std::fmt::Display for EditorViewportGizmoMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorViewportGizmoHandleId {
+    pub mode: EditorViewportGizmoMode,
+    pub field_name: &'static str,
+    pub primary_axis: EditorAxis,
+    pub secondary_axis: Option<EditorAxis>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EditorViewportOverlay {
     pub debug_lines: Vec<DebugLine>,
@@ -55,52 +68,51 @@ pub struct EditorViewportOverlay {
 
 impl EditorViewportOverlay {
     pub fn pick_entity(&self, x: i32, y: i32) -> Option<u64> {
-        let mx = x as f32;
-        let my = y as f32;
+        let point = [x as f32, y as f32];
         self.entity_hits
             .iter()
             .filter_map(|hit| {
-                let dx = hit.screen_x - mx;
-                let dy = hit.screen_y - my;
-                let dist_sq = dx * dx + dy * dy;
-                (dist_sq <= ENTITY_PICK_RADIUS_PX * ENTITY_PICK_RADIUS_PX).then_some((
-                    hit.entity_id,
-                    dist_sq,
-                    hit.depth,
-                ))
+                let dist_sq = screen_distance_sq(point, [hit.screen_x, hit.screen_y]);
+                (dist_sq <= ENTITY_PICK_RADIUS_PX * ENTITY_PICK_RADIUS_PX)
+                    .then_some((hit.entity_id, depth_pick_score(dist_sq, hit.depth)))
             })
-            .min_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-            })
-            .map(|(entity_id, _, _)| entity_id)
+            .min_by(|a, b| compare_f32(a.1, b.1))
+            .map(|(entity_id, _)| entity_id)
     }
 
     pub fn pick_gizmo_handle(&self, x: i32, y: i32) -> Option<EditorViewportGizmoHandle> {
-        let mx = x as f32;
-        let my = y as f32;
+        let point = [x as f32, y as f32];
         self.gizmo_handles
             .iter()
-            .rev()
-            .find(|handle| handle.contains(mx, my))
-            .copied()
+            .filter_map(|handle| handle.hit_test(point))
+            .min_by(|a, b| compare_f32(a.score, b.score))
+            .map(|candidate| candidate.handle)
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EditorViewportGizmoHandle {
     pub entity_id: u64,
     pub axis: EditorAxis,
     pub mode: EditorViewportGizmoMode,
-    pick_screen: [f32; 2],
-    drag_vector: [f32; 2],
-    delta_scale: f32,
+    depth: f32,
+    secondary_axis: Option<EditorAxis>,
+    shape: EditorViewportHandleShape,
+    drag: EditorViewportHandleDrag,
     field_name: &'static str,
 }
 
 impl EditorViewportGizmoHandle {
-    pub fn activation_commands(self) -> Vec<EditorCommand> {
+    pub fn id(&self) -> EditorViewportGizmoHandleId {
+        EditorViewportGizmoHandleId {
+            mode: self.mode,
+            field_name: self.field_name,
+            primary_axis: self.axis,
+            secondary_axis: self.secondary_axis,
+        }
+    }
+
+    pub fn activation_commands(&self) -> Vec<EditorCommand> {
         vec![
             EditorCommand::SelectField {
                 entity_id: self.entity_id,
@@ -111,27 +123,98 @@ impl EditorViewportGizmoHandle {
         ]
     }
 
-    pub fn world_delta_for_mouse_delta(self, dx: i32, dy: i32) -> Option<f32> {
-        let axis_x = self.drag_vector[0];
-        let axis_y = self.drag_vector[1];
-        let axis_len = (axis_x * axis_x + axis_y * axis_y).sqrt();
-        if axis_len < 8.0 {
-            return None;
+    pub fn world_deltas_for_mouse_delta(&self, dx: i32, dy: i32) -> Vec<(EditorAxis, f32)> {
+        let motion = [dx as f32, dy as f32];
+        match &self.drag {
+            EditorViewportHandleDrag::SingleAxis {
+                drag_vector,
+                delta_scale,
+            } => single_axis_delta(*drag_vector, *delta_scale, motion)
+                .map(|delta| vec![(self.axis, delta)])
+                .unwrap_or_default(),
+            EditorViewportHandleDrag::DualAxis {
+                drag_vectors,
+                delta_scales,
+            } => {
+                let Some([coeff_a, coeff_b]) = solve_drag_basis(*drag_vectors, motion) else {
+                    return Vec::new();
+                };
+                let mut out = Vec::with_capacity(2);
+                let delta_a = coeff_a * delta_scales[0];
+                if delta_a.abs() > 1e-6 {
+                    out.push((self.axis, delta_a));
+                }
+                if let Some(axis_b) = self.secondary_axis {
+                    let delta_b = coeff_b * delta_scales[1];
+                    if delta_b.abs() > 1e-6 {
+                        out.push((axis_b, delta_b));
+                    }
+                }
+                out
+            }
         }
-
-        let motion = dx as f32 * (axis_x / axis_len) + dy as f32 * (axis_y / axis_len);
-        Some((motion / axis_len) * self.delta_scale)
     }
 
-    pub fn field_name(self) -> &'static str {
+    pub fn field_name(&self) -> &'static str {
         self.field_name
     }
 
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.pick_screen[0] - GIZMO_HANDLE_HALF_PX
-            && x <= self.pick_screen[0] + GIZMO_HANDLE_HALF_PX
-            && y >= self.pick_screen[1] - GIZMO_HANDLE_HALF_PX
-            && y <= self.pick_screen[1] + GIZMO_HANDLE_HALF_PX
+    fn hit_test(&self, point: [f32; 2]) -> Option<HandleHitCandidate> {
+        match &self.shape {
+            EditorViewportHandleShape::Rect {
+                center,
+                half_extent,
+            } => {
+                let within_x =
+                    point[0] >= center[0] - half_extent && point[0] <= center[0] + half_extent;
+                let within_y =
+                    point[1] >= center[1] - half_extent && point[1] <= center[1] + half_extent;
+                if !within_x || !within_y {
+                    return None;
+                }
+                Some(HandleHitCandidate {
+                    score: depth_pick_score(screen_distance_sq(point, *center), self.depth),
+                    handle: self.clone(),
+                })
+            }
+            EditorViewportHandleShape::Ring {
+                segments,
+                pick_radius,
+                circumference,
+            } => {
+                let mut best: Option<(f32, HandlePickSegment)> = None;
+                for segment in segments {
+                    let dist_sq = point_segment_distance_sq(point, segment.start, segment.end);
+                    if dist_sq > pick_radius * pick_radius {
+                        continue;
+                    }
+                    match best {
+                        Some((best_dist_sq, _)) if dist_sq >= best_dist_sq => {}
+                        _ => best = Some((dist_sq, *segment)),
+                    }
+                }
+
+                let (dist_sq, segment) = best?;
+                let segment_vector = [
+                    segment.end[0] - segment.start[0],
+                    segment.end[1] - segment.start[1],
+                ];
+                let segment_len = vector_len(segment_vector);
+                if segment_len < 4.0 {
+                    return None;
+                }
+
+                let mut handle = self.clone();
+                handle.drag = EditorViewportHandleDrag::SingleAxis {
+                    drag_vector: segment_vector,
+                    delta_scale: segment_len * 360.0 / circumference.max(segment_len),
+                };
+                Some(HandleHitCandidate {
+                    score: depth_pick_score(dist_sq, segment.depth),
+                    handle,
+                })
+            }
+        }
     }
 }
 
@@ -150,6 +233,44 @@ struct ProjectedPoint {
     depth: f32,
 }
 
+#[derive(Debug, Clone)]
+enum EditorViewportHandleShape {
+    Rect {
+        center: [f32; 2],
+        half_extent: f32,
+    },
+    Ring {
+        segments: Vec<HandlePickSegment>,
+        pick_radius: f32,
+        circumference: f32,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum EditorViewportHandleDrag {
+    SingleAxis {
+        drag_vector: [f32; 2],
+        delta_scale: f32,
+    },
+    DualAxis {
+        drag_vectors: [[f32; 2]; 2],
+        delta_scales: [f32; 2],
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HandlePickSegment {
+    start: [f32; 2],
+    end: [f32; 2],
+    depth: f32,
+}
+
+#[derive(Debug, Clone)]
+struct HandleHitCandidate {
+    score: f32,
+    handle: EditorViewportGizmoHandle,
+}
+
 pub fn build_viewport_overlay(
     host: &EditorRuntimeHost,
     vp: &Mat4,
@@ -157,12 +278,12 @@ pub fn build_viewport_overlay(
     height: u32,
     mode: EditorViewportGizmoMode,
     hovered_entity: Option<u64>,
-    hovered_axis: Option<EditorAxis>,
+    hovered_handle: Option<EditorViewportGizmoHandleId>,
 ) -> EditorViewportOverlay {
     let mut overlay = EditorViewportOverlay::default();
     collect_entity_hits(host, vp, width, height, &mut overlay);
     append_selection_feedback(host, hovered_entity, &mut overlay);
-    append_transform_gizmo(host, vp, width, height, mode, hovered_axis, &mut overlay);
+    append_transform_gizmo(host, vp, width, height, mode, hovered_handle, &mut overlay);
     overlay
 }
 
@@ -234,14 +355,13 @@ fn find_entity_hit(
         .find(|hit| hit.entity_id == entity_id)
         .copied()
 }
-
 fn append_transform_gizmo(
     host: &EditorRuntimeHost,
     vp: &Mat4,
     width: u32,
     height: u32,
     mode: EditorViewportGizmoMode,
-    hovered_axis: Option<EditorAxis>,
+    hovered_handle: Option<EditorViewportGizmoHandleId>,
     overlay: &mut EditorViewportOverlay,
 ) {
     if host.play_state() == EditorPlayState::Playing {
@@ -280,10 +400,10 @@ fn append_transform_gizmo(
             transform.position,
             origin,
             gizmo_world_size,
-            1.0,
+            gizmo_world_size,
             "position",
             mode,
-            hovered_axis,
+            hovered_handle,
             overlay,
         ),
         EditorViewportGizmoMode::Scale => append_translate_or_scale_gizmo(
@@ -297,7 +417,7 @@ fn append_transform_gizmo(
             1.0,
             "scale",
             mode,
-            hovered_axis,
+            hovered_handle,
             overlay,
         ),
         EditorViewportGizmoMode::Rotate => append_rotate_gizmo(
@@ -306,8 +426,9 @@ fn append_transform_gizmo(
             width,
             height,
             transform.position,
+            origin.depth,
             gizmo_world_size,
-            hovered_axis,
+            hovered_handle,
             overlay,
         ),
     }
@@ -321,32 +442,53 @@ fn append_translate_or_scale_gizmo(
     height: u32,
     origin_world: Vec3,
     origin_screen: ProjectedPoint,
-    gizmo_world_size: f32,
-    delta_scale: f32,
+    axis_world_size: f32,
+    full_delta_scale: f32,
     field_name: &'static str,
     mode: EditorViewportGizmoMode,
-    hovered_axis: Option<EditorAxis>,
+    hovered_handle: Option<EditorViewportGizmoHandleId>,
     overlay: &mut EditorViewportOverlay,
 ) {
     let active_axis = cursor_active_axis(host, field_name);
+    let entity_id = host.cursor().map(|cursor| cursor.entity_id).unwrap_or_default();
 
     for (axis, world_dir, color) in [
         (EditorAxis::X, Vec3::X, AXIS_X_COLOR),
         (EditorAxis::Y, Vec3::Y, AXIS_Y_COLOR),
         (EditorAxis::Z, Vec3::Z, AXIS_Z_COLOR),
     ] {
-        let end_world = origin_world + world_dir * gizmo_world_size;
+        let end_world = origin_world + world_dir * axis_world_size;
         let Some(end) = project_world_to_screen(vp, width, height, end_world) else {
             continue;
         };
 
         let drag_vector = [end.x - origin_screen.x, end.y - origin_screen.y];
-        let axis_screen_len = (drag_vector[0] * drag_vector[0] + drag_vector[1] * drag_vector[1]).sqrt();
-        if axis_screen_len < 12.0 {
+        if vector_len(drag_vector) < 12.0 {
             continue;
         }
 
-        let tinted = tint_axis_color(color, active_axis == Some(axis), hovered_axis == Some(axis));
+        let handle = EditorViewportGizmoHandle {
+            entity_id,
+            axis,
+            mode,
+            depth: end.depth,
+            secondary_axis: None,
+            shape: EditorViewportHandleShape::Rect {
+                center: [end.x, end.y],
+                half_extent: GIZMO_HANDLE_HALF_PX,
+            },
+            drag: EditorViewportHandleDrag::SingleAxis {
+                drag_vector,
+                delta_scale: full_delta_scale,
+            },
+            field_name,
+        };
+        let tinted = tint_axis_color(
+            color,
+            active_axis == Some(axis),
+            hovered_handle == Some(handle.id()),
+        );
+
         overlay
             .debug_lines
             .push(DebugLine::new(origin_world, end_world, tinted));
@@ -357,97 +499,282 @@ fn append_translate_or_scale_gizmo(
             GIZMO_HANDLE_HALF_PX * 2.0,
             tinted,
         ));
-        overlay.gizmo_handles.push(EditorViewportGizmoHandle {
-            entity_id: host.cursor().map(|cursor| cursor.entity_id).unwrap_or_default(),
-            axis,
-            mode,
-            pick_screen: [end.x, end.y],
-            drag_vector,
-            delta_scale: delta_scale
-                * if field_name == "position" {
-                    gizmo_world_size
-                } else {
-                    1.0
-                },
-            field_name,
-        });
+        overlay.gizmo_handles.push(handle);
     }
+
+    append_plane_handles(
+        entity_id,
+        vp,
+        width,
+        height,
+        origin_world,
+        origin_screen,
+        axis_world_size,
+        full_delta_scale,
+        field_name,
+        mode,
+        active_axis,
+        hovered_handle,
+        overlay,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_plane_handles(
+    entity_id: u64,
+    vp: &Mat4,
+    width: u32,
+    height: u32,
+    origin_world: Vec3,
+    origin_screen: ProjectedPoint,
+    axis_world_size: f32,
+    full_delta_scale: f32,
+    field_name: &'static str,
+    mode: EditorViewportGizmoMode,
+    active_axis: Option<EditorAxis>,
+    hovered_handle: Option<EditorViewportGizmoHandleId>,
+    overlay: &mut EditorViewportOverlay,
+) {
+    for (axis_a, dir_a, color_a, axis_b, dir_b, color_b) in [
+        (
+            EditorAxis::X,
+            Vec3::X,
+            AXIS_X_COLOR,
+            EditorAxis::Y,
+            Vec3::Y,
+            AXIS_Y_COLOR,
+        ),
+        (
+            EditorAxis::Y,
+            Vec3::Y,
+            AXIS_Y_COLOR,
+            EditorAxis::Z,
+            Vec3::Z,
+            AXIS_Z_COLOR,
+        ),
+        (
+            EditorAxis::Z,
+            Vec3::Z,
+            AXIS_Z_COLOR,
+            EditorAxis::X,
+            Vec3::X,
+            AXIS_X_COLOR,
+        ),
+    ] {
+        let p0 = origin_world
+            + dir_a * (axis_world_size * PLANE_HANDLE_INNER)
+            + dir_b * (axis_world_size * PLANE_HANDLE_INNER);
+        let p1 = origin_world
+            + dir_a * (axis_world_size * PLANE_HANDLE_OUTER)
+            + dir_b * (axis_world_size * PLANE_HANDLE_INNER);
+        let p2 = origin_world
+            + dir_a * (axis_world_size * PLANE_HANDLE_OUTER)
+            + dir_b * (axis_world_size * PLANE_HANDLE_OUTER);
+        let p3 = origin_world
+            + dir_a * (axis_world_size * PLANE_HANDLE_INNER)
+            + dir_b * (axis_world_size * PLANE_HANDLE_OUTER);
+        let center_world = origin_world
+            + dir_a * (axis_world_size * (PLANE_HANDLE_INNER + PLANE_HANDLE_OUTER) * 0.5)
+            + dir_b * (axis_world_size * (PLANE_HANDLE_INNER + PLANE_HANDLE_OUTER) * 0.5);
+
+        let Some(center) = project_world_to_screen(vp, width, height, center_world) else {
+            continue;
+        };
+        let Some(axis_a_end) = project_world_to_screen(
+            vp,
+            width,
+            height,
+            origin_world + dir_a * (axis_world_size * PLANE_HANDLE_OUTER),
+        ) else {
+            continue;
+        };
+        let Some(axis_b_end) = project_world_to_screen(
+            vp,
+            width,
+            height,
+            origin_world + dir_b * (axis_world_size * PLANE_HANDLE_OUTER),
+        ) else {
+            continue;
+        };
+
+        let drag_vectors = [
+            [axis_a_end.x - origin_screen.x, axis_a_end.y - origin_screen.y],
+            [axis_b_end.x - origin_screen.x, axis_b_end.y - origin_screen.y],
+        ];
+        if solve_drag_basis(drag_vectors, [1.0, 1.0]).is_none() {
+            continue;
+        }
+
+        let handle = EditorViewportGizmoHandle {
+            entity_id,
+            axis: axis_a,
+            mode,
+            depth: center.depth,
+            secondary_axis: Some(axis_b),
+            shape: EditorViewportHandleShape::Rect {
+                center: [center.x, center.y],
+                half_extent: GIZMO_PLANE_HALF_PX,
+            },
+            drag: EditorViewportHandleDrag::DualAxis {
+                drag_vectors,
+                delta_scales: [
+                    full_delta_scale * PLANE_HANDLE_OUTER,
+                    full_delta_scale * PLANE_HANDLE_OUTER,
+                ],
+            },
+            field_name,
+        };
+        let tinted = tint_plane_color(
+            mix_axis_colors(color_a, color_b),
+            active_axis.is_some_and(|axis| axis == axis_a || axis == axis_b),
+            hovered_handle == Some(handle.id()),
+        );
+
+        overlay.debug_lines.push(DebugLine::new(p0, p1, tinted));
+        overlay.debug_lines.push(DebugLine::new(p1, p2, tinted));
+        overlay.debug_lines.push(DebugLine::new(p2, p3, tinted));
+        overlay.debug_lines.push(DebugLine::new(p3, p0, tinted));
+        overlay.quads.push(ScreenQuad::new(
+            center.x - GIZMO_PLANE_HALF_PX,
+            center.y - GIZMO_PLANE_HALF_PX,
+            GIZMO_PLANE_HALF_PX * 2.0,
+            GIZMO_PLANE_HALF_PX * 2.0,
+            with_alpha(tinted, 0.55),
+        ));
+        overlay.gizmo_handles.push(handle);
+    }
+}
+#[allow(clippy::too_many_arguments)]
 fn append_rotate_gizmo(
     host: &EditorRuntimeHost,
     vp: &Mat4,
     width: u32,
     height: u32,
     origin_world: Vec3,
+    origin_depth: f32,
     radius: f32,
-    hovered_axis: Option<EditorAxis>,
+    hovered_handle: Option<EditorViewportGizmoHandleId>,
     overlay: &mut EditorViewportOverlay,
 ) {
     let entity_id = host.cursor().map(|cursor| cursor.entity_id).unwrap_or_default();
     let active_axis = cursor_active_axis(host, "rotation_euler_deg");
 
-    for (axis, basis_a, basis_b, handle_dir, color) in [
-        (EditorAxis::X, Vec3::Y, Vec3::Z, Vec3::Y, AXIS_X_COLOR),
-        (EditorAxis::Y, Vec3::Z, Vec3::X, Vec3::Z, AXIS_Y_COLOR),
-        (EditorAxis::Z, Vec3::X, Vec3::Y, Vec3::X, AXIS_Z_COLOR),
+    for (axis, basis_a, basis_b, color) in [
+        (EditorAxis::X, Vec3::Y, Vec3::Z, AXIS_X_COLOR),
+        (EditorAxis::Y, Vec3::Z, Vec3::X, AXIS_Y_COLOR),
+        (EditorAxis::Z, Vec3::X, Vec3::Y, AXIS_Z_COLOR),
     ] {
-        let tinted = tint_axis_color(color, active_axis == Some(axis), hovered_axis == Some(axis));
-        append_ring_lines(origin_world, basis_a, basis_b, radius, tinted, overlay);
-
-        let handle_world = origin_world + handle_dir * radius;
-        let tangent_world = basis_b * radius * 0.35;
-        let Some(handle_screen) = project_world_to_screen(vp, width, height, handle_world) else {
-            continue;
-        };
-        let Some(tangent_screen) =
-            project_world_to_screen(vp, width, height, handle_world + tangent_world)
-        else {
-            continue;
-        };
-
-        let drag_vector = [tangent_screen.x - handle_screen.x, tangent_screen.y - handle_screen.y];
-        let axis_screen_len = (drag_vector[0] * drag_vector[0] + drag_vector[1] * drag_vector[1]).sqrt();
-        if axis_screen_len < 8.0 {
-            continue;
-        }
-
-        overlay.quads.push(ScreenQuad::new(
-            handle_screen.x - GIZMO_HANDLE_HALF_PX,
-            handle_screen.y - GIZMO_HANDLE_HALF_PX,
-            GIZMO_HANDLE_HALF_PX * 2.0,
-            GIZMO_HANDLE_HALF_PX * 2.0,
-            tinted,
-        ));
-        overlay.gizmo_handles.push(EditorViewportGizmoHandle {
+        let handle = EditorViewportGizmoHandle {
             entity_id,
             axis,
             mode: EditorViewportGizmoMode::Rotate,
-            pick_screen: [handle_screen.x, handle_screen.y],
-            drag_vector,
-            delta_scale: ROTATE_DEGREES_PER_DRAG,
+            depth: origin_depth,
+            secondary_axis: None,
+            shape: EditorViewportHandleShape::Ring {
+                segments: Vec::new(),
+                pick_radius: GIZMO_RING_PICK_RADIUS_PX,
+                circumference: 0.0,
+            },
+            drag: EditorViewportHandleDrag::SingleAxis {
+                drag_vector: [1.0, 0.0],
+                delta_scale: 0.0,
+            },
             field_name: "rotation_euler_deg",
-        });
+        };
+        let tinted = tint_axis_color(
+            color,
+            active_axis == Some(axis),
+            hovered_handle == Some(handle.id()),
+        );
+
+        let (segments, circumference) = append_rotate_ring_lines(
+            vp,
+            width,
+            height,
+            origin_world,
+            origin_depth,
+            basis_a,
+            basis_b,
+            radius,
+            tinted,
+            overlay,
+        );
+        if segments.is_empty() || circumference <= 1.0 {
+            continue;
+        }
+
+        let mut handle = handle;
+        handle.shape = EditorViewportHandleShape::Ring {
+            segments,
+            pick_radius: GIZMO_RING_PICK_RADIUS_PX,
+            circumference,
+        };
+        overlay.gizmo_handles.push(handle);
     }
 }
 
-fn append_ring_lines(
+#[allow(clippy::too_many_arguments)]
+fn append_rotate_ring_lines(
+    vp: &Mat4,
+    width: u32,
+    height: u32,
     origin_world: Vec3,
+    origin_depth: f32,
     basis_a: Vec3,
     basis_b: Vec3,
     radius: f32,
     color: Color,
     overlay: &mut EditorViewportOverlay,
-) {
-    let segments = 24;
-    let mut prev = origin_world + basis_a * radius;
+) -> (Vec<HandlePickSegment>, f32) {
+    let segments = 48;
+    let mut prev_world = origin_world + basis_a * radius;
+    let Some(mut prev_projected) = project_world_to_screen(vp, width, height, prev_world) else {
+        return (Vec::new(), 0.0);
+    };
+
+    let mut pick_segments = Vec::new();
+    let mut circumference = 0.0;
+
     for step in 1..=segments {
         let t = step as f32 / segments as f32;
         let angle = t * std::f32::consts::TAU;
-        let point = origin_world + (basis_a * angle.cos() + basis_b * angle.sin()) * radius;
-        overlay.debug_lines.push(DebugLine::new(prev, point, color));
-        prev = point;
+        let world = origin_world + (basis_a * angle.cos() + basis_b * angle.sin()) * radius;
+        let Some(projected) = project_world_to_screen(vp, width, height, world) else {
+            prev_world = world;
+            continue;
+        };
+
+        let segment_depth = (prev_projected.depth + projected.depth) * 0.5;
+        let front_facing = segment_depth <= origin_depth;
+        let segment_color = if front_facing {
+            color
+        } else {
+            color.lerp(Color::BLACK, RING_BACKFACE_TINT)
+        };
+        overlay
+            .debug_lines
+            .push(DebugLine::new(prev_world, world, segment_color));
+
+        let screen_start = [prev_projected.x, prev_projected.y];
+        let screen_end = [projected.x, projected.y];
+        let screen_len = vector_len([
+            screen_end[0] - screen_start[0],
+            screen_end[1] - screen_start[1],
+        ]);
+        circumference += screen_len;
+        if front_facing && screen_len > 1.5 {
+            pick_segments.push(HandlePickSegment {
+                start: screen_start,
+                end: screen_end,
+                depth: segment_depth,
+            });
+        }
+
+        prev_world = world;
+        prev_projected = projected;
     }
+
+    (pick_segments, circumference)
 }
 
 fn cursor_active_axis(host: &EditorRuntimeHost, field_name: &str) -> Option<EditorAxis> {
@@ -468,6 +795,32 @@ fn tint_axis_color(color: Color, active: bool, hovered: bool) -> Color {
     } else {
         color
     }
+}
+
+fn tint_plane_color(color: Color, active: bool, hovered: bool) -> Color {
+    let color = if active {
+        color.lerp(Color::WHITE, 0.18)
+    } else {
+        color
+    };
+    if hovered {
+        color.lerp(Color::WHITE, 0.35)
+    } else {
+        color
+    }
+}
+
+fn mix_axis_colors(a: Color, b: Color) -> Color {
+    Color::new(
+        (a.r + b.r) * 0.5,
+        (a.g + b.g) * 0.5,
+        (a.b + b.b) * 0.5,
+        1.0,
+    )
+}
+
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    Color::new(color.r, color.g, color.b, alpha)
 }
 
 fn push_outline_rect(
@@ -510,6 +863,63 @@ fn project_world_to_screen(
     })
 }
 
+fn single_axis_delta(
+    drag_vector: [f32; 2],
+    delta_scale: f32,
+    motion: [f32; 2],
+) -> Option<f32> {
+    let axis_len = vector_len(drag_vector);
+    if axis_len < 8.0 {
+        return None;
+    }
+    let motion_along_axis =
+        motion[0] * (drag_vector[0] / axis_len) + motion[1] * (drag_vector[1] / axis_len);
+    Some((motion_along_axis / axis_len) * delta_scale)
+}
+
+fn solve_drag_basis(drag_vectors: [[f32; 2]; 2], motion: [f32; 2]) -> Option<[f32; 2]> {
+    let det = drag_vectors[0][0] * drag_vectors[1][1] - drag_vectors[0][1] * drag_vectors[1][0];
+    if det.abs() < 18.0 {
+        return None;
+    }
+
+    Some([
+        (motion[0] * drag_vectors[1][1] - motion[1] * drag_vectors[1][0]) / det,
+        (drag_vectors[0][0] * motion[1] - drag_vectors[0][1] * motion[0]) / det,
+    ])
+}
+
+fn point_segment_distance_sq(point: [f32; 2], start: [f32; 2], end: [f32; 2]) -> f32 {
+    let seg = [end[0] - start[0], end[1] - start[1]];
+    let len_sq = seg[0] * seg[0] + seg[1] * seg[1];
+    if len_sq <= 1e-6 {
+        return screen_distance_sq(point, start);
+    }
+
+    let to_point = [point[0] - start[0], point[1] - start[1]];
+    let t = ((to_point[0] * seg[0] + to_point[1] * seg[1]) / len_sq).clamp(0.0, 1.0);
+    let closest = [start[0] + seg[0] * t, start[1] + seg[1] * t];
+    screen_distance_sq(point, closest)
+}
+
+fn screen_distance_sq(a: [f32; 2], b: [f32; 2]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    dx * dx + dy * dy
+}
+
+fn vector_len(v: [f32; 2]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+
+fn depth_pick_score(dist_sq: f32, depth: f32) -> f32 {
+    let depth_t = ((depth + 1.0) * 0.5).clamp(0.0, 1.0);
+    dist_sq + depth_t * PICK_DEPTH_BIAS_PX_SQ
+}
+
+fn compare_f32(a: f32, b: f32) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +972,30 @@ mod tests {
         host
     }
 
+    fn depth_test_host() -> EditorRuntimeHost {
+        let scene = SceneDocument {
+            name: "Depth".into(),
+            entities: vec![
+                EditorEntity {
+                    id: 1,
+                    name: "Back".into(),
+                    components: vec![transform_component([0.0, 0.0, 0.0])],
+                },
+                EditorEntity {
+                    id: 2,
+                    name: "Front".into(),
+                    components: vec![transform_component([0.0, 0.0, 4.0])],
+                },
+            ],
+        };
+
+        let mut host = EditorRuntimeHost::new(EditorSceneSession::new(scene)).unwrap();
+        host.editor_camera.position = Vec3::new(0.0, 0.0, 10.0);
+        host.editor_camera.yaw = 0.0;
+        host.editor_camera.pitch = 0.0;
+        host
+    }
+
     #[test]
     fn viewport_pick_selects_projected_entity() {
         let host = test_host();
@@ -589,7 +1023,33 @@ mod tests {
     }
 
     #[test]
-    fn translate_gizmo_selects_position_field() {
+    fn viewport_pick_prefers_frontmost_entity_when_hits_overlap() {
+        let host = depth_test_host();
+        let vp = host.active_view_proj(60.0, 16.0 / 9.0);
+        let overlay = build_viewport_overlay(
+            &host,
+            &vp,
+            1280,
+            720,
+            EditorViewportGizmoMode::Translate,
+            None,
+            None,
+        );
+
+        let front = overlay
+            .entity_hits
+            .iter()
+            .find(|hit| hit.entity_id == 2)
+            .copied()
+            .unwrap();
+        assert_eq!(
+            overlay.pick_entity(front.screen_x as i32, front.screen_y as i32),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn translate_plane_handle_edits_two_axes() {
         let mut host = test_host();
         host.execute(EditorCommand::SelectEntity { entity_id: 1 }).unwrap();
 
@@ -604,16 +1064,22 @@ mod tests {
             None,
         );
 
-        let handle = overlay.gizmo_handles[0];
+        let handle = overlay
+            .gizmo_handles
+            .iter()
+            .find(|handle| handle.secondary_axis.is_some())
+            .unwrap();
         let commands = handle.activation_commands();
         assert!(matches!(
             &commands[0],
             EditorCommand::SelectField { field_name, .. } if field_name == "position"
         ));
+        let deltas = handle.world_deltas_for_mouse_delta(18, -12);
+        assert_eq!(deltas.len(), 2);
     }
 
     #[test]
-    fn rotate_gizmo_selects_rotation_euler_field() {
+    fn rotate_gizmo_is_pickable_from_ring_segments() {
         let mut host = test_host();
         host.execute(EditorCommand::SelectEntity { entity_id: 1 }).unwrap();
 
@@ -628,18 +1094,33 @@ mod tests {
             None,
         );
 
-        assert!(overlay.gizmo_handles.len() >= 2);
-        let handle = overlay.gizmo_handles[0];
-        let commands = handle.activation_commands();
+        let ring_handle = overlay.gizmo_handles.first().unwrap();
+        let (sample_x, sample_y, drag_dx, drag_dy) = match &ring_handle.shape {
+            EditorViewportHandleShape::Ring { segments, .. } => {
+                let segment = segments.first().unwrap();
+                (
+                    ((segment.start[0] + segment.end[0]) * 0.5) as i32,
+                    ((segment.start[1] + segment.end[1]) * 0.5) as i32,
+                    ((segment.end[0] - segment.start[0]) * 4.0).round() as i32,
+                    ((segment.end[1] - segment.start[1]) * 4.0).round() as i32,
+                )
+            }
+            other => panic!("expected ring handle, got {other:?}"),
+        };
+
+        let picked = overlay.pick_gizmo_handle(sample_x, sample_y).unwrap();
+        let commands = picked.activation_commands();
         assert!(matches!(
             &commands[0],
             EditorCommand::SelectField { field_name, .. } if field_name == "rotation_euler_deg"
         ));
-        assert!(handle.world_delta_for_mouse_delta(10, 0).is_some());
+        assert_eq!(picked.field_name(), "rotation_euler_deg");
+        assert_eq!(picked.mode, EditorViewportGizmoMode::Rotate);
+        assert!(picked.world_deltas_for_mouse_delta(drag_dx, drag_dy).len() <= 1);
     }
 
     #[test]
-    fn scale_gizmo_selects_scale_field() {
+    fn scale_gizmo_includes_plane_handles_and_hover_feedback() {
         let mut host = test_host();
         host.execute(EditorCommand::SelectEntity { entity_id: 1 }).unwrap();
 
@@ -654,12 +1135,13 @@ mod tests {
             None,
         );
 
-        let handle = overlay.gizmo_handles[0];
-        let commands = handle.activation_commands();
-        assert!(matches!(
-            &commands[0],
-            EditorCommand::SelectField { field_name, .. } if field_name == "scale"
-        ));
+        assert!(
+            overlay
+                .gizmo_handles
+                .iter()
+                .any(|handle| handle.secondary_axis.is_some()),
+            "scale mode should expose plane handles"
+        );
         assert!(!overlay.quads.is_empty(), "hover feedback should add outline quads");
     }
 }
