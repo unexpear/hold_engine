@@ -19,15 +19,6 @@ use hold::prelude::*;
 
 // -- Components ---------------------------------------------------------------
 
-struct AngularVelocity {
-    y: f32,
-    x: f32,
-}
-
-struct DemoPlayState {
-    is_playing: bool,
-}
-
 struct DemoRuntime {
     model_entity: Entity,
     player_entity: Entity,
@@ -66,14 +57,6 @@ fn sync_first_person_camera(world: &mut World, cam_entity: Entity, player: &Play
         let eye = player.eye_position();
         camera.view = Mat4::look_at(eye, eye + forward, Vec3::Y);
     }
-}
-
-fn demo_is_playing(world: &World) -> bool {
-    world
-        .query::<DemoPlayState>()
-        .map(|(_, state)| state.is_playing)
-        .next()
-        .unwrap_or(true)
 }
 
 fn load_demo_scene_snapshot() -> Result<SceneData, String> {
@@ -121,9 +104,24 @@ fn build_demo_runtime(
         return Err("Scene camera setup requires 'camera' to be the active camera.".into());
     }
 
-    let state_entity = world.spawn();
-    world.add_component(state_entity, DemoPlayState { is_playing });
-    world.add_component(model_entity, AngularVelocity { y: 1.2, x: 0.4 });
+    if is_playing {
+        world.add_component(
+            model_entity,
+            Velocity::from_angular(Vec3::new(0.4, 1.2, 0.0)),
+        );
+    }
+
+    let emitter_entity = world.spawn();
+    let emitter_origin = world
+        .get::<Transform>(model_entity)
+        .map(|transform| transform.position + Vec3::new(0.0, 1.6, 0.0))
+        .unwrap_or(Vec3::new(0.0, 1.6, 0.0));
+    world.add_component(emitter_entity, Transform::from_position(emitter_origin));
+    world.add_component(
+        emitter_entity,
+        ParticleEmitter::spark_fountain().with_emitting(is_playing),
+    );
+
     world.add_component(
         cam_entity,
         CameraMode::ThirdPerson {
@@ -155,31 +153,6 @@ fn rebuild_demo_world(scene: &SceneData, is_playing: bool) -> Result<(World, Dem
 
 fn new_demo_terrain() -> LodTerrain {
     LodTerrain::new(Heightmap::default(), 3, Color::rgb(0.3, 0.55, 0.25))
-}
-
-// -- Systems ------------------------------------------------------------------
-
-struct SpinSystem;
-
-impl System for SpinSystem {
-    fn update(&mut self, world: &mut World, dt: f32) {
-        if !demo_is_playing(world) {
-            return;
-        }
-
-        let entities: Vec<Entity> = world.query::<Transform>().map(|(e, _)| e).collect();
-
-        for entity in entities {
-            let (vy, vx) = match world.get::<AngularVelocity>(entity) {
-                Some(v) => (v.y, v.x),
-                None => continue,
-            };
-            if let Some(t) = world.get_mut::<Transform>(entity) {
-                let delta = Quat::from_euler_xyz(vx * dt, vy * dt, 0.0);
-                t.rotation = (delta * t.rotation).normalize();
-            }
-        }
-    }
 }
 
 // -- Geometry helpers ---------------------------------------------------------
@@ -297,7 +270,9 @@ fn main() {
     );
 
     // -- Systems ------------------------------
-    engine.schedule.add_system(SpinSystem);
+    engine.schedule.add_system(ParticleLifetimeSystem);
+    engine.schedule.add_system(ParticleEmitSystem);
+    engine.schedule.add_system(PhysicsSystem::default());
     engine.schedule.add_system(TransformPropagateSystem);
     engine.schedule.add_system(CameraSystem);
 
@@ -582,5 +557,8 @@ fn main() {
                 );
             }
         }
+
+        let particle_lines = generate_particle_debug_lines(world);
+        renderer.render_debug_lines(&particle_lines, &view_proj);
     });
 }

@@ -14,11 +14,15 @@ pub use change::Mut;
 pub use components::{
     ActiveCamera, ActiveDialogue, Camera, CameraMode, Children, DialogueChoice, DialogueNode,
     DialogueTree, DirectionalLight, GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,
-    Quest, QuestId, QuestLog, QuestObjective, QuestState, Stats, Transform,
+    Particle, ParticleEmitter, ParticleSource, Quest, QuestId, QuestLog, QuestObjective,
+    QuestState, RigidBody, SphereCollider, Stats, Transform, Velocity,
 };
 pub use entity::Entity;
 pub use query::{Query2, Query2Mut, Query3, Query3Mut};
 pub use schedule::SystemSchedule;
 pub use system::System;
-pub use systems::{CameraSystem, TransformPropagateSystem};
+pub use systems::{
+    generate_particle_debug_lines, CameraSystem, ParticleEmitSystem, ParticleLifetimeSystem,
+    PhysicsSystem, TransformPropagateSystem,
+};
 pub use world::World;
