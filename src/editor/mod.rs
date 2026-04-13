@@ -9,6 +9,7 @@ mod host;
 pub mod native_ui;
 pub mod protocol;
 mod session;
+pub mod viewport;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -43,6 +44,7 @@ pub use protocol::{
     EditorProtocolError,
 };
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
+pub use viewport::{build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportOverlay};
 
 /// Basic project metadata and folder layout.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -8,14 +8,14 @@
 use std::path::PathBuf;
 
 use hold::{
-    build_native_ui, decode_editor_event_protocol, encode_editor_command_protocol,
+    build_native_ui, build_viewport_overlay, decode_editor_event_protocol,
+    encode_editor_command_protocol,
     engine::App,
     input::{vk, InputState, MouseButton},
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
     EditorAxis, EditorBridgeServer, EditorCommand, EditorEvent, EditorNativeUiState,
-    EditorPlayState,
-    EditorProtocolError, Engine,
+    EditorPlayState, EditorProtocolError, EditorViewportGizmoHandle, Engine,
 };
 
 const DEFAULT_SCENE: &str = "examples/demo.hsc";
@@ -62,6 +62,13 @@ struct EditorShellApp {
     backend: BackendKind,
     status: String,
     ui_state: EditorNativeUiState,
+    viewport_drag: Option<ViewportDragState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewportDragState {
+    handle: EditorViewportGizmoHandle,
+    residual_delta: f32,
 }
 
 impl EditorShellApp {
@@ -71,6 +78,7 @@ impl EditorShellApp {
             backend,
             status: String::new(),
             ui_state: EditorNativeUiState::default(),
+            viewport_drag: None,
         };
         app.refresh_status();
         app
@@ -119,12 +127,17 @@ impl EditorShellApp {
         );
     }
 
-    fn process_input(&mut self, input: &InputState, width: u32, height: u32) {
+    fn process_input(&mut self, input: &InputState, width: u32, height: u32, vp: &Mat4) {
         let ctrl = input.key(vk::CTRL);
         let shift = input.key(vk::SHIFT);
         let ui = build_native_ui(self.server.host(), width, height, &mut self.ui_state);
+        let viewport = build_viewport_overlay(self.server.host(), vp, width, height);
         let (mx, my) = input.mouse_pos();
         let wheel = input.mouse_wheel();
+
+        if input.mouse_released(MouseButton::Left) {
+            self.viewport_drag = None;
+        }
 
         if wheel.abs() > f32::EPSILON {
             if let Some(panel) = ui.panel_at(mx, my) {
@@ -138,9 +151,43 @@ impl EditorShellApp {
             }
         }
 
+        if let Some(drag) = &mut self.viewport_drag {
+            if self.server.host().play_state() == EditorPlayState::Playing
+                || !input.mouse_button(MouseButton::Left)
+            {
+                self.viewport_drag = None;
+            } else {
+                let (dx, dy) = input.mouse_delta();
+                if let Some(delta) = drag.handle.world_delta_for_mouse_delta(dx, dy) {
+                    let total_delta = drag.residual_delta + delta;
+                    if total_delta.abs() >= 0.0005 {
+                        drag.residual_delta = 0.0;
+                        self.dispatch_silent(EditorCommand::ApplyDelta(total_delta));
+                    } else {
+                        drag.residual_delta = total_delta;
+                    }
+                }
+                return;
+            }
+        }
+
         if input.mouse_pressed(MouseButton::Left) {
             if let Some(commands) = ui.commands_at(mx, my) {
                 self.dispatch_many(commands);
+                return;
+            }
+
+            if let Some(handle) = viewport.pick_gizmo_handle(mx, my) {
+                self.dispatch_many(handle.activation_commands());
+                self.viewport_drag = Some(ViewportDragState {
+                    handle,
+                    residual_delta: 0.0,
+                });
+                return;
+            }
+
+            if let Some(entity_id) = viewport.pick_entity(mx, my) {
+                self.dispatch(EditorCommand::SelectEntity { entity_id });
                 return;
             }
         }
@@ -230,6 +277,10 @@ impl EditorShellApp {
     }
 
     fn dispatch_many(&mut self, commands: Vec<EditorCommand>) {
+        self.dispatch_many_internal(commands, true);
+    }
+
+    fn dispatch_many_internal(&mut self, commands: Vec<EditorCommand>, log: bool) {
         let mut all_events = Vec::new();
         for command in commands {
             match self.dispatch_protocol(command) {
@@ -242,13 +293,21 @@ impl EditorShellApp {
         }
 
         if !all_events.is_empty() {
-            self.handle_events(&all_events);
+            self.handle_events(&all_events, log);
         }
     }
 
     fn dispatch(&mut self, command: EditorCommand) {
+        self.dispatch_internal(command, true);
+    }
+
+    fn dispatch_silent(&mut self, command: EditorCommand) {
+        self.dispatch_internal(command, false);
+    }
+
+    fn dispatch_internal(&mut self, command: EditorCommand, log: bool) {
         match self.dispatch_protocol(command) {
-            Ok(events) => self.handle_events(&events),
+            Ok(events) => self.handle_events(&events, log),
             Err(err) => self.print_error(&err),
         }
     }
@@ -265,47 +324,52 @@ impl EditorShellApp {
             .collect()
     }
 
-    fn handle_events(&mut self, events: &[EditorEvent]) {
+    fn handle_events(&mut self, events: &[EditorEvent], log: bool) {
         for event in events {
-            match event {
-                EditorEvent::SelectionChanged(cursor) => {
-                    let axis = cursor
-                        .axis
-                        .map(|axis| format!(" axis={}", axis))
-                        .unwrap_or_default();
-                    println!(
-                        "[editor] selected entity {} · {} · {}{}",
-                        cursor.entity_id, cursor.component_name, cursor.field_name, axis
-                    );
-                }
-                EditorEvent::FieldEdited { cursor, new_value } => {
-                    println!(
-                        "[editor] {}.{} = {:?}",
-                        cursor.component_name, cursor.field_name, new_value
-                    );
-                }
-                EditorEvent::PlayModeChanged(state) => {
-                    println!("[editor] play state -> {:?}", state);
-                }
-                EditorEvent::PatchApplied => {
-                    println!("[editor] world patched (in-place)");
-                }
-                EditorEvent::PatchRequiresRebuild { reason } => {
-                    println!("[editor] patch requires rebuild: {reason} (press Ctrl+R)");
-                }
-                EditorEvent::WorldRebuilt => {
-                    println!("[editor] world rebuilt");
-                }
-                EditorEvent::Saved => {
-                    println!("[editor] scene saved");
-                }
-                EditorEvent::Reloaded => {
-                    println!("[editor] scene reloaded from source");
+            if log {
+                match event {
+                    EditorEvent::SelectionChanged(cursor) => {
+                        let axis = cursor
+                            .axis
+                            .map(|axis| format!(" axis={}", axis))
+                            .unwrap_or_default();
+                        println!(
+                            "[editor] selected entity {} · {} · {}{}",
+                            cursor.entity_id, cursor.component_name, cursor.field_name, axis
+                        );
+                    }
+                    EditorEvent::FieldEdited { cursor, new_value } => {
+                        println!(
+                            "[editor] {}.{} = {:?}",
+                            cursor.component_name, cursor.field_name, new_value
+                        );
+                    }
+                    EditorEvent::PlayModeChanged(state) => {
+                        println!("[editor] play state -> {:?}", state);
+                    }
+                    EditorEvent::PatchApplied => {
+                        println!("[editor] world patched (in-place)");
+                    }
+                    EditorEvent::PatchRequiresRebuild { reason } => {
+                        println!("[editor] patch requires rebuild: {reason} (press Ctrl+R)");
+                    }
+                    EditorEvent::WorldRebuilt => {
+                        println!("[editor] world rebuilt");
+                    }
+                    EditorEvent::Saved => {
+                        println!("[editor] scene saved");
+                    }
+                    EditorEvent::Reloaded => {
+                        println!("[editor] scene reloaded from source");
+                    }
                 }
             }
         }
+
         self.refresh_status();
-        println!("[editor] {}", self.status);
+        if log {
+            println!("[editor] {}", self.status);
+        }
     }
 
     fn print_error(&self, err: &EditorProtocolError) {
@@ -322,21 +386,26 @@ impl App for EditorShellApp {
         dt: f32,
     ) {
         self.server.host_mut().update_editor_camera(input, dt);
-        self.process_input(input, renderer.width(), renderer.height());
 
         let height = renderer.height().max(1) as f32;
         let aspect = renderer.width() as f32 / height;
+        let input_vp: Mat4 = self.server.host().active_view_proj(EDITOR_FOV_DEG, aspect);
+        self.process_input(input, renderer.width(), renderer.height(), &input_vp);
         let vp: Mat4 = self.server.host().active_view_proj(EDITOR_FOV_DEG, aspect);
 
         renderer.clear(hold::Color::new(0.10, 0.10, 0.12, 1.0));
 
-        let draw_list = hold::generate_draw_list(
+        let mut draw_list = hold::generate_draw_list(
             self.server.host().world(),
             self.server.host().session().last_world_map(),
             self.server.host().session().scene(),
             self.server.host().cursor().as_ref(),
         );
+        let viewport =
+            build_viewport_overlay(self.server.host(), &vp, renderer.width(), renderer.height());
+        draw_list.lines.extend(viewport.debug_lines.iter().copied());
         renderer.render_debug_lines(&draw_list.lines, &vp);
+        renderer.render_screen_quads(&viewport.quads);
 
         let ui = build_native_ui(
             self.server.host(),
@@ -382,6 +451,7 @@ fn main() {
     println!(
         "[editor] Tab/S+Tab=entity  [/]=component  ;/'=field  1/2/3=axis  -/==delta  F7=reload  F8=play  F9=pause  Ctrl+S/P/R=save/patch/rebuild  Esc=quit"
     );
+    println!("[editor] Left-click viewport=select  drag axis handle=move Transform.position");
 
     match args.backend {
         BackendKind::Software => {

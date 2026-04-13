@@ -43,15 +43,15 @@ pub use skybox::Skybox;
 pub use terrain::{Heightmap, Terrain, TerrainChunk};
 
 pub use editor::{
-    apply_scene_document_to_world, build_native_ui, decode_editor_command_protocol,
-    decode_editor_event_protocol, encode_editor_command_protocol, encode_editor_event_protocol,
-    generate_draw_list, load_and_apply_scene_from_hsc, load_and_apply_scene_from_project,
-    load_project, load_scene_doc, load_scene_doc_from_hsc, save_project, save_scene_doc,
-    save_scene_doc_to_hsc, EditorApplyError, EditorAxis, EditorBridgeServer, EditorCamera,
-    EditorCommand, EditorCommandError, EditorDrawList, EditorEntity, EditorEvent,
-    EditorInspectorCursor, EditorIoError, EditorNativeUi, EditorNativeUiState,
-    EditorPipelineError, EditorPlayState, EditorProtocolError, EditorRuntimeHost,
-    EditorSceneSession, EditorSessionError, EditorUiHitRegion, EditorUiPanel,
-    EditorUiPanelRegion, InspectorComponent, InspectorField, InspectorValue, Project,
-    SceneBridgeError, SceneDocument,
+    apply_scene_document_to_world, build_native_ui, build_viewport_overlay,
+    decode_editor_command_protocol, decode_editor_event_protocol, encode_editor_command_protocol,
+    encode_editor_event_protocol, generate_draw_list, load_and_apply_scene_from_hsc,
+    load_and_apply_scene_from_project, load_project, load_scene_doc, load_scene_doc_from_hsc,
+    save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorAxis,
+    EditorBridgeServer, EditorCamera, EditorCommand, EditorCommandError, EditorDrawList,
+    EditorEntity, EditorEvent, EditorInspectorCursor, EditorIoError, EditorNativeUi,
+    EditorNativeUiState, EditorPipelineError, EditorPlayState, EditorProtocolError,
+    EditorRuntimeHost, EditorSceneSession, EditorSessionError, EditorUiHitRegion, EditorUiPanel,
+    EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportOverlay, InspectorComponent,
+    InspectorField, InspectorValue, Project, SceneBridgeError, SceneDocument,
 };
