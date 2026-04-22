@@ -113,7 +113,7 @@ impl DialogueTree {
 ///
 /// Attach to the *player* entity (or whoever is talking).
 /// Game code reads current_node to know which [DialogueNode] to display
-/// and calls [dvance] or [choose] when the player acts.
+/// and calls `advance` or `choose` when the player acts.
 pub struct ActiveDialogue {
     /// Entity that owns the [DialogueTree] we are reading from.
     pub tree_owner: crate::ecs::Entity,

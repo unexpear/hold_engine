@@ -74,12 +74,24 @@ pub fn decode_command(message: &str) -> Result<EditorCommand, EditorProtocolErro
         .ok_or_else(|| invalid_message("missing command kind"))?;
 
     match kind.as_str() {
-        "SelectNextEntity" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextEntity),
-        "SelectPrevEntity" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevEntity),
-        "SelectNextComponent" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextComponent),
-        "SelectPrevComponent" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevComponent),
-        "SelectNextField" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextField),
-        "SelectPrevField" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevField),
+        "SelectNextEntity" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextEntity)
+        }
+        "SelectPrevEntity" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevEntity)
+        }
+        "SelectNextComponent" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextComponent)
+        }
+        "SelectPrevComponent" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevComponent)
+        }
+        "SelectNextField" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectNextField)
+        }
+        "SelectPrevField" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::SelectPrevField)
+        }
         "SetAxis" => {
             expect_len(tokens.as_slice(), 3)?;
             Ok(EditorCommand::SetAxis(parse_axis(&tokens[2])?))
@@ -107,10 +119,7 @@ pub fn encode_event(event: &EditorEvent) -> String {
             cursor.entity_id,
             escape_token(&cursor.component_name),
             escape_token(&cursor.field_name),
-            cursor
-                .axis
-                .map(encode_axis)
-                .unwrap_or_default()
+            cursor.axis.map(encode_axis).unwrap_or_default()
         ),
         EditorEvent::FieldEdited { cursor, new_value } => {
             let mut tokens = vec![
@@ -393,7 +402,10 @@ mod tests {
         for command in commands {
             let encoded = encode_command(&command);
             let decoded = decode_command(&encoded).unwrap();
-            assert_eq!(std::mem::discriminant(&decoded), std::mem::discriminant(&command));
+            assert_eq!(
+                std::mem::discriminant(&decoded),
+                std::mem::discriminant(&command)
+            );
             match (command, decoded) {
                 (EditorCommand::SetAxis(a), EditorCommand::SetAxis(b)) => assert_eq!(a, b),
                 (EditorCommand::ApplyDelta(a), EditorCommand::ApplyDelta(b)) => {

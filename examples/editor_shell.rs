@@ -8,9 +8,8 @@
 use std::path::PathBuf;
 
 use hold::{
-    decode_editor_event_protocol,
+    decode_editor_event_protocol, encode_editor_command_protocol,
     engine::App,
-    encode_editor_command_protocol,
     input::{vk, InputState},
     math::Mat4,
     renderer::{BackendKind, OpenGLRenderer, Renderer, SoftwareRenderer},
@@ -86,7 +85,11 @@ impl EditorShellApp {
             EditorPlayState::Playing => "PLAY",
             EditorPlayState::Paused => "PAUSED",
         };
-        let dirty = if self.server.host().is_dirty() { "*" } else { "" };
+        let dirty = if self.server.host().is_dirty() {
+            "*"
+        } else {
+            ""
+        };
         let sync_state = if self.server.host().world_requires_rebuild() {
             "REBUILD"
         } else {
@@ -317,7 +320,11 @@ fn main() {
         args.backend
     );
 
-    let title = format!("Hold Editor - {} | {:?}", args.scene.display(), args.backend);
+    let title = format!(
+        "Hold Editor - {} | {:?}",
+        args.scene.display(),
+        args.backend
+    );
     let engine = Engine::new(&title, 1280, 720);
     let app = EditorShellApp::new(server, args.backend);
 
@@ -328,12 +335,20 @@ fn main() {
 
     match args.backend {
         BackendKind::Software => {
-            let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
+            let (hwnd, w, h) = (
+                engine.window.hwnd,
+                engine.window.width(),
+                engine.window.height(),
+            );
             let renderer = SoftwareRenderer::new(hwnd, w, h);
             engine.run_app(renderer, app);
         }
         BackendKind::OpenGL => {
-            let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
+            let (hwnd, w, h) = (
+                engine.window.hwnd,
+                engine.window.width(),
+                engine.window.height(),
+            );
             let renderer = OpenGLRenderer::new(hwnd, w, h);
             engine.run_app(renderer, app);
         }

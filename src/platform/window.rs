@@ -17,8 +17,8 @@ pub enum Event {
 }
 
 thread_local! {
-    static PENDING: RefCell<Vec<Event>> = RefCell::new(Vec::new());
-    static CLOSE_REQUESTED: RefCell<bool> = RefCell::new(false);
+    static PENDING: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    static CLOSE_REQUESTED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 fn push_event(e: Event) {

@@ -69,7 +69,7 @@ fn build_demo_runtime(
     scene: &SceneData,
     is_playing: bool,
 ) -> Result<DemoRuntime, String> {
-    let entity_map = spawn_scene(world, &scene)
+    let entity_map = spawn_scene(world, scene)
         .map_err(|err| format!("Error spawning '{}': {}", DEMO_SCENE_PATH, err))?;
 
     let model_entity = entity_map.get("model").copied().ok_or_else(|| {
@@ -179,9 +179,9 @@ fn compute_vertex_normals(verts: &[Vec3], faces: &[[usize; 3]]) -> Vec<Vec3> {
 
     for face in faces {
         let n = face_normal(verts[face[0]], verts[face[1]], verts[face[2]]);
-        normals[face[0]] = normals[face[0]] + Vec3::new(n.x, n.y, n.z);
-        normals[face[1]] = normals[face[1]] + Vec3::new(n.x, n.y, n.z);
-        normals[face[2]] = normals[face[2]] + Vec3::new(n.x, n.y, n.z);
+        normals[face[0]] += Vec3::new(n.x, n.y, n.z);
+        normals[face[1]] += Vec3::new(n.x, n.y, n.z);
+        normals[face[2]] += Vec3::new(n.x, n.y, n.z);
     }
 
     for n in &mut normals {
@@ -300,9 +300,9 @@ fn main() {
             let mut normals = vec![Vec3::ZERO; v.len()];
             for face in &f {
                 let n = face_normal(v[face[0]], v[face[1]], v[face[2]]);
-                normals[face[0]] = normals[face[0]] + Vec3::new(n.x, n.y, n.z);
-                normals[face[1]] = normals[face[1]] + Vec3::new(n.x, n.y, n.z);
-                normals[face[2]] = normals[face[2]] + Vec3::new(n.x, n.y, n.z);
+                normals[face[0]] += Vec3::new(n.x, n.y, n.z);
+                normals[face[1]] += Vec3::new(n.x, n.y, n.z);
+                normals[face[2]] += Vec3::new(n.x, n.y, n.z);
             }
             for n in &mut normals {
                 *n = n.normalize();

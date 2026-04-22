@@ -67,7 +67,10 @@ pub struct ParticleLifetimeSystem;
 
 impl System for ParticleLifetimeSystem {
     fn update(&mut self, world: &mut World, dt: f32) {
-        let particles: Vec<Entity> = world.query::<Particle>().map(|(entity, _)| entity).collect();
+        let particles: Vec<Entity> = world
+            .query::<Particle>()
+            .map(|(entity, _)| entity)
+            .collect();
         let mut expired = Vec::new();
 
         for entity in particles {
@@ -90,7 +93,10 @@ pub fn generate_particle_debug_lines(world: &World) -> Vec<DebugLine> {
     let mut lines = Vec::new();
 
     for (entity, particle) in world.query::<Particle>() {
-        let Some(position) = world.get::<Transform>(entity).map(|transform| transform.position) else {
+        let Some(position) = world
+            .get::<Transform>(entity)
+            .map(|transform| transform.position)
+        else {
             continue;
         };
 
@@ -140,7 +146,9 @@ fn sample_particle(
     let spread = emitter.sample_in_unit_sphere() * emitter.spread.max(0.0);
     let local_dir = (base_dir + spread).normalize();
     let world_dir = rotation.rotate_vec3(local_dir);
-    let speed = emitter.sample_range(emitter.speed_min, emitter.speed_max).max(0.0);
+    let speed = emitter
+        .sample_range(emitter.speed_min, emitter.speed_max)
+        .max(0.0);
     let lifetime = emitter
         .sample_range(emitter.lifetime_min, emitter.lifetime_max)
         .max(0.05);

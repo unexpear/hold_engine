@@ -218,8 +218,8 @@ impl VulkanRenderer {
                 sType: VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
                 pNext: null_mut(),
                 flags: 0,
-                hinstance: hinstance as *mut c_void,
-                hwnd: hwnd as *mut c_void,
+                hinstance,
+                hwnd,
             };
             let mut surface: VkSurfaceKHR = 0;
             let r = create_win32_surface(instance, &surf_ci, null_mut(), &mut surface);
@@ -464,7 +464,7 @@ impl VulkanRenderer {
             };
 
             let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
-            for i in 0..FRAMES_IN_FLIGHT {
+            for &cmd_buf in cmd_bufs.iter().take(FRAMES_IN_FLIGHT) {
                 let mut img_avail: VkSemaphore = 0;
                 let mut render_done: VkSemaphore = 0;
                 let mut fence: VkFence = 0;
@@ -475,7 +475,7 @@ impl VulkanRenderer {
                     image_available: img_avail,
                     render_finished: render_done,
                     in_flight: fence,
-                    cmd_buf: cmd_bufs[i],
+                    cmd_buf,
                 });
             }
 
@@ -730,6 +730,7 @@ impl Drop for VulkanRenderer {
 
 // ── Private helper functions ──────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn create_swapchain_objects(
     vk: &Vk,
     phys: VkPhysicalDevice,

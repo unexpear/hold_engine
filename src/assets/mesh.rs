@@ -26,7 +26,7 @@ pub struct Vertex {
 /// CPU-side mesh: vertex buffer + u32 index buffer ready to upload to the GPU.
 ///
 /// Create via [`MeshData::from_obj`] or [`MeshData::from_raw`], then call
-/// `renderer.upload_mesh(&mesh)` to get a drawable [`GpuMesh`].
+/// `renderer.upload_mesh(&mesh)` to get a drawable [`super::GpuMesh`].
 pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,

@@ -318,7 +318,7 @@ impl<'a> Parser<'a> {
             Some(Token::Str(s)) => Ok(s.to_owned()),
             _ => Err(SceneError::new(
                 self.line(),
-                format!("expected quoted string, got unexpected token"),
+                "expected quoted string, got unexpected token".to_string(),
             )),
         }
     }
@@ -328,7 +328,7 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) => Ok(()),
             _ => Err(SceneError::new(
                 self.line(),
-                format!("expected '{{', got unexpected token"),
+                "expected '{', got unexpected token".to_string(),
             )),
         }
     }
@@ -338,7 +338,7 @@ impl<'a> Parser<'a> {
             Some(Token::Number(n)) => Ok(n),
             _ => Err(SceneError::new(
                 self.line(),
-                format!("expected number, got unexpected token"),
+                "expected number, got unexpected token".to_string(),
             )),
         }
     }
@@ -397,7 +397,7 @@ impl<'a> Parser<'a> {
                             "stats" => def.stats = Some(self.parse_stats()?),
                             "parent" => def.parent_name = Some(self.expect_str()?),
                             _ => {
-                                return Err(SceneError::new(_ln, format!("unknown component")));
+                                return Err(SceneError::new(_ln, "unknown component".to_string()));
                             }
                         }
                     }
@@ -405,7 +405,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     return Err(SceneError::new(
                         _ln,
-                        format!("expected component or '}}', got unexpected token"),
+                        "expected component or '}', got unexpected token".to_string(),
                     ));
                 }
             }
@@ -469,7 +469,7 @@ impl<'a> Parser<'a> {
                             _ => {
                                 return Err(SceneError::new(
                                     _ln,
-                                    format!("unknown transform field"),
+                                    "unknown transform field".to_string(),
                                 ));
                             }
                         }
@@ -478,7 +478,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     return Err(SceneError::new(
                         _ln,
-                        format!("expected field or '}}', got unexpected token"),
+                        "expected field or '}', got unexpected token".to_string(),
                     ));
                 }
             }
@@ -510,7 +510,10 @@ impl<'a> Parser<'a> {
                             "near" => c.near = self.expect_number()?,
                             "far" => c.far = self.expect_number()?,
                             _other => {
-                                return Err(SceneError::new(_ln, format!("unknown camera field")));
+                                return Err(SceneError::new(
+                                    _ln,
+                                    "unknown camera field".to_string(),
+                                ));
                             }
                         }
                     }
@@ -518,7 +521,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     return Err(SceneError::new(
                         _ln,
-                        format!("expected field or '}}', got unexpected token"),
+                        "expected field or '}', got unexpected token".to_string(),
                     ));
                 }
             }
@@ -563,7 +566,10 @@ impl<'a> Parser<'a> {
                             "intensity" => l.intensity = self.expect_number()?,
                             "ambient" => l.ambient = self.expect_number()?,
                             _ => {
-                                return Err(SceneError::new(_ln, format!("unknown light field")));
+                                return Err(SceneError::new(
+                                    _ln,
+                                    "unknown light field".to_string(),
+                                ));
                             }
                         }
                     }
@@ -571,7 +577,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     return Err(SceneError::new(
                         _ln,
-                        format!("expected field or '}}', got unexpected token"),
+                        "expected field or '}', got unexpected token".to_string(),
                     ));
                 }
             }
@@ -607,7 +613,10 @@ impl<'a> Parser<'a> {
                             "defense" => s.defense = self.expect_number()?,
                             "speed" => s.speed = self.expect_number()?,
                             _other => {
-                                return Err(SceneError::new(_ln, format!("unknown stats field")));
+                                return Err(SceneError::new(
+                                    _ln,
+                                    "unknown stats field".to_string(),
+                                ));
                             }
                         }
                     }
@@ -615,7 +624,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     return Err(SceneError::new(
                         _ln,
-                        format!("expected field or '}}', got unexpected token"),
+                        "expected field or '}', got unexpected token".to_string(),
                     ));
                 }
             }

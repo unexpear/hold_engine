@@ -187,8 +187,16 @@ unsafe fn compile_gl_program(gl: &GlFns, vert_src: &str, frag_src: &str) -> GLui
         let mut log_len: GLint = 0;
         (gl.get_programiv)(program, GL_INFO_LOG_LENGTH, &mut log_len);
         let mut log = vec![0u8; log_len as usize];
-        (gl.get_program_info_log)(program, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
-        panic!("[GL] Line program link error:\n{}", String::from_utf8_lossy(&log));
+        (gl.get_program_info_log)(
+            program,
+            log_len,
+            null_mut(),
+            log.as_mut_ptr() as *mut GLchar,
+        );
+        panic!(
+            "[GL] Line program link error:\n{}",
+            String::from_utf8_lossy(&log)
+        );
     }
 
     (gl.delete_shader)(vert);
@@ -210,8 +218,16 @@ unsafe fn compile_gl_stage(gl: &GlFns, kind: GLenum, src: &str) -> GLuint {
         (gl.get_shaderiv)(shader, GL_INFO_LOG_LENGTH, &mut log_len);
         let mut log = vec![0u8; log_len as usize];
         (gl.get_shader_info_log)(shader, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
-        let stage = if kind == GL_VERTEX_SHADER { "vertex" } else { "fragment" };
-        panic!("[GL] {} shader compile error:\n{}", stage, String::from_utf8_lossy(&log));
+        let stage = if kind == GL_VERTEX_SHADER {
+            "vertex"
+        } else {
+            "fragment"
+        };
+        panic!(
+            "[GL] {} shader compile error:\n{}",
+            stage,
+            String::from_utf8_lossy(&log)
+        );
     }
     shader
 }
@@ -487,6 +503,7 @@ pub struct OpenGLRenderer {
 
 impl OpenGLRenderer {
     /// Create a WGL context on `hwnd`. Panics if the driver doesn't support GL.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
         unsafe {
             let hdc = GetDC(hwnd);
@@ -544,8 +561,15 @@ impl OpenGLRenderer {
             (gl.bind_buffer)(GL_ARRAY_BUFFER, line_vbo);
 
             let stride = 7_i32 * 4; // 28 bytes
-            // location 0 — position (vec3, offset 0)
-            (gl.vertex_attrib_pointer)(0, 3, GL_FLOAT, GL_FALSE, stride, 0 as *const c_void);
+                                    // location 0 — position (vec3, offset 0)
+            (gl.vertex_attrib_pointer)(
+                0,
+                3,
+                GL_FLOAT,
+                GL_FALSE,
+                stride,
+                std::ptr::null::<c_void>(),
+            );
             (gl.enable_vertex_attrib_array)(0);
             // location 1 — colour (vec4, offset 12)
             (gl.vertex_attrib_pointer)(1, 4, GL_FLOAT, GL_FALSE, stride, 12 as *const c_void);
@@ -601,7 +625,7 @@ impl OpenGLRenderer {
             (gl.bind_buffer)(GL_ARRAY_BUFFER, vbo);
             (gl.buffer_data)(
                 GL_ARRAY_BUFFER,
-                (vertices.len() * std::mem::size_of::<Vertex>()) as GLsizeiptr,
+                std::mem::size_of_val(vertices) as GLsizeiptr,
                 vertices.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
@@ -610,7 +634,7 @@ impl OpenGLRenderer {
             (gl.bind_buffer)(GL_ELEMENT_ARRAY_BUFFER, ebo);
             (gl.buffer_data)(
                 GL_ELEMENT_ARRAY_BUFFER,
-                (indices.len() * std::mem::size_of::<u32>()) as GLsizeiptr,
+                std::mem::size_of_val(indices) as GLsizeiptr,
                 indices.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
@@ -618,7 +642,14 @@ impl OpenGLRenderer {
             let stride = std::mem::size_of::<Vertex>() as GLsizei; // 32 bytes
 
             // location 0 — position (vec3, byte offset 0)
-            (gl.vertex_attrib_pointer)(0, 3, GL_FLOAT, GL_FALSE, stride, 0 as *const c_void);
+            (gl.vertex_attrib_pointer)(
+                0,
+                3,
+                GL_FLOAT,
+                GL_FALSE,
+                stride,
+                std::ptr::null::<c_void>(),
+            );
             (gl.enable_vertex_attrib_array)(0);
 
             // location 1 — normal (vec3, byte offset 12)
@@ -777,6 +808,7 @@ impl OpenGLRenderer {
     /// - `light_dir`   — world-space directional light direction
     /// - `view_pos`    — camera world-space position (for specular; ignored by flat shaders)
     /// - `ambient`     — ambient light intensity 0..1 (ignored by flat shaders)
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_vao(
         &mut self,
         vao: u32,
@@ -911,6 +943,7 @@ impl OpenGLRenderer {
     ///
     /// Binds `texture` to unit 0, sets `u_texture`, then sets the same
     /// uniforms as [`draw_vao`](Self::draw_vao).  Uniform locations are cached.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_mesh_textured(
         &mut self,
         mesh: &GpuMesh,
@@ -1039,6 +1072,7 @@ impl OpenGLRenderer {
     /// Draw a [`GpuMesh`] with a compiled shader program.
     ///
     /// Forwards all parameters to [`draw_vao`](Self::draw_vao).
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_mesh(
         &mut self,
         mesh: &GpuMesh,
@@ -1111,12 +1145,22 @@ impl Renderer for OpenGLRenderer {
         let mut verts: Vec<f32> = Vec::with_capacity(lines.len() * 14);
         for line in lines {
             verts.extend_from_slice(&[
-                line.start.x, line.start.y, line.start.z,
-                line.color.r, line.color.g, line.color.b, line.color.a,
+                line.start.x,
+                line.start.y,
+                line.start.z,
+                line.color.r,
+                line.color.g,
+                line.color.b,
+                line.color.a,
             ]);
             verts.extend_from_slice(&[
-                line.end.x, line.end.y, line.end.z,
-                line.color.r, line.color.g, line.color.b, line.color.a,
+                line.end.x,
+                line.end.y,
+                line.end.z,
+                line.color.r,
+                line.color.g,
+                line.color.b,
+                line.color.a,
             ]);
         }
 
@@ -1135,10 +1179,8 @@ impl Renderer for OpenGLRenderer {
             (gl.use_program)(self.line_program);
 
             // Upload VP matrix.
-            let u_vp = (gl.get_uniform_location)(
-                self.line_program,
-                b"u_vp\0".as_ptr() as *const GLchar,
-            );
+            let u_vp =
+                (gl.get_uniform_location)(self.line_program, c"u_vp".as_ptr() as *const GLchar);
             if u_vp >= 0 {
                 (gl.uniform_matrix4fv)(u_vp, 1, GL_FALSE, vp.cols.as_ptr() as *const GLfloat);
             }

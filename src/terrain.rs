@@ -146,9 +146,9 @@ impl TerrainChunk {
             let e1 = b - a;
             let e2 = c - a;
             let fn_ = e1.cross(e2); // un-normalized = area-weighted
-            normals[face[0]] = normals[face[0]] + fn_;
-            normals[face[1]] = normals[face[1]] + fn_;
-            normals[face[2]] = normals[face[2]] + fn_;
+            normals[face[0]] += fn_;
+            normals[face[1]] += fn_;
+            normals[face[2]] += fn_;
         }
         for n in &mut normals {
             *n = n.normalize();

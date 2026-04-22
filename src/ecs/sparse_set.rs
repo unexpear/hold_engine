@@ -14,13 +14,13 @@ const MAX_ENTITY_INDEX: usize = 4_000_000;
 /// Layout
 /// ------
 /// * `sparse`        — indexed by `entity.index`; value is the position in `dense`
-///                     (or `ABSENT` if not present).
+///   (or `ABSENT` if not present).
 /// * `dense`         — tightly packed component values; cache-friendly for iteration.
 /// * `entities`      — parallel to `dense`; maps a dense index back to its Entity.
 /// * `added_ticks`   — parallel to `dense`; the world tick when the component was
-///                     first attached to that entity.
+///   first attached to that entity.
 /// * `changed_ticks` — parallel to `dense`; the world tick when the component was
-///                     last written (via [`insert`](Self::insert) or a [`Mut`] deref).
+///   last written (via [`insert`](Self::insert) or a [`Mut`] deref).
 ///
 /// All five arrays are kept in sync on every insert/remove.
 pub struct SparseSet<T> {

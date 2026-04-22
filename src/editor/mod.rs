@@ -5,8 +5,8 @@
 pub mod bridge;
 pub mod command;
 pub mod drawlist;
-pub mod protocol;
 mod host;
+pub mod protocol;
 mod session;
 
 use std::collections::{HashMap, HashSet};
@@ -25,16 +25,16 @@ use crate::scene::{
 };
 
 pub use bridge::EditorBridgeServer;
-pub use command::{EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor};
+pub use command::{
+    EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
+};
 pub use drawlist::{generate_draw_list, EditorDrawList};
+pub use host::{EditorCamera, EditorRuntimeHost};
 pub use protocol::{
-    decode_command as decode_editor_command_protocol,
-    decode_event as decode_editor_event_protocol,
-    encode_command as encode_editor_command_protocol,
-    encode_event as encode_editor_event_protocol,
+    decode_command as decode_editor_command_protocol, decode_event as decode_editor_event_protocol,
+    encode_command as encode_editor_command_protocol, encode_event as encode_editor_event_protocol,
     EditorProtocolError,
 };
-pub use host::{EditorCamera, EditorRuntimeHost};
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
 
 /// Basic project metadata and folder layout.

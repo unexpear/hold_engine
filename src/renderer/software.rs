@@ -15,6 +15,7 @@ pub struct SoftwareRenderer {
 }
 
 impl SoftwareRenderer {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
         let hdc = unsafe { GetDC(hwnd) };
         assert!(!hdc.is_null(), "GetDC failed");
@@ -146,6 +147,7 @@ impl SoftwareRenderer {
         self.rasterize(s0, s1, s2, color);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_triangle_3d_shaded(
         &mut self,
         v0: Vec3,
@@ -205,6 +207,7 @@ impl SoftwareRenderer {
     }
 
     /// Lit 3D triangle with per-pixel normal interpolation and directional light.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_triangle_3d_lit(
         &mut self,
         v0: Vec3,

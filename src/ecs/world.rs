@@ -56,7 +56,7 @@ impl<T: 'static> AnyStorage for SparseSet<T> {
 /// world.events.emit(DamageEvent { target: entity, amount: 10 });
 ///
 /// // Read (same or later system in the same frame):
-/// for ev in world.events.read::<DamageEvent>() { … }
+/// for ev in world.events.read::<DamageEvent>() { /* ... */ }
 /// ```
 ///
 /// Events are cleared at the start of each frame by `Engine::run` (or
@@ -289,7 +289,7 @@ impl World {
     ///
     /// ```ignore
     /// if let Some(q) = world.query2::<Transform, Camera>() {
-    ///     for (entity, transform, camera) in q.iter() { … }
+    ///     for (entity, transform, camera) in q.iter() { /* ... */ }
     /// }
     /// ```
     pub fn query2<A: 'static, B: 'static>(&self) -> Option<Query2<'_, A, B>> {
@@ -391,23 +391,23 @@ impl World {
     /// Iterate entities that have `A` and **also** carry `B` (without reading `B`).
     ///
     /// ```ignore
-    /// for (entity, transform) in world.query_with::<Transform, ActiveCamera>() { … }
+    /// for (entity, transform) in world.query_with::<Transform, ActiveCamera>() { /* ... */ }
     /// ```
     pub fn query_with<A: 'static, B: 'static>(&self) -> impl Iterator<Item = (Entity, &A)> + '_ {
         let b_set = self.storage_ref::<B>();
         self.query::<A>()
-            .filter(move |(e, _)| b_set.map_or(false, |s| s.contains(*e)))
+            .filter(move |(e, _)| b_set.is_some_and(|s| s.contains(*e)))
     }
 
     /// Iterate entities that have `A` but do **not** carry `B`.
     ///
     /// ```ignore
-    /// for (entity, transform) in world.query_without::<Transform, Parent>() { … }
+    /// for (entity, transform) in world.query_without::<Transform, Parent>() { /* ... */ }
     /// ```
     pub fn query_without<A: 'static, B: 'static>(&self) -> impl Iterator<Item = (Entity, &A)> + '_ {
         let b_set = self.storage_ref::<B>();
         self.query::<A>()
-            .filter(move |(e, _)| b_set.map_or(true, |s| !s.contains(*e)))
+            .filter(move |(e, _)| b_set.is_none_or(|s| !s.contains(*e)))
     }
 
     // ── Hierarchy helpers ─────────────────────────────────────────────────────

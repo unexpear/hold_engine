@@ -8,16 +8,9 @@ use crate::assets::{AssetPool, Handle};
 /// Maintains one [`AssetPool<T>`] per asset type, stored as type-erased
 /// `Box<dyn Any>` values keyed by [`TypeId`].  All pool access is
 /// zero-overhead when the type is known at the call site.
+#[derive(Default)]
 pub struct AssetStore {
     pools: HashMap<TypeId, Box<dyn Any>>,
-}
-
-impl Default for AssetStore {
-    fn default() -> Self {
-        Self {
-            pools: HashMap::new(),
-        }
-    }
 }
 
 impl AssetStore {

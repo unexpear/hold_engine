@@ -54,7 +54,7 @@ pub enum CameraMode {
         look_sensitivity: f32,
     },
 
-    /// Eye orbits \	arget\ at \distance\ metres, steered by \yaw\/\pitch\.
+    /// Eye orbits \target\ at \distance\ metres, steered by \yaw\/\pitch\.
     ///
     /// * \yaw\   — horizontal angle in radians (0 = behind the target on +Z axis)
     /// * \pitch\ — vertical angle in radians   (0 = level, clamped to avoid flip)

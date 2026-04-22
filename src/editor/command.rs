@@ -3,8 +3,8 @@
 //! The shell (or any future bridge) sends [`EditorCommand`] values to
 //! [`super::host::EditorRuntimeHost::execute`] and receives [`EditorEvent`]
 //! payloads in return.  All types use editor entity IDs, component names,
-//! field names, and primitive values — no ECS [`Entity`] handles, renderer
-//! objects, or platform types are exposed through this surface.
+//! field names, and primitive values — no ECS [`crate::ecs::Entity`] handles,
+//! renderer objects, or platform types are exposed through this surface.
 
 use super::{EditorPlayState, EditorSessionError, InspectorValue};
 
@@ -48,7 +48,7 @@ pub struct EditorInspectorCursor {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-/// Commands sent to [`EditorRuntimeHost::execute`] by the shell or any bridge.
+/// Commands sent to [`super::host::EditorRuntimeHost::execute`] by the shell or any bridge.
 ///
 /// Commands map 1:1 to key bindings (documented in comments) but are
 /// intentionally decoupled from the input layer so tests can drive the host
@@ -96,7 +96,7 @@ pub enum EditorCommand {
 
 // ── Events ────────────────────────────────────────────────────────────────────
 
-/// Events emitted by [`EditorRuntimeHost::execute`].
+/// Events emitted by [`super::host::EditorRuntimeHost::execute`].
 ///
 /// A single command can emit multiple events (e.g. `ApplyDelta` emits
 /// [`FieldEdited`][Self::FieldEdited] plus either [`PatchApplied`][Self::PatchApplied]
@@ -127,7 +127,7 @@ pub enum EditorEvent {
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
-/// Errors that [`EditorRuntimeHost::execute`] can return.
+/// Errors that [`super::host::EditorRuntimeHost::execute`] can return.
 ///
 /// Note that patch-requires-rebuild is an *event*, not an error — it is
 /// expected behaviour when field mutations cause structural changes.
@@ -154,7 +154,10 @@ impl std::fmt::Display for EditorCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedFieldKind { field } => {
-                write!(f, "field '{field}' is not editable (only Number and Vec3 are supported)")
+                write!(
+                    f,
+                    "field '{field}' is not editable (only Number and Vec3 are supported)"
+                )
             }
             Self::UnsupportedCommandState { command, state } => {
                 write!(f, "command '{command}' is not valid in {:?} state", state)
@@ -162,7 +165,10 @@ impl std::fmt::Display for EditorCommandError {
             Self::Session(err) => write!(f, "session error: {err}"),
             Self::NoSelection => write!(f, "no entity is selected"),
             Self::NoField => write!(f, "cursor does not resolve to a valid field"),
-            Self::MissingSourcePath => write!(f, "session has no source path — use save_hsc() with an explicit path"),
+            Self::MissingSourcePath => write!(
+                f,
+                "session has no source path — use save_hsc() with an explicit path"
+            ),
         }
     }
 }

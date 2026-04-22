@@ -184,10 +184,10 @@ pub mod vk {
     pub const KEY_2: u32 = b'2' as u32;
     pub const KEY_3: u32 = b'3' as u32;
     // OEM keys (US layout).
-    pub const MINUS: u32 = 0xBD;     // VK_OEM_MINUS  (-)
-    pub const EQUALS: u32 = 0xBB;    // VK_OEM_PLUS   (=)
-    pub const LBRACKET: u32 = 0xDB;  // VK_OEM_4      ([)
-    pub const RBRACKET: u32 = 0xDD;  // VK_OEM_6      (])
+    pub const MINUS: u32 = 0xBD; // VK_OEM_MINUS  (-)
+    pub const EQUALS: u32 = 0xBB; // VK_OEM_PLUS   (=)
+    pub const LBRACKET: u32 = 0xDB; // VK_OEM_4      ([)
+    pub const RBRACKET: u32 = 0xDD; // VK_OEM_6      (])
     pub const SEMICOLON: u32 = 0xBA; // VK_OEM_1      (;)
     pub const APOSTROPHE: u32 = 0xDE; // VK_OEM_7     (')
 }

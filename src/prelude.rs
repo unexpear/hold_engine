@@ -8,6 +8,7 @@ pub use crate::{
     // Engine core
     engine::{App, Engine},
 
+    generate_particle_debug_lines,
     // Input
     input::{self, vk, InputState, MouseButton},
 
@@ -47,12 +48,6 @@ pub use crate::{
     EventBus,
     EventQueue,
     GlobalTransform,
-    Particle,
-    ParticleEmitter,
-    ParticleEmitSystem,
-    ParticleLifetimeSystem,
-    ParticleSource,
-    PhysicsSystem,
     GpuMesh,
     GpuTexture,
     Handle,
@@ -71,6 +66,12 @@ pub use crate::{
     Mut,
     NodeId,
     Parent,
+    Particle,
+    ParticleEmitSystem,
+    ParticleEmitter,
+    ParticleLifetimeSystem,
+    ParticleSource,
+    PhysicsSystem,
     PlayerController,
     Project,
     Query2,
@@ -102,5 +103,4 @@ pub use crate::{
     Vertex,
     WindowResized,
     World,
-    generate_particle_debug_lines,
 };
