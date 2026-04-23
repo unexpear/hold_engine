@@ -7,7 +7,8 @@
 
 pub mod ffi;
 
-use super::{Color, Renderer};
+use super::{Color, DebugLine, Renderer, ScreenQuad};
+use crate::math::{Mat4, Vec3, Vec4};
 use crate::platform::ffi as win32;
 use ffi::*;
 use std::ffi::c_void;
@@ -78,6 +79,8 @@ struct FrameSync {
 // ── VulkanRenderer ────────────────────────────────────────────────────────────
 
 pub struct VulkanRenderer {
+    hwnd: win32::HWND,
+    hdc: win32::HDC,
     vk: Box<Vk>,
     _lib: win32::HMODULE,
     instance: VkInstance,
@@ -105,12 +108,16 @@ pub struct VulkanRenderer {
     pending_resize: bool,
 
     clear_color: Color,
+    overlay_pixels: Vec<u32>,
 }
 
 impl VulkanRenderer {
     /// Initialise Vulkan from scratch for `hwnd`.  Panics if Vulkan isn't available.
     pub fn new(hwnd: win32::HWND, hinstance: win32::HINSTANCE, width: u32, height: u32) -> Self {
         unsafe {
+            let hdc = win32::GetDC(hwnd);
+            assert!(!hdc.is_null(), "GetDC failed for Vulkan overlay blit");
+
             // ── Load vulkan-1.dll ─────────────────────────────────────────
             let lib_name = win32::wstr("vulkan-1.dll");
             let lib = win32::LoadLibraryW(lib_name.as_ptr());
@@ -480,6 +487,8 @@ impl VulkanRenderer {
             }
 
             VulkanRenderer {
+                hwnd,
+                hdc,
                 vk,
                 _lib: lib,
                 instance,
@@ -503,12 +512,140 @@ impl VulkanRenderer {
                 current_image: 0,
                 pending_resize: false,
                 clear_color: Color::BLACK,
+                overlay_pixels: vec![
+                    Color::BLACK.to_bgra_u32();
+                    (sc_extent.width * sc_extent.height) as usize
+                ],
             }
         }
     }
 
     pub fn current_command_buffer(&self) -> VkCommandBuffer {
         self.frames[self.current_frame].cmd_buf
+    }
+
+    fn clip_to_screen(&self, clip: Vec4) -> (f32, f32, f32) {
+        let inv_w = 1.0 / clip.w;
+        let nx = clip.x * inv_w;
+        let ny = clip.y * inv_w;
+        let nz = clip.z * inv_w;
+        let w = self.sc_extent.width.max(1) as f32;
+        let h = self.sc_extent.height.max(1) as f32;
+        ((nx * 0.5 + 0.5) * w, (1.0 - (ny * 0.5 + 0.5)) * h, nz)
+    }
+
+    fn clear_overlay(&mut self, color: Color) {
+        self.overlay_pixels.fill(color.to_bgra_u32());
+    }
+
+    fn resize_overlay(&mut self) {
+        self.overlay_pixels.resize(
+            (self.sc_extent.width * self.sc_extent.height) as usize,
+            self.clear_color.to_bgra_u32(),
+        );
+        self.clear_overlay(self.clear_color);
+    }
+
+    fn draw_pixel(&mut self, x: i32, y: i32, color: Color) {
+        if x < 0 || y < 0 || x >= self.sc_extent.width as i32 || y >= self.sc_extent.height as i32 {
+            return;
+        }
+        self.overlay_pixels[y as usize * self.sc_extent.width as usize + x as usize] =
+            color.to_bgra_u32();
+    }
+
+    fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            self.draw_pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: Color) {
+        let x0 = x.max(0) as u32;
+        let y0 = y.max(0) as u32;
+        let x1 = (x + w).min(self.sc_extent.width as i32).max(0) as u32;
+        let y1 = (y + h).min(self.sc_extent.height as i32).max(0) as u32;
+        let packed = color.to_bgra_u32();
+        for row in y0..y1 {
+            let base = row as usize * self.sc_extent.width as usize;
+            for col in x0..x1 {
+                self.overlay_pixels[base + col as usize] = packed;
+            }
+        }
+    }
+
+    fn draw_line_3d(&mut self, start: Vec3, end: Vec3, color: Color, vp: &Mat4) {
+        let cs = vp.transform_point(start);
+        let ce = vp.transform_point(end);
+        if cs.w <= 0.0 || ce.w <= 0.0 {
+            return;
+        }
+        let (sx, sy, _) = self.clip_to_screen(cs);
+        let (ex, ey, _) = self.clip_to_screen(ce);
+        self.draw_line(sx as i32, sy as i32, ex as i32, ey as i32, color);
+    }
+
+    fn blit_overlay(&self) {
+        if self.sc_extent.width == 0 || self.sc_extent.height == 0 {
+            return;
+        }
+
+        unsafe {
+            let bmi = win32::BITMAPINFO {
+                bmiHeader: win32::BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<win32::BITMAPINFOHEADER>() as win32::DWORD,
+                    biWidth: self.sc_extent.width as win32::LONG,
+                    biHeight: -(self.sc_extent.height as win32::LONG),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: win32::BI_RGB,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [win32::RGBQUAD {
+                    rgbBlue: 0,
+                    rgbGreen: 0,
+                    rgbRed: 0,
+                    rgbReserved: 0,
+                }],
+            };
+
+            win32::StretchDIBits(
+                self.hdc,
+                0,
+                0,
+                self.sc_extent.width as i32,
+                self.sc_extent.height as i32,
+                0,
+                0,
+                self.sc_extent.width as i32,
+                self.sc_extent.height as i32,
+                self.overlay_pixels.as_ptr() as *const _,
+                &bmi,
+                win32::DIB_RGB_COLORS,
+                win32::SRCCOPY,
+            );
+        }
     }
 
     fn recreate_swapchain(&mut self, width: u32, height: u32) {
@@ -546,6 +683,7 @@ impl VulkanRenderer {
                 &self.sc_views,
                 self.sc_extent,
             );
+            self.resize_overlay();
         }
     }
 
@@ -617,6 +755,7 @@ impl Renderer for VulkanRenderer {
 
     fn clear(&mut self, color: Color) {
         self.clear_color = color;
+        self.clear_overlay(color);
         unsafe {
             let f = &self.frames[self.current_frame];
             let clear_value = VkClearValue {
@@ -694,9 +833,28 @@ impl Renderer for VulkanRenderer {
                     "vkQueuePresentKHR failed: {}",
                     present_result
                 );
+                self.blit_overlay();
             }
 
             self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
+        }
+    }
+
+    fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
+        for line in lines {
+            self.draw_line_3d(line.start, line.end, line.color, vp);
+        }
+    }
+
+    fn render_screen_quads(&mut self, quads: &[ScreenQuad]) {
+        for quad in quads {
+            self.fill_rect(
+                quad.x.round() as i32,
+                quad.y.round() as i32,
+                quad.w.round().max(0.0) as i32,
+                quad.h.round().max(0.0) as i32,
+                quad.color,
+            );
         }
     }
 }
@@ -723,6 +881,7 @@ impl Drop for VulkanRenderer {
             (vk.destroy_surface)(self.instance, self.surface, null_mut());
             (vk.destroy_device)(self.device, null_mut());
             (vk.destroy_instance)(self.instance, null_mut());
+            win32::ReleaseDC(self.hwnd, self.hdc);
             win32::FreeLibrary(self._lib);
         }
     }

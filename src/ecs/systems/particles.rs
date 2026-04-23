@@ -1,9 +1,10 @@
+use crate::assets::MaterialHandle;
 use crate::ecs::components::{
     Particle, ParticleEmitter, ParticleSource, RigidBody, Transform, Velocity,
 };
 use crate::ecs::{Entity, System, World};
 use crate::math::{Quat, Vec3};
-use crate::renderer::DebugLine;
+use crate::renderer::{DebugLine, ParticleBatch, ParticleBillboard};
 
 /// Spawns runtime particle entities from [`ParticleEmitter`] components.
 pub struct ParticleEmitSystem;
@@ -67,7 +68,10 @@ pub struct ParticleLifetimeSystem;
 
 impl System for ParticleLifetimeSystem {
     fn update(&mut self, world: &mut World, dt: f32) {
-        let particles: Vec<Entity> = world.query::<Particle>().map(|(entity, _)| entity).collect();
+        let particles: Vec<Entity> = world
+            .query::<Particle>()
+            .map(|(entity, _)| entity)
+            .collect();
         let mut expired = Vec::new();
 
         for entity in particles {
@@ -90,7 +94,10 @@ pub fn generate_particle_debug_lines(world: &World) -> Vec<DebugLine> {
     let mut lines = Vec::new();
 
     for (entity, particle) in world.query::<Particle>() {
-        let Some(position) = world.get::<Transform>(entity).map(|transform| transform.position) else {
+        let Some(position) = world
+            .get::<Transform>(entity)
+            .map(|transform| transform.position)
+        else {
             continue;
         };
 
@@ -114,6 +121,39 @@ pub fn generate_particle_debug_lines(world: &World) -> Vec<DebugLine> {
     }
 
     lines
+}
+
+/// Build a backend-neutral particle billboard batch from live particle entities.
+pub fn generate_particle_batch(
+    world: &World,
+    material: Option<MaterialHandle>,
+) -> Option<ParticleBatch> {
+    let mut billboards = Vec::new();
+
+    for (entity, particle) in world.query::<Particle>() {
+        let Some(position) = world
+            .get::<Transform>(entity)
+            .map(|transform| transform.position)
+        else {
+            continue;
+        };
+
+        billboards.push(ParticleBillboard {
+            position,
+            size: particle.current_size().max(0.01),
+            color: particle.current_color(),
+        });
+    }
+
+    if billboards.is_empty() {
+        None
+    } else {
+        Some(ParticleBatch {
+            material,
+            billboards,
+            soft_edges: true,
+        })
+    }
 }
 
 struct ParticleSpawn {
@@ -140,7 +180,9 @@ fn sample_particle(
     let spread = emitter.sample_in_unit_sphere() * emitter.spread.max(0.0);
     let local_dir = (base_dir + spread).normalize();
     let world_dir = rotation.rotate_vec3(local_dir);
-    let speed = emitter.sample_range(emitter.speed_min, emitter.speed_max).max(0.0);
+    let speed = emitter
+        .sample_range(emitter.speed_min, emitter.speed_max)
+        .max(0.0);
     let lifetime = emitter
         .sample_range(emitter.lifetime_min, emitter.lifetime_max)
         .max(0.05);
@@ -215,5 +257,22 @@ mod tests {
         }
         assert_eq!(lines[0].start.x, -0.5);
         assert_eq!(lines[0].end.x, 0.5);
+    }
+
+    #[test]
+    fn particle_batch_reflects_particle_color_and_size() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.add_component(entity, Transform::from_position(Vec3::new(2.0, 3.0, 4.0)));
+        let mut particle = Particle::new(1.0, Color::RED, Color::BLUE, 2.0, 0.5);
+        particle.age = 0.5;
+        world.add_component(entity, particle);
+
+        let batch = generate_particle_batch(&world, None).unwrap();
+        assert_eq!(batch.billboards.len(), 1);
+        assert_eq!(batch.billboards[0].position, Vec3::new(2.0, 3.0, 4.0));
+        assert_eq!(batch.billboards[0].color, Color::new(0.5, 0.0, 0.5, 1.0));
+        assert_eq!(batch.billboards[0].size, 1.25);
+        assert!(batch.soft_edges);
     }
 }

@@ -36,8 +36,9 @@ function createChildMorph(parent) {
 }
 
 export class ContextMenu {
-  constructor(renderer) {
+  constructor(renderer, { applyAuthoredChange } = {}) {
     this.renderer = renderer;
+    this.applyAuthoredChange = applyAuthoredChange ?? ((mutator) => mutator());
     this.menu = null;
 
     window.addEventListener("morphic-context", this.handleContext);
@@ -63,24 +64,28 @@ export class ContextMenu {
       {
         label: "Add child",
         action: () => {
-          const child = MorphicRegistry.instance.register(createChildMorph(object));
-          object.addChild(child);
-          this.renderer.select(child);
+          this.applyAuthoredChange(() => {
+            const child = MorphicRegistry.instance.register(createChildMorph(object));
+            object.addChild(child);
+            this.renderer.select(child);
+          });
         },
       },
       {
         label: "Duplicate",
         action: () => {
-          const clone = MorphicObject.fromJSON(object.toJSON(), { preserveIds: false });
-          clone.name = `${object.name} Copy`;
-          clone.move({
-            x: object.position.x + 26,
-            y: object.position.y + 26,
+          this.applyAuthoredChange(() => {
+            const clone = MorphicObject.fromJSON(object.toJSON(), { preserveIds: false });
+            clone.name = `${object.name} Copy`;
+            clone.move({
+              x: object.position.x + 26,
+              y: object.position.y + 26,
+            });
+            const host = object.parent || object;
+            host.addChild(clone);
+            MorphicRegistry.instance.registerTree(clone);
+            this.renderer.select(clone);
           });
-          const host = object.parent || object;
-          host.addChild(clone);
-          MorphicRegistry.instance.registerTree(clone);
-          this.renderer.select(clone);
         },
       },
       ...(object.parent
@@ -88,10 +93,12 @@ export class ContextMenu {
             {
               label: "Delete",
               action: () => {
-                const parent = object.parent;
-                MorphicRegistry.instance.unregisterTree(object);
-                parent.removeChild(object);
-                this.renderer.select(parent);
+                this.applyAuthoredChange(() => {
+                  const parent = object.parent;
+                  MorphicRegistry.instance.unregisterTree(object);
+                  parent.removeChild(object);
+                  this.renderer.select(parent);
+                });
               },
             },
           ]

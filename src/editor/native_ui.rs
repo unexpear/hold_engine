@@ -19,6 +19,10 @@ const PANEL_PAD: i32 = 10;
 const PANEL_BORDER: i32 = 1;
 const HEADER_H: i32 = 22;
 const ROW_H: i32 = 18;
+const HISTORY_PANEL_H: i32 = 164;
+const PALETTE_W: i32 = 560;
+const PALETTE_MAX_ROWS: usize = 8;
+const PALETTE_ROW_H: i32 = 28;
 const STATUS_SCALE: i32 = 1;
 
 const UI_BG: Color = Color::new(0.08, 0.09, 0.10, 1.0);
@@ -37,6 +41,8 @@ const TEXT_PRIMARY: Color = Color::new(0.92, 0.95, 0.98, 1.0);
 const TEXT_MUTED: Color = Color::new(0.65, 0.69, 0.75, 1.0);
 const TEXT_ACCENT: Color = Color::new(0.51, 0.90, 0.58, 1.0);
 const TEXT_WARNING: Color = Color::new(0.98, 0.78, 0.28, 1.0);
+const TEXT_ERROR: Color = Color::new(1.0, 0.48, 0.42, 1.0);
+const TEXT_SUGGESTION: Color = Color::new(0.58, 0.82, 1.0, 1.0);
 
 #[derive(Debug, Clone, Default)]
 pub struct EditorNativeUi {
@@ -82,6 +88,8 @@ impl EditorUiHitRegion {
 pub enum EditorUiPanel {
     Hierarchy,
     Inspector,
+    History,
+    CommandPalette,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +111,7 @@ impl EditorUiPanelRegion {
 pub struct EditorNativeUiState {
     pub hierarchy_scroll: usize,
     pub inspector_scroll: usize,
+    pub history_scroll: usize,
 }
 
 impl EditorNativeUiState {
@@ -110,6 +119,8 @@ impl EditorNativeUiState {
         let scroll = match panel {
             EditorUiPanel::Hierarchy => &mut self.hierarchy_scroll,
             EditorUiPanel::Inspector => &mut self.inspector_scroll,
+            EditorUiPanel::History => &mut self.history_scroll,
+            EditorUiPanel::CommandPalette => return,
         };
 
         if lines < 0 {
@@ -120,11 +131,52 @@ impl EditorNativeUiState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorUiActionTone {
+    Command,
+    Event,
+    Error,
+    Suggestion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorUiActionLogEntry {
+    pub label: String,
+    pub detail: String,
+    pub tone: EditorUiActionTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorUiPaletteEntrySource {
+    BuiltIn,
+    Suggested,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorUiPaletteEntry {
+    pub title: String,
+    pub detail: String,
+    pub source: EditorUiPaletteEntrySource,
+    pub enabled: bool,
+    pub commands: Vec<EditorCommand>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorUiCommandPalette {
+    pub query: String,
+    pub helper_text: String,
+    pub empty_text: String,
+    pub entries: Vec<EditorUiPaletteEntry>,
+    pub selected_index: usize,
+}
+
 pub fn build_native_ui(
     host: &EditorRuntimeHost,
     width: u32,
     height: u32,
     state: &mut EditorNativeUiState,
+    history: &[EditorUiActionLogEntry],
+    palette: Option<&EditorUiCommandPalette>,
 ) -> EditorNativeUi {
     let mut ui = EditorNativeUi::default();
     let width = width as i32;
@@ -135,8 +187,13 @@ pub fn build_native_ui(
     let right_x = (width - inspector_w).max(hierarchy_w + 24);
     let panel_top = TOOLBAR_H;
     let panel_h = (height - TOOLBAR_H - STATUS_H).max(120);
+    let history_x = hierarchy_w + PANEL_PAD;
+    let history_w = (right_x - history_x - PANEL_PAD).max(220);
+    let history_h = HISTORY_PANEL_H.min((panel_h / 2).max(120));
+    let history_y = (height - STATUS_H - history_h - PANEL_PAD).max(panel_top + 16);
     let hierarchy_view_rows = panel_visible_rows(panel_h);
     let inspector_view_rows = panel_visible_rows(panel_h);
+    let history_view_rows = panel_visible_rows(history_h);
     let (hierarchy_rows, selected_hierarchy_row) = collect_hierarchy_rows(host);
     let (inspector_rows, selected_inspector_row) = collect_inspector_rows(host);
 
@@ -152,11 +209,15 @@ pub fn build_native_ui(
         inspector_rows.len(),
         inspector_view_rows,
     );
+    state.history_scroll = state
+        .history_scroll
+        .min(history.len().saturating_sub(history_view_rows));
 
     fill_rect(&mut ui, 0, 0, width, height, UI_BG);
     draw_toolbar(&mut ui, host, width);
     draw_panel(&mut ui, 0, panel_top, hierarchy_w, panel_h);
     draw_panel(&mut ui, right_x, panel_top, inspector_w, panel_h);
+    draw_panel(&mut ui, history_x, history_y, history_w, history_h);
     ui.panel_regions.push(EditorUiPanelRegion {
         panel: EditorUiPanel::Hierarchy,
         x: 0,
@@ -170,6 +231,13 @@ pub fn build_native_ui(
         y: panel_top,
         w: inspector_w,
         h: panel_h,
+    });
+    ui.panel_regions.push(EditorUiPanelRegion {
+        panel: EditorUiPanel::History,
+        x: history_x,
+        y: history_y,
+        w: history_w,
+        h: history_h,
     });
     draw_status(&mut ui, host, width, height);
     draw_hierarchy(
@@ -192,6 +260,18 @@ pub fn build_native_ui(
         inspector_w,
         panel_h,
     );
+    draw_history(
+        &mut ui,
+        history,
+        state.history_scroll,
+        history_x,
+        history_y,
+        history_w,
+        history_h,
+    );
+    if let Some(palette) = palette {
+        draw_command_palette(&mut ui, palette, width, height);
+    }
 
     ui
 }
@@ -211,6 +291,26 @@ fn draw_toolbar(ui: &mut EditorNativeUi, host: &EditorRuntimeHost, width: i32) {
         host.is_dirty(),
         play_state == EditorPlayState::Editing,
         vec![EditorCommand::Save],
+        false,
+    );
+    x = push_button(
+        ui,
+        x,
+        y,
+        "UNDO",
+        host.can_undo(),
+        play_state == EditorPlayState::Editing && host.can_undo(),
+        vec![EditorCommand::Undo],
+        false,
+    );
+    x = push_button(
+        ui,
+        x,
+        y,
+        "REDO",
+        host.can_redo(),
+        play_state == EditorPlayState::Editing && host.can_redo(),
+        vec![EditorCommand::Redo],
         false,
     );
     x = push_button(
@@ -316,8 +416,13 @@ struct HierarchyRow {
 
 #[derive(Debug, Clone)]
 enum InspectorRow {
-    Message { label: String, color: Color },
-    Title { label: String },
+    Message {
+        label: String,
+        color: Color,
+    },
+    Title {
+        label: String,
+    },
     Component {
         entity_id: u64,
         component_name: String,
@@ -581,6 +686,254 @@ fn draw_inspector(
     let _ = host;
 }
 
+fn draw_history(
+    ui: &mut EditorNativeUi,
+    history: &[EditorUiActionLogEntry],
+    scroll: usize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) {
+    let inner_x = x + PANEL_PAD;
+    let inner_w = w - PANEL_PAD * 2;
+    let header_y = y + PANEL_PAD;
+    let visible_rows = panel_visible_rows(h);
+    let max_scroll = history.len().saturating_sub(visible_rows);
+    let start = scroll.min(max_scroll);
+
+    fill_rect(ui, inner_x, header_y, inner_w, HEADER_H, HEADER_BG);
+    draw_text(
+        ui,
+        inner_x + 8,
+        header_y + 5,
+        1,
+        "ACTION HISTORY",
+        TEXT_PRIMARY,
+    );
+    draw_text(
+        ui,
+        inner_x + inner_w
+            - text_pixel_width(&format!("{}/{}", history.len(), history.len()), 1)
+            - 8,
+        header_y + 5,
+        1,
+        &format!("{}/{}", history.len().saturating_sub(start), history.len()),
+        TEXT_MUTED,
+    );
+
+    if history.is_empty() {
+        draw_text(
+            ui,
+            inner_x + 8,
+            header_y + HEADER_H + 8,
+            1,
+            "NO COMMANDS YET",
+            TEXT_MUTED,
+        );
+        return;
+    }
+
+    let row_step = ROW_H + 2;
+    for (visible_index, entry) in history
+        .iter()
+        .rev()
+        .skip(start)
+        .take(visible_rows)
+        .enumerate()
+    {
+        let row_y = header_y + HEADER_H + 6 + visible_index as i32 * row_step;
+        let row_color = if visible_index % 2 == 0 {
+            ROW_BG
+        } else {
+            ROW_ALT_BG
+        };
+        fill_rect(ui, inner_x, row_y, inner_w, ROW_H, row_color);
+        let tone_color = match entry.tone {
+            EditorUiActionTone::Command => TEXT_PRIMARY,
+            EditorUiActionTone::Event => TEXT_ACCENT,
+            EditorUiActionTone::Error => TEXT_ERROR,
+            EditorUiActionTone::Suggestion => TEXT_SUGGESTION,
+        };
+        draw_text(
+            ui,
+            inner_x + 6,
+            row_y + 4,
+            1,
+            &truncate_text(&entry.label, 26),
+            tone_color,
+        );
+        if !entry.detail.is_empty() {
+            let detail = truncate_text(&entry.detail, 28);
+            let detail_w = text_pixel_width(&detail, 1);
+            draw_text(
+                ui,
+                inner_x + inner_w - detail_w - 8,
+                row_y + 4,
+                1,
+                &detail,
+                TEXT_MUTED,
+            );
+        }
+    }
+}
+
+fn draw_command_palette(
+    ui: &mut EditorNativeUi,
+    palette: &EditorUiCommandPalette,
+    width: i32,
+    height: i32,
+) {
+    fill_rect(ui, 0, 0, width, height, Color::new(0.02, 0.03, 0.04, 0.62));
+
+    let panel_w = PALETTE_W.min((width - 32).max(320));
+    let visible_rows = palette.entries.len().min(PALETTE_MAX_ROWS).max(1);
+    let panel_h = HEADER_H + 44 + visible_rows as i32 * PALETTE_ROW_H + 42;
+    let panel_x = (width - panel_w) / 2;
+    let panel_y = ((height - panel_h) / 2).max(TOOLBAR_H + 12);
+
+    draw_panel(ui, panel_x, panel_y, panel_w, panel_h);
+    ui.panel_regions.push(EditorUiPanelRegion {
+        panel: EditorUiPanel::CommandPalette,
+        x: panel_x,
+        y: panel_y,
+        w: panel_w,
+        h: panel_h,
+    });
+
+    let inner_x = panel_x + PANEL_PAD;
+    let inner_w = panel_w - PANEL_PAD * 2;
+    let header_y = panel_y + PANEL_PAD;
+    fill_rect(ui, inner_x, header_y, inner_w, HEADER_H, HEADER_BG);
+    draw_text(
+        ui,
+        inner_x + 8,
+        header_y + 5,
+        1,
+        "COMMAND PALETTE",
+        TEXT_PRIMARY,
+    );
+
+    let query_text = if palette.query.is_empty() {
+        "QUERY ALL".to_string()
+    } else {
+        format!("QUERY {}", palette.query.to_ascii_uppercase())
+    };
+    draw_text(
+        ui,
+        inner_x + 8,
+        header_y + HEADER_H + 8,
+        1,
+        &query_text,
+        TEXT_ACCENT,
+    );
+    draw_text(
+        ui,
+        inner_x + inner_w - text_pixel_width("CTRL+K CLOSE", 1) - 8,
+        header_y + HEADER_H + 8,
+        1,
+        "CTRL+K CLOSE",
+        TEXT_MUTED,
+    );
+
+    let rows_y = header_y + HEADER_H + 24;
+    if palette.entries.is_empty() {
+        draw_text(
+            ui,
+            inner_x + 8,
+            rows_y + 8,
+            1,
+            &palette.empty_text,
+            TEXT_WARNING,
+        );
+    } else {
+        let start = palette
+            .selected_index
+            .saturating_sub(PALETTE_MAX_ROWS.saturating_sub(1));
+        let start = start.min(palette.entries.len().saturating_sub(visible_rows));
+        for (offset, entry) in palette
+            .entries
+            .iter()
+            .skip(start)
+            .take(visible_rows)
+            .enumerate()
+        {
+            let row_index = start + offset;
+            let row_y = rows_y + offset as i32 * PALETTE_ROW_H;
+            let selected = row_index == palette.selected_index;
+            fill_rect(
+                ui,
+                inner_x,
+                row_y,
+                inner_w,
+                PALETTE_ROW_H - 2,
+                if selected {
+                    SELECTED_COMPONENT_BG
+                } else if offset % 2 == 0 {
+                    ROW_BG
+                } else {
+                    ROW_ALT_BG
+                },
+            );
+
+            let source_label = match entry.source {
+                EditorUiPaletteEntrySource::BuiltIn => "CORE",
+                EditorUiPaletteEntrySource::Suggested => "AI",
+            };
+            draw_text(
+                ui,
+                inner_x + 8,
+                row_y + 6,
+                1,
+                &truncate_text(&entry.title, 24),
+                if entry.enabled {
+                    TEXT_PRIMARY
+                } else {
+                    TEXT_MUTED
+                },
+            );
+            draw_text(
+                ui,
+                inner_x + 180,
+                row_y + 6,
+                1,
+                &truncate_text(&entry.detail, 22),
+                TEXT_MUTED,
+            );
+            draw_text(
+                ui,
+                inner_x + inner_w - text_pixel_width(source_label, 1) - 8,
+                row_y + 6,
+                1,
+                source_label,
+                match entry.source {
+                    EditorUiPaletteEntrySource::BuiltIn => TEXT_ACCENT,
+                    EditorUiPaletteEntrySource::Suggested => TEXT_SUGGESTION,
+                },
+            );
+
+            if entry.enabled {
+                ui.hit_regions.push(EditorUiHitRegion {
+                    x: inner_x,
+                    y: row_y,
+                    w: inner_w,
+                    h: PALETTE_ROW_H - 2,
+                    commands: entry.commands.clone(),
+                });
+            }
+        }
+    }
+
+    draw_text(
+        ui,
+        inner_x + 8,
+        panel_y + panel_h - PANEL_PAD - 9,
+        1,
+        &truncate_text(&palette.helper_text, 74),
+        TEXT_MUTED,
+    );
+}
+
 fn panel_visible_rows(panel_h: i32) -> usize {
     let available = (panel_h - PANEL_PAD * 2 - HEADER_H - 6).max(ROW_H);
     (available / (ROW_H + 2)).max(1) as usize
@@ -624,8 +977,12 @@ fn collect_hierarchy_rows(host: &EditorRuntimeHost) -> (Vec<HierarchyRow>, Optio
     let mut selected_index = None;
 
     for (index, entity) in scene.entities.iter().enumerate() {
-        let depth =
-            hierarchy_depth(entity.id, &parent_by_id, &mut depth_cache, &mut HashSet::new());
+        let depth = hierarchy_depth(
+            entity.id,
+            &parent_by_id,
+            &mut depth_cache,
+            &mut HashSet::new(),
+        );
         if Some(entity.id) == selected_entity_id {
             selected_index = Some(index);
         }
@@ -1007,6 +1364,7 @@ mod tests {
     fn test_host() -> EditorRuntimeHost {
         let scene = SceneDocument {
             name: "Ui".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 1,
                 name: "Camera".into(),
@@ -1036,7 +1394,7 @@ mod tests {
     fn hierarchy_row_click_maps_to_select_entity_command() {
         let host = test_host();
         let mut state = EditorNativeUiState::default();
-        let ui = build_native_ui(&host, 1280, 720, &mut state);
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], None);
 
         let commands = ui.commands_at(24, 74).unwrap();
         assert!(matches!(
@@ -1056,7 +1414,7 @@ mod tests {
         .unwrap();
 
         let mut state = EditorNativeUiState::default();
-        let ui = build_native_ui(&host, 1280, 720, &mut state);
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], None);
         let commands = ui.commands_at(1245, 122).unwrap();
         assert!(commands.len() >= 2);
         assert!(matches!(
@@ -1072,6 +1430,7 @@ mod tests {
     fn hierarchy_scroll_follows_selected_entity() {
         let scene = SceneDocument {
             name: "Ui".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
             entities: (1..=16)
                 .map(|id| EditorEntity {
                     id,
@@ -1091,7 +1450,7 @@ mod tests {
             .unwrap();
 
         let mut state = EditorNativeUiState::default();
-        let ui = build_native_ui(&host, 480, 220, &mut state);
+        let ui = build_native_ui(&host, 480, 220, &mut state, &[], None);
 
         assert!(state.hierarchy_scroll > 0);
         assert_eq!(ui.panel_at(40, 60), Some(EditorUiPanel::Hierarchy));
@@ -1101,6 +1460,7 @@ mod tests {
     fn inspector_scroll_follows_selected_field() {
         let scene = SceneDocument {
             name: "Ui".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 1,
                 name: "Camera".into(),
@@ -1133,9 +1493,54 @@ mod tests {
         .unwrap();
 
         let mut state = EditorNativeUiState::default();
-        let ui = build_native_ui(&host, 640, 220, &mut state);
+        let ui = build_native_ui(&host, 640, 220, &mut state, &[], None);
 
         assert!(state.inspector_scroll > 0);
         assert_eq!(ui.panel_at(560, 60), Some(EditorUiPanel::Inspector));
+    }
+
+    #[test]
+    fn history_panel_registers_for_hit_testing() {
+        let host = test_host();
+        let mut state = EditorNativeUiState::default();
+        let history = vec![
+            EditorUiActionLogEntry {
+                label: "Command Save".into(),
+                detail: "Write scene".into(),
+                tone: EditorUiActionTone::Command,
+            },
+            EditorUiActionLogEntry {
+                label: "Event Saved".into(),
+                detail: "Scene written".into(),
+                tone: EditorUiActionTone::Event,
+            },
+        ];
+
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &history, None);
+        assert_eq!(ui.panel_at(420, 610), Some(EditorUiPanel::History));
+    }
+
+    #[test]
+    fn command_palette_hit_region_emits_palette_commands() {
+        let host = test_host();
+        let mut state = EditorNativeUiState::default();
+        let palette = EditorUiCommandPalette {
+            query: "save".into(),
+            helper_text: "helper".into(),
+            empty_text: "none".into(),
+            entries: vec![EditorUiPaletteEntry {
+                title: "Save Scene".into(),
+                detail: "Write current .hsc".into(),
+                source: EditorUiPaletteEntrySource::BuiltIn,
+                enabled: true,
+                commands: vec![EditorCommand::Save],
+            }],
+            selected_index: 0,
+        };
+
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], Some(&palette));
+        let commands = ui.commands_at(370, 352).unwrap();
+        assert!(matches!(commands.first(), Some(EditorCommand::Save)));
+        assert_eq!(ui.panel_at(370, 300), Some(EditorUiPanel::CommandPalette));
     }
 }

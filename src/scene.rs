@@ -39,6 +39,11 @@ use crate::ecs::Entity;
 use crate::ecs::World;
 use crate::math::{Quat, Vec3};
 use crate::renderer::Color;
+use crate::runtime_slice::{
+    BreakablePropDef, PatrolRouteDef, RuntimeSliceAuthoring, SpawnPointDef, SpawnPointKind,
+    StaticMeshActorDef, TerrainAuthoring, TerrainPaintLayer, VegetationPaintStroke,
+    VegetationPrototypeDef, VehicleSpawnerDef, WaterVolumeDef,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Error
@@ -74,6 +79,7 @@ impl std::error::Error for SceneError {}
 /// A parsed scene ready to be spawned into a [`World`].
 pub struct SceneData {
     pub name: String,
+    pub runtime_slice: RuntimeSliceAuthoring,
     pub entities: Vec<EntityDef>,
 }
 
@@ -347,16 +353,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_word(&mut self, expected: &str) -> Result<(), SceneError> {
-        match self.next()? {
-            Some(Token::Word(w)) if w == expected => Ok(()),
-            _ => Err(SceneError::new(
-                self.line(),
-                format!("expected '{expected}', got unexpected token"),
-            )),
-        }
-    }
-
     fn expect_str(&mut self) -> Result<String, SceneError> {
         match self.next()? {
             Some(Token::Str(s)) => Ok(s.to_owned()),
@@ -387,11 +383,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn expect_bool_flag(&mut self) -> Result<bool, SceneError> {
+        Ok(self.expect_number()? > 0.0)
+    }
+
+    fn expect_vec3(&mut self) -> Result<Vec3, SceneError> {
+        Ok(Vec3::new(
+            self.expect_number()?,
+            self.expect_number()?,
+            self.expect_number()?,
+        ))
+    }
+
     // ── Top-level ─────────────────────────────────────────────────────────
 
     fn parse_scene(&mut self) -> Result<SceneData, SceneError> {
         let mut scene = SceneData {
             name: String::new(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: Vec::new(),
         };
 
@@ -402,11 +411,552 @@ impl<'a> Parser<'a> {
         }
 
         while self.peek()?.is_some() {
-            self.expect_word("entity")?;
-            scene.entities.push(self.parse_entity()?);
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::Word("runtime_slice")) => {
+                    self.next()?;
+                    if !scene.runtime_slice.is_empty() {
+                        return Err(SceneError::new(line, "duplicate runtime_slice block"));
+                    }
+                    scene.runtime_slice = self.parse_runtime_slice()?;
+                }
+                Some(Token::Word("entity")) => {
+                    self.next()?;
+                    scene.entities.push(self.parse_entity()?);
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected top-level 'runtime_slice' or 'entity' block",
+                    ));
+                }
+            }
         }
 
         Ok(scene)
+    }
+
+    fn parse_runtime_slice(&mut self) -> Result<RuntimeSliceAuthoring, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut slice = RuntimeSliceAuthoring::default();
+        let mut saw_terrain = false;
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(kind)) = self.next()? {
+                        match kind {
+                            "terrain" => {
+                                if saw_terrain {
+                                    return Err(SceneError::new(
+                                        line,
+                                        "duplicate terrain block in runtime_slice",
+                                    ));
+                                }
+                                slice.terrain = self.parse_runtime_terrain()?;
+                                saw_terrain = true;
+                            }
+                            "paint_layer" => {
+                                let name = self.expect_str()?;
+                                slice
+                                    .terrain
+                                    .paint_layers
+                                    .push(self.parse_terrain_paint_layer(name)?);
+                            }
+                            "vegetation_prototype" => {
+                                let name = self.expect_str()?;
+                                slice
+                                    .vegetation_prototypes
+                                    .push(self.parse_vegetation_prototype(name)?);
+                            }
+                            "vegetation_paint" => {
+                                let prototype = self.expect_str()?;
+                                slice
+                                    .vegetation_paints
+                                    .push(self.parse_vegetation_paint(prototype)?);
+                            }
+                            "static_mesh_actor" => {
+                                let name = self.expect_str()?;
+                                slice
+                                    .static_mesh_actors
+                                    .push(self.parse_static_mesh_actor(name)?);
+                            }
+                            "water_volume" => {
+                                let name = self.expect_str()?;
+                                slice.water_volumes.push(self.parse_water_volume(name)?);
+                            }
+                            "spawn_point" => {
+                                let name = self.expect_str()?;
+                                slice.spawn_points.push(self.parse_spawn_point(name)?);
+                            }
+                            "patrol_route" => {
+                                let name = self.expect_str()?;
+                                slice.patrol_routes.push(self.parse_patrol_route(name)?);
+                            }
+                            "vehicle_spawner" => {
+                                let name = self.expect_str()?;
+                                slice
+                                    .vehicle_spawners
+                                    .push(self.parse_vehicle_spawner(name)?);
+                            }
+                            "breakable_prop" => {
+                                let name = self.expect_str()?;
+                                slice.breakable_props.push(self.parse_breakable_prop(name)?);
+                            }
+                            _ => {
+                                return Err(SceneError::new(
+                                    line,
+                                    "unknown runtime_slice block entry",
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(line, "expected runtime_slice entry or '}'"));
+                }
+            }
+        }
+
+        Ok(slice)
+    }
+
+    fn parse_runtime_terrain(&mut self) -> Result<TerrainAuthoring, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut terrain = TerrainAuthoring::default();
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "size" | "size_meters" => terrain.size_meters = self.expect_vec3()?,
+                            "chunk_size" | "chunk_size_meters" => {
+                                terrain.chunk_size_meters = self.expect_number()?.max(0.0) as u32
+                            }
+                            "height_scale" | "height_scale_meters" => {
+                                terrain.height_scale_meters = self.expect_number()?
+                            }
+                            _ => return Err(SceneError::new(line, "unknown terrain field")),
+                        }
+                    }
+                }
+                _ => return Err(SceneError::new(line, "expected terrain field or '}'")),
+            }
+        }
+
+        Ok(terrain)
+    }
+
+    fn parse_terrain_paint_layer(&mut self, name: String) -> Result<TerrainPaintLayer, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut layer = TerrainPaintLayer {
+            name,
+            material: None,
+            tiling: 1.0,
+            weightmap_channel: 0,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "material" => layer.material = Some(self.expect_str()?),
+                            "tiling" => layer.tiling = self.expect_number()?,
+                            "channel" | "weightmap_channel" => {
+                                layer.weightmap_channel = self.expect_number()?.max(0.0) as u8
+                            }
+                            _ => return Err(SceneError::new(line, "unknown paint_layer field")),
+                        }
+                    }
+                }
+                _ => return Err(SceneError::new(line, "expected paint_layer field or '}'")),
+            }
+        }
+
+        Ok(layer)
+    }
+
+    fn parse_vegetation_prototype(
+        &mut self,
+        name: String,
+    ) -> Result<VegetationPrototypeDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut prototype = VegetationPrototypeDef {
+            name,
+            mesh: None,
+            material: None,
+            density_per_100m2: 1.0,
+            random_yaw: true,
+            align_to_normal: true,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "mesh" => prototype.mesh = Some(self.expect_str()?),
+                            "material" => prototype.material = Some(self.expect_str()?),
+                            "density" | "density_per_100m2" => {
+                                prototype.density_per_100m2 = self.expect_number()?
+                            }
+                            "random_yaw" => prototype.random_yaw = self.expect_bool_flag()?,
+                            "align_to_normal" => {
+                                prototype.align_to_normal = self.expect_bool_flag()?
+                            }
+                            _ => {
+                                return Err(SceneError::new(
+                                    line,
+                                    "unknown vegetation_prototype field",
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected vegetation_prototype field or '}'",
+                    ));
+                }
+            }
+        }
+
+        Ok(prototype)
+    }
+
+    fn parse_vegetation_paint(
+        &mut self,
+        prototype: String,
+    ) -> Result<VegetationPaintStroke, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut stroke = VegetationPaintStroke {
+            prototype,
+            center: Vec3::ZERO,
+            radius: 1.0,
+            density: 1.0,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "center" => stroke.center = self.expect_vec3()?,
+                            "radius" => stroke.radius = self.expect_number()?,
+                            "density" => stroke.density = self.expect_number()?,
+                            _ => {
+                                return Err(SceneError::new(
+                                    line,
+                                    "unknown vegetation_paint field",
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected vegetation_paint field or '}'",
+                    ));
+                }
+            }
+        }
+
+        Ok(stroke)
+    }
+
+    fn parse_static_mesh_actor(&mut self, name: String) -> Result<StaticMeshActorDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut actor = StaticMeshActorDef {
+            name,
+            mesh: None,
+            material: None,
+            position: Vec3::ZERO,
+            rotation_euler_deg: Vec3::ZERO,
+            scale: Vec3::ONE,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "mesh" => actor.mesh = Some(self.expect_str()?),
+                            "material" => actor.material = Some(self.expect_str()?),
+                            "pos" | "position" => actor.position = self.expect_vec3()?,
+                            "rot" | "rotation" => actor.rotation_euler_deg = self.expect_vec3()?,
+                            "scale" => actor.scale = self.expect_vec3()?,
+                            _ => {
+                                return Err(SceneError::new(
+                                    line,
+                                    "unknown static_mesh_actor field",
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected static_mesh_actor field or '}'",
+                    ));
+                }
+            }
+        }
+
+        Ok(actor)
+    }
+
+    fn parse_water_volume(&mut self, name: String) -> Result<WaterVolumeDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut volume = WaterVolumeDef {
+            name,
+            material: None,
+            center: Vec3::ZERO,
+            extents: Vec3::ONE,
+            wave_strength: 0.0,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "material" => volume.material = Some(self.expect_str()?),
+                            "center" => volume.center = self.expect_vec3()?,
+                            "extents" => volume.extents = self.expect_vec3()?,
+                            "wave_strength" => volume.wave_strength = self.expect_number()?,
+                            _ => return Err(SceneError::new(line, "unknown water_volume field")),
+                        }
+                    }
+                }
+                _ => return Err(SceneError::new(line, "expected water_volume field or '}'")),
+            }
+        }
+
+        Ok(volume)
+    }
+
+    fn parse_spawn_point(&mut self, name: String) -> Result<SpawnPointDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut spawn = SpawnPointDef {
+            name,
+            kind: SpawnPointKind::Generic,
+            position: Vec3::ZERO,
+            facing_yaw_deg: 0.0,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "kind" => {
+                                spawn.kind = match self.expect_str()?.as_str() {
+                                    "generic" => SpawnPointKind::Generic,
+                                    "player" => SpawnPointKind::Player,
+                                    "enemy" => SpawnPointKind::Enemy,
+                                    "vehicle" => SpawnPointKind::Vehicle,
+                                    _ => {
+                                        return Err(SceneError::new(
+                                            line,
+                                            "unknown spawn_point kind",
+                                        ));
+                                    }
+                                };
+                            }
+                            "pos" | "position" => spawn.position = self.expect_vec3()?,
+                            "yaw" | "facing_yaw_deg" => {
+                                spawn.facing_yaw_deg = self.expect_number()?
+                            }
+                            _ => return Err(SceneError::new(line, "unknown spawn_point field")),
+                        }
+                    }
+                }
+                _ => return Err(SceneError::new(line, "expected spawn_point field or '}'")),
+            }
+        }
+
+        Ok(spawn)
+    }
+
+    fn parse_patrol_route(&mut self, name: String) -> Result<PatrolRouteDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut route = PatrolRouteDef {
+            name,
+            points: Vec::new(),
+            looped: false,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "looped" => route.looped = self.expect_bool_flag()?,
+                            "point" => route.points.push(self.expect_vec3()?),
+                            _ => return Err(SceneError::new(line, "unknown patrol_route field")),
+                        }
+                    }
+                }
+                _ => return Err(SceneError::new(line, "expected patrol_route field or '}'")),
+            }
+        }
+
+        Ok(route)
+    }
+
+    fn parse_vehicle_spawner(&mut self, name: String) -> Result<VehicleSpawnerDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut spawner = VehicleSpawnerDef {
+            name,
+            mesh: None,
+            material: None,
+            position: Vec3::ZERO,
+            facing_yaw_deg: 0.0,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "mesh" => spawner.mesh = Some(self.expect_str()?),
+                            "material" => spawner.material = Some(self.expect_str()?),
+                            "pos" | "position" => spawner.position = self.expect_vec3()?,
+                            "yaw" | "facing_yaw_deg" => {
+                                spawner.facing_yaw_deg = self.expect_number()?
+                            }
+                            _ => {
+                                return Err(SceneError::new(line, "unknown vehicle_spawner field"));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected vehicle_spawner field or '}'",
+                    ));
+                }
+            }
+        }
+
+        Ok(spawner)
+    }
+
+    fn parse_breakable_prop(&mut self, name: String) -> Result<BreakablePropDef, SceneError> {
+        self.expect_lbrace()?;
+
+        let mut prop = BreakablePropDef {
+            name,
+            intact_mesh: None,
+            broken_mesh: None,
+            material: None,
+            position: Vec3::ZERO,
+            rotation_euler_deg: Vec3::ZERO,
+            scale: Vec3::ONE,
+            hit_points: 100.0,
+            break_impulse: 0.0,
+        };
+
+        loop {
+            let line = self.lex.line;
+            match self.peek()? {
+                Some(Token::RBrace) => {
+                    self.next()?;
+                    break;
+                }
+                Some(Token::Word(_)) => {
+                    if let Some(Token::Word(key)) = self.next()? {
+                        match key {
+                            "intact_mesh" => prop.intact_mesh = Some(self.expect_str()?),
+                            "broken_mesh" => prop.broken_mesh = Some(self.expect_str()?),
+                            "material" => prop.material = Some(self.expect_str()?),
+                            "pos" | "position" => prop.position = self.expect_vec3()?,
+                            "rot" | "rotation" => prop.rotation_euler_deg = self.expect_vec3()?,
+                            "scale" => prop.scale = self.expect_vec3()?,
+                            "hit_points" => prop.hit_points = self.expect_number()?,
+                            "break_impulse" => prop.break_impulse = self.expect_number()?,
+                            _ => {
+                                return Err(SceneError::new(line, "unknown breakable_prop field"));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SceneError::new(
+                        line,
+                        "expected breakable_prop field or '}'",
+                    ));
+                }
+            }
+        }
+
+        Ok(prop)
     }
 
     fn parse_entity(&mut self) -> Result<EntityDef, SceneError> {
@@ -1057,6 +1607,11 @@ pub fn serialize_scene(scene: &SceneData) -> String {
         out.push_str(&format!("scene \"{}\"\n\n", scene.name));
     }
 
+    if !scene.runtime_slice.is_empty() {
+        write_runtime_slice(&mut out, &scene.runtime_slice);
+        out.push('\n');
+    }
+
     for def in &scene.entities {
         out.push_str(&format!("entity \"{}\" {{\n", def.name));
 
@@ -1252,6 +1807,196 @@ pub fn save_scene<P: AsRef<Path>>(path: P, scene: &SceneData) -> Result<(), Scen
     fs::write(path, text).map_err(|e| SceneError::new(0, format!("IO: {e}")))
 }
 
+fn write_runtime_slice(out: &mut String, slice: &RuntimeSliceAuthoring) {
+    out.push_str("runtime_slice {\n");
+
+    if slice.terrain != TerrainAuthoring::default() {
+        out.push_str("  terrain {\n");
+        out.push_str("    size ");
+        write_runtime_vec3(out, slice.terrain.size_meters);
+        out.push('\n');
+        out.push_str(&format!(
+            "    chunk_size {}\n",
+            fmt_f32(slice.terrain.chunk_size_meters as f32),
+        ));
+        out.push_str(&format!(
+            "    height_scale {}\n",
+            fmt_f32(slice.terrain.height_scale_meters),
+        ));
+        out.push_str("  }\n");
+    }
+
+    for layer in &slice.terrain.paint_layers {
+        out.push_str(&format!("  paint_layer \"{}\" {{\n", layer.name));
+        if let Some(material) = &layer.material {
+            out.push_str(&format!("    material \"{}\"\n", material));
+        }
+        out.push_str(&format!("    tiling {}\n", fmt_f32(layer.tiling)));
+        out.push_str(&format!(
+            "    channel {}\n",
+            fmt_f32(layer.weightmap_channel as f32),
+        ));
+        out.push_str("  }\n");
+    }
+
+    for prototype in &slice.vegetation_prototypes {
+        out.push_str(&format!(
+            "  vegetation_prototype \"{}\" {{\n",
+            prototype.name
+        ));
+        if let Some(mesh) = &prototype.mesh {
+            out.push_str(&format!("    mesh \"{}\"\n", mesh));
+        }
+        if let Some(material) = &prototype.material {
+            out.push_str(&format!("    material \"{}\"\n", material));
+        }
+        out.push_str(&format!(
+            "    density {}\n",
+            fmt_f32(prototype.density_per_100m2),
+        ));
+        out.push_str(&format!(
+            "    random_yaw {}\n",
+            if prototype.random_yaw { 1 } else { 0 }
+        ));
+        out.push_str(&format!(
+            "    align_to_normal {}\n",
+            if prototype.align_to_normal { 1 } else { 0 }
+        ));
+        out.push_str("  }\n");
+    }
+
+    for stroke in &slice.vegetation_paints {
+        out.push_str(&format!("  vegetation_paint \"{}\" {{\n", stroke.prototype));
+        out.push_str("    center ");
+        write_runtime_vec3(out, stroke.center);
+        out.push('\n');
+        out.push_str(&format!("    radius {}\n", fmt_f32(stroke.radius)));
+        out.push_str(&format!("    density {}\n", fmt_f32(stroke.density)));
+        out.push_str("  }\n");
+    }
+
+    for actor in &slice.static_mesh_actors {
+        out.push_str(&format!("  static_mesh_actor \"{}\" {{\n", actor.name));
+        if let Some(mesh) = &actor.mesh {
+            out.push_str(&format!("    mesh \"{}\"\n", mesh));
+        }
+        if let Some(material) = &actor.material {
+            out.push_str(&format!("    material \"{}\"\n", material));
+        }
+        out.push_str("    pos ");
+        write_runtime_vec3(out, actor.position);
+        out.push('\n');
+        out.push_str("    rot ");
+        write_runtime_vec3(out, actor.rotation_euler_deg);
+        out.push('\n');
+        out.push_str("    scale ");
+        write_runtime_vec3(out, actor.scale);
+        out.push('\n');
+        out.push_str("  }\n");
+    }
+
+    for volume in &slice.water_volumes {
+        out.push_str(&format!("  water_volume \"{}\" {{\n", volume.name));
+        if let Some(material) = &volume.material {
+            out.push_str(&format!("    material \"{}\"\n", material));
+        }
+        out.push_str("    center ");
+        write_runtime_vec3(out, volume.center);
+        out.push('\n');
+        out.push_str("    extents ");
+        write_runtime_vec3(out, volume.extents);
+        out.push('\n');
+        out.push_str(&format!(
+            "    wave_strength {}\n",
+            fmt_f32(volume.wave_strength),
+        ));
+        out.push_str("  }\n");
+    }
+
+    for spawn in &slice.spawn_points {
+        out.push_str(&format!("  spawn_point \"{}\" {{\n", spawn.name));
+        let kind = match spawn.kind {
+            SpawnPointKind::Generic => "generic",
+            SpawnPointKind::Player => "player",
+            SpawnPointKind::Enemy => "enemy",
+            SpawnPointKind::Vehicle => "vehicle",
+        };
+        out.push_str(&format!("    kind \"{}\"\n", kind));
+        out.push_str("    pos ");
+        write_runtime_vec3(out, spawn.position);
+        out.push('\n');
+        out.push_str(&format!("    yaw {}\n", fmt_f32(spawn.facing_yaw_deg)));
+        out.push_str("  }\n");
+    }
+
+    for route in &slice.patrol_routes {
+        out.push_str(&format!("  patrol_route \"{}\" {{\n", route.name));
+        out.push_str(&format!(
+            "    looped {}\n",
+            if route.looped { 1 } else { 0 }
+        ));
+        for point in &route.points {
+            out.push_str("    point ");
+            write_runtime_vec3(out, *point);
+            out.push('\n');
+        }
+        out.push_str("  }\n");
+    }
+
+    for spawner in &slice.vehicle_spawners {
+        out.push_str(&format!("  vehicle_spawner \"{}\" {{\n", spawner.name));
+        if let Some(mesh) = &spawner.mesh {
+            out.push_str(&format!("    mesh \"{}\"\n", mesh));
+        }
+        if let Some(material) = &spawner.material {
+            out.push_str(&format!("    material \"{}\"\n", material));
+        }
+        out.push_str("    pos ");
+        write_runtime_vec3(out, spawner.position);
+        out.push('\n');
+        out.push_str(&format!("    yaw {}\n", fmt_f32(spawner.facing_yaw_deg)));
+        out.push_str("  }\n");
+    }
+
+    for prop in &slice.breakable_props {
+        out.push_str(&format!("  breakable_prop \"{}\" {{\n", prop.name));
+        if let Some(mesh) = &prop.intact_mesh {
+            out.push_str(&format!("    intact_mesh \"{}\"\n", mesh));
+        }
+        if let Some(mesh) = &prop.broken_mesh {
+            out.push_str(&format!("    broken_mesh \"{}\"\n", mesh));
+        }
+        if let Some(material) = &prop.material {
+            out.push_str(&format!("    material \"{}\"\n", material));
+        }
+        out.push_str("    pos ");
+        write_runtime_vec3(out, prop.position);
+        out.push('\n');
+        out.push_str("    rot ");
+        write_runtime_vec3(out, prop.rotation_euler_deg);
+        out.push('\n');
+        out.push_str("    scale ");
+        write_runtime_vec3(out, prop.scale);
+        out.push('\n');
+        out.push_str(&format!("    hit_points {}\n", fmt_f32(prop.hit_points)));
+        out.push_str(&format!(
+            "    break_impulse {}\n",
+            fmt_f32(prop.break_impulse),
+        ));
+        out.push_str("  }\n");
+    }
+
+    out.push_str("}\n");
+}
+
+fn write_runtime_vec3(out: &mut String, value: Vec3) {
+    out.push_str(&fmt_f32(value.x));
+    out.push(' ');
+    out.push_str(&fmt_f32(value.y));
+    out.push(' ');
+    out.push_str(&fmt_f32(value.z));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Format an f32 without unnecessary trailing zeros.
@@ -1319,6 +2064,27 @@ entity "sun" {
 entity "crate" {
   transform { pos 5 0 -3 }
   parent "player"
+}
+"#;
+
+    const RUNTIME_SLICE_SAMPLE: &str = r#"
+scene "Island"
+
+runtime_slice {
+  terrain { size 1024 256 1024 chunk_size 64 height_scale 80 }
+  paint_layer "sand" { material "materials/sand" tiling 6 channel 0 }
+  vegetation_prototype "palm" { mesh "meshes/palm" material "materials/palm" density 2.5 random_yaw 1 align_to_normal 1 }
+  vegetation_paint "palm" { center 12 0 18 radius 9 density 1.25 }
+  static_mesh_actor "rock_large" { mesh "meshes/rock_large" material "materials/rock" pos 1 0 2 rot 0 45 0 scale 2 2 2 }
+  water_volume "ocean" { material "materials/ocean" center 512 0 512 extents 1024 8 1024 wave_strength 0.35 }
+  spawn_point "player_start" { kind "player" pos 32 4 32 yaw 180 }
+  patrol_route "north_path" { looped 1 point 0 0 0 point 10 0 10 }
+  vehicle_spawner "jeep" { mesh "meshes/jeep" material "materials/jeep" pos 40 0 40 yaw 90 }
+  breakable_prop "crate" { intact_mesh "meshes/crate" broken_mesh "meshes/crate_broken" material "materials/crate" pos 14 0 20 rot 0 0 0 scale 1 1 1 hit_points 40 break_impulse 22 }
+}
+
+entity "player" {
+  transform { pos 0 1 0 }
 }
 "#;
 
@@ -1409,5 +2175,29 @@ entity "crate" {
         let t = scene.entities[0].transform.as_ref().unwrap();
         // euler 90 0 0 should produce a non-identity rotation.
         assert!((t.rotation.w - 1.0).abs() > 0.01);
+    }
+
+    #[test]
+    fn runtime_slice_roundtrip_preserves_authored_content() {
+        let scene = parse_scene(RUNTIME_SLICE_SAMPLE).unwrap();
+        assert_eq!(scene.name, "Island");
+        assert_eq!(scene.runtime_slice.terrain.height_scale_meters, 80.0);
+        assert_eq!(scene.runtime_slice.terrain.paint_layers.len(), 1);
+        assert_eq!(scene.runtime_slice.vegetation_prototypes.len(), 1);
+        assert_eq!(
+            scene.runtime_slice.static_mesh_actors[0].mesh.as_deref(),
+            Some("meshes/rock_large")
+        );
+        assert_eq!(
+            scene.runtime_slice.spawn_points[0].kind,
+            SpawnPointKind::Player
+        );
+        assert!(scene.runtime_slice.patrol_routes[0].looped);
+        assert_eq!(scene.runtime_slice.breakable_props[0].break_impulse, 22.0);
+
+        let text = serialize_scene(&scene);
+        let roundtrip = parse_scene(&text).unwrap();
+        assert_eq!(roundtrip.runtime_slice, scene.runtime_slice);
+        assert_eq!(roundtrip.entities.len(), scene.entities.len());
     }
 }

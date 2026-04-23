@@ -8,6 +8,8 @@
 //! This gives the Rust host and the browser prototype a single serializable
 //! command/event surface before any IPC layer exists.
 
+use crate::math::Vec3;
+
 use super::{
     EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
     EditorPlayState, InspectorValue,
@@ -74,9 +76,97 @@ pub fn encode_command(command: &EditorCommand) -> String {
         EditorCommand::ResumePlayMode => "cmd|ResumePlayMode".into(),
         EditorCommand::StopPlayMode => "cmd|StopPlayMode".into(),
         EditorCommand::Save => "cmd|Save".into(),
+        EditorCommand::Undo => "cmd|Undo".into(),
+        EditorCommand::Redo => "cmd|Redo".into(),
         EditorCommand::ReloadSource => "cmd|ReloadSource".into(),
         EditorCommand::ForcePatch => "cmd|ForcePatch".into(),
         EditorCommand::ForceRebuild => "cmd|ForceRebuild".into(),
+        EditorCommand::SetTerrainSettings {
+            size_meters,
+            chunk_size_meters,
+            height_scale_meters,
+        } => format!(
+            "cmd|SetTerrainSettings|{}|{}|{}|{}|{}",
+            size_meters.x, size_meters.y, size_meters.z, chunk_size_meters, height_scale_meters
+        ),
+        EditorCommand::UpsertTerrainPaintLayer {
+            name,
+            material,
+            tiling,
+            weightmap_channel,
+        } => format!(
+            "cmd|UpsertTerrainPaintLayer|{}|{}|{}|{}",
+            escape_token(name),
+            escape_token(material.as_deref().unwrap_or_default()),
+            tiling,
+            weightmap_channel
+        ),
+        EditorCommand::RemoveTerrainPaintLayer { name } => {
+            format!("cmd|RemoveTerrainPaintLayer|{}", escape_token(name))
+        }
+        EditorCommand::PaintVegetation {
+            prototype,
+            center,
+            radius,
+            density,
+        } => format!(
+            "cmd|PaintVegetation|{}|{}|{}|{}|{}|{}",
+            escape_token(prototype),
+            center.x,
+            center.y,
+            center.z,
+            radius,
+            density
+        ),
+        EditorCommand::EraseVegetation {
+            prototype,
+            center,
+            radius,
+        } => format!(
+            "cmd|EraseVegetation|{}|{}|{}|{}|{}",
+            escape_token(prototype.as_deref().unwrap_or_default()),
+            center.x,
+            center.y,
+            center.z,
+            radius
+        ),
+        EditorCommand::UpsertPatrolRoute {
+            name,
+            points,
+            looped,
+        } => {
+            let mut tokens = vec![
+                "cmd".to_string(),
+                "UpsertPatrolRoute".to_string(),
+                escape_token(name),
+                encode_bool(*looped),
+                points.len().to_string(),
+            ];
+            append_vec3_tokens(&mut tokens, points);
+            tokens.join("|")
+        }
+        EditorCommand::RemovePatrolRoute { name } => {
+            format!("cmd|RemovePatrolRoute|{}", escape_token(name))
+        }
+        EditorCommand::UpsertVehicleSpawner {
+            name,
+            mesh,
+            material,
+            position,
+            facing_yaw_deg,
+        } => format!(
+            "cmd|UpsertVehicleSpawner|{}|{}|{}|{}|{}|{}|{}",
+            escape_token(name),
+            escape_token(mesh.as_deref().unwrap_or_default()),
+            escape_token(material.as_deref().unwrap_or_default()),
+            position.x,
+            position.y,
+            position.z,
+            facing_yaw_deg
+        ),
+        EditorCommand::RemoveVehicleSpawner { name } => {
+            format!("cmd|RemoveVehicleSpawner|{}", escape_token(name))
+        }
     }
 }
 
@@ -145,9 +235,94 @@ pub fn decode_command(message: &str) -> Result<EditorCommand, EditorProtocolErro
         "ResumePlayMode" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ResumePlayMode),
         "StopPlayMode" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::StopPlayMode),
         "Save" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::Save),
+        "Undo" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::Undo),
+        "Redo" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::Redo),
         "ReloadSource" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ReloadSource),
         "ForcePatch" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ForcePatch),
         "ForceRebuild" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ForceRebuild),
+        "SetTerrainSettings" => {
+            expect_len(tokens.as_slice(), 7)?;
+            Ok(EditorCommand::SetTerrainSettings {
+                size_meters: parse_vec3(&tokens[2], &tokens[3], &tokens[4])?,
+                chunk_size_meters: parse_u32(&tokens[5])?,
+                height_scale_meters: parse_f32(&tokens[6])?,
+            })
+        }
+        "UpsertTerrainPaintLayer" => {
+            expect_len(tokens.as_slice(), 6)?;
+            Ok(EditorCommand::UpsertTerrainPaintLayer {
+                name: tokens[2].clone(),
+                material: parse_optional_token(&tokens[3]),
+                tiling: parse_f32(&tokens[4])?,
+                weightmap_channel: parse_u8(&tokens[5])?,
+            })
+        }
+        "RemoveTerrainPaintLayer" => {
+            expect_len(tokens.as_slice(), 3)?;
+            Ok(EditorCommand::RemoveTerrainPaintLayer {
+                name: tokens[2].clone(),
+            })
+        }
+        "PaintVegetation" => {
+            expect_len(tokens.as_slice(), 8)?;
+            Ok(EditorCommand::PaintVegetation {
+                prototype: tokens[2].clone(),
+                center: parse_vec3(&tokens[3], &tokens[4], &tokens[5])?,
+                radius: parse_f32(&tokens[6])?,
+                density: parse_f32(&tokens[7])?,
+            })
+        }
+        "EraseVegetation" => {
+            expect_len(tokens.as_slice(), 7)?;
+            Ok(EditorCommand::EraseVegetation {
+                prototype: parse_optional_token(&tokens[2]),
+                center: parse_vec3(&tokens[3], &tokens[4], &tokens[5])?,
+                radius: parse_f32(&tokens[6])?,
+            })
+        }
+        "UpsertPatrolRoute" => {
+            expect_min_len(tokens.as_slice(), 5)?;
+            let point_count = parse_u32(&tokens[4])? as usize;
+            let expected_len = 5 + point_count * 3;
+            expect_len(tokens.as_slice(), expected_len)?;
+            let mut points = Vec::with_capacity(point_count);
+            let mut index = 5;
+            for _ in 0..point_count {
+                points.push(parse_vec3(
+                    &tokens[index],
+                    &tokens[index + 1],
+                    &tokens[index + 2],
+                )?);
+                index += 3;
+            }
+            Ok(EditorCommand::UpsertPatrolRoute {
+                name: tokens[2].clone(),
+                looped: parse_bool(&tokens[3])?,
+                points,
+            })
+        }
+        "RemovePatrolRoute" => {
+            expect_len(tokens.as_slice(), 3)?;
+            Ok(EditorCommand::RemovePatrolRoute {
+                name: tokens[2].clone(),
+            })
+        }
+        "UpsertVehicleSpawner" => {
+            expect_len(tokens.as_slice(), 9)?;
+            Ok(EditorCommand::UpsertVehicleSpawner {
+                name: tokens[2].clone(),
+                mesh: parse_optional_token(&tokens[3]),
+                material: parse_optional_token(&tokens[4]),
+                position: parse_vec3(&tokens[5], &tokens[6], &tokens[7])?,
+                facing_yaw_deg: parse_f32(&tokens[8])?,
+            })
+        }
+        "RemoveVehicleSpawner" => {
+            expect_len(tokens.as_slice(), 3)?;
+            Ok(EditorCommand::RemoveVehicleSpawner {
+                name: tokens[2].clone(),
+            })
+        }
         _ => Err(invalid_token(kind, "unknown command kind")),
     }
 }
@@ -182,7 +357,12 @@ pub fn encode_event(event: &EditorEvent) -> String {
         }
         EditorEvent::WorldRebuilt => "evt|WorldRebuilt".into(),
         EditorEvent::Saved => "evt|Saved".into(),
+        EditorEvent::UndoApplied => "evt|UndoApplied".into(),
+        EditorEvent::RedoApplied => "evt|RedoApplied".into(),
         EditorEvent::Reloaded => "evt|Reloaded".into(),
+        EditorEvent::RuntimeSliceUpdated { path } => {
+            format!("evt|RuntimeSliceUpdated|{}", escape_token(path))
+        }
     }
 }
 
@@ -235,7 +415,15 @@ pub fn decode_event(message: &str) -> Result<EditorEvent, EditorProtocolError> {
         }
         "WorldRebuilt" => expect_len(tokens.as_slice(), 2).map(|_| EditorEvent::WorldRebuilt),
         "Saved" => expect_len(tokens.as_slice(), 2).map(|_| EditorEvent::Saved),
+        "UndoApplied" => expect_len(tokens.as_slice(), 2).map(|_| EditorEvent::UndoApplied),
+        "RedoApplied" => expect_len(tokens.as_slice(), 2).map(|_| EditorEvent::RedoApplied),
         "Reloaded" => expect_len(tokens.as_slice(), 2).map(|_| EditorEvent::Reloaded),
+        "RuntimeSliceUpdated" => {
+            expect_len(tokens.as_slice(), 3)?;
+            Ok(EditorEvent::RuntimeSliceUpdated {
+                path: tokens[2].clone(),
+            })
+        }
         _ => Err(invalid_token(kind, "unknown event kind")),
     }
 }
@@ -260,6 +448,14 @@ fn append_value_tokens(tokens: &mut Vec<String>, value: &InspectorValue) {
             tokens.push("bool".into());
             tokens.push(value.to_string());
         }
+    }
+}
+
+fn append_vec3_tokens(tokens: &mut Vec<String>, values: &[Vec3]) {
+    for value in values {
+        tokens.push(value.x.to_string());
+        tokens.push(value.y.to_string());
+        tokens.push(value.z.to_string());
     }
 }
 
@@ -374,6 +570,14 @@ fn encode_play_state(state: EditorPlayState) -> String {
     }
 }
 
+fn encode_bool(value: bool) -> String {
+    if value {
+        "true".into()
+    } else {
+        "false".into()
+    }
+}
+
 fn parse_play_state(token: &str) -> Result<EditorPlayState, EditorProtocolError> {
     match token {
         "Editing" => Ok(EditorPlayState::Editing),
@@ -389,6 +593,18 @@ fn parse_u64(token: &str) -> Result<u64, EditorProtocolError> {
         .map_err(|_| invalid_token(token, "expected unsigned integer"))
 }
 
+fn parse_u32(token: &str) -> Result<u32, EditorProtocolError> {
+    token
+        .parse::<u32>()
+        .map_err(|_| invalid_token(token, "expected unsigned integer"))
+}
+
+fn parse_u8(token: &str) -> Result<u8, EditorProtocolError> {
+    token
+        .parse::<u8>()
+        .map_err(|_| invalid_token(token, "expected byte value"))
+}
+
 fn parse_f32(token: &str) -> Result<f32, EditorProtocolError> {
     token
         .parse::<f32>()
@@ -399,6 +615,26 @@ fn parse_f64(token: &str) -> Result<f64, EditorProtocolError> {
     token
         .parse::<f64>()
         .map_err(|_| invalid_token(token, "expected number"))
+}
+
+fn parse_bool(token: &str) -> Result<bool, EditorProtocolError> {
+    match token {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(invalid_token(token, "expected true or false")),
+    }
+}
+
+fn parse_optional_token(token: &str) -> Option<String> {
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn parse_vec3(x: &str, y: &str, z: &str) -> Result<Vec3, EditorProtocolError> {
+    Ok(Vec3::new(parse_f32(x)?, parse_f32(y)?, parse_f32(z)?))
 }
 
 fn invalid_message(message: impl Into<String>) -> EditorProtocolError {
@@ -425,6 +661,17 @@ fn expect_len(tokens: &[String], expected: usize) -> Result<(), EditorProtocolEr
     }
 }
 
+fn expect_min_len(tokens: &[String], expected: usize) -> Result<(), EditorProtocolError> {
+    if tokens.len() >= expected {
+        Ok(())
+    } else {
+        Err(invalid_message(format!(
+            "expected at least {expected} tokens, got {}",
+            tokens.len()
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,8 +692,39 @@ mod tests {
             },
             EditorCommand::SetAxis(EditorAxis::Z),
             EditorCommand::ApplyDelta(-1.25),
+            EditorCommand::Undo,
+            EditorCommand::Redo,
             EditorCommand::ReloadSource,
             EditorCommand::ForceRebuild,
+            EditorCommand::SetTerrainSettings {
+                size_meters: Vec3::new(1024.0, 320.0, 1024.0),
+                chunk_size_meters: 64,
+                height_scale_meters: 72.0,
+            },
+            EditorCommand::UpsertTerrainPaintLayer {
+                name: "sand".into(),
+                material: Some("materials/terrain/sand".into()),
+                tiling: 6.0,
+                weightmap_channel: 1,
+            },
+            EditorCommand::PaintVegetation {
+                prototype: "palm_tree".into(),
+                center: Vec3::new(32.0, 4.0, 48.0),
+                radius: 12.0,
+                density: 2.5,
+            },
+            EditorCommand::UpsertPatrolRoute {
+                name: "beach_patrol".into(),
+                points: vec![Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)],
+                looped: true,
+            },
+            EditorCommand::UpsertVehicleSpawner {
+                name: "jeep_spawn".into(),
+                mesh: Some("meshes/vehicles/jeep".into()),
+                material: Some("materials/vehicles/jeep".into()),
+                position: Vec3::new(15.0, 1.0, 22.0),
+                facing_yaw_deg: 90.0,
+            },
         ];
 
         for command in commands {
@@ -494,6 +772,98 @@ mod tests {
                 (EditorCommand::ApplyDelta(a), EditorCommand::ApplyDelta(b)) => {
                     assert!((a - b).abs() < 0.0001)
                 }
+                (
+                    EditorCommand::SetTerrainSettings {
+                        size_meters: size_a,
+                        chunk_size_meters: chunk_a,
+                        height_scale_meters: height_a,
+                    },
+                    EditorCommand::SetTerrainSettings {
+                        size_meters: size_b,
+                        chunk_size_meters: chunk_b,
+                        height_scale_meters: height_b,
+                    },
+                ) => {
+                    assert_eq!(size_a, size_b);
+                    assert_eq!(chunk_a, chunk_b);
+                    assert!((height_a - height_b).abs() < 0.0001);
+                }
+                (
+                    EditorCommand::UpsertTerrainPaintLayer {
+                        name: name_a,
+                        material: material_a,
+                        tiling: tiling_a,
+                        weightmap_channel: channel_a,
+                    },
+                    EditorCommand::UpsertTerrainPaintLayer {
+                        name: name_b,
+                        material: material_b,
+                        tiling: tiling_b,
+                        weightmap_channel: channel_b,
+                    },
+                ) => {
+                    assert_eq!(name_a, name_b);
+                    assert_eq!(material_a, material_b);
+                    assert!((tiling_a - tiling_b).abs() < 0.0001);
+                    assert_eq!(channel_a, channel_b);
+                }
+                (
+                    EditorCommand::PaintVegetation {
+                        prototype: prototype_a,
+                        center: center_a,
+                        radius: radius_a,
+                        density: density_a,
+                    },
+                    EditorCommand::PaintVegetation {
+                        prototype: prototype_b,
+                        center: center_b,
+                        radius: radius_b,
+                        density: density_b,
+                    },
+                ) => {
+                    assert_eq!(prototype_a, prototype_b);
+                    assert_eq!(center_a, center_b);
+                    assert!((radius_a - radius_b).abs() < 0.0001);
+                    assert!((density_a - density_b).abs() < 0.0001);
+                }
+                (
+                    EditorCommand::UpsertPatrolRoute {
+                        name: name_a,
+                        points: points_a,
+                        looped: looped_a,
+                    },
+                    EditorCommand::UpsertPatrolRoute {
+                        name: name_b,
+                        points: points_b,
+                        looped: looped_b,
+                    },
+                ) => {
+                    assert_eq!(name_a, name_b);
+                    assert_eq!(points_a, points_b);
+                    assert_eq!(looped_a, looped_b);
+                }
+                (
+                    EditorCommand::UpsertVehicleSpawner {
+                        name: name_a,
+                        mesh: mesh_a,
+                        material: material_a,
+                        position: position_a,
+                        facing_yaw_deg: yaw_a,
+                    },
+                    EditorCommand::UpsertVehicleSpawner {
+                        name: name_b,
+                        mesh: mesh_b,
+                        material: material_b,
+                        position: position_b,
+                        facing_yaw_deg: yaw_b,
+                    },
+                ) => {
+                    assert_eq!(name_a, name_b);
+                    assert_eq!(mesh_a, mesh_b);
+                    assert_eq!(material_a, material_b);
+                    assert_eq!(position_a, position_b);
+                    assert!((yaw_a - yaw_b).abs() < 0.0001);
+                }
                 _ => {}
             }
         }
@@ -520,6 +890,11 @@ mod tests {
             EditorEvent::PatchRequiresRebuild {
                 reason: "parent | missing".into(),
             },
+            EditorEvent::RuntimeSliceUpdated {
+                path: "terrain.paint_layers.sand".into(),
+            },
+            EditorEvent::UndoApplied,
+            EditorEvent::RedoApplied,
         ];
 
         for event in events {
@@ -546,6 +921,12 @@ mod tests {
                     EditorEvent::PatchRequiresRebuild { reason: a },
                     EditorEvent::PatchRequiresRebuild { reason: b },
                 ) => assert_eq!(a, b),
+                (
+                    EditorEvent::RuntimeSliceUpdated { path: a },
+                    EditorEvent::RuntimeSliceUpdated { path: b },
+                ) => assert_eq!(a, b),
+                (EditorEvent::UndoApplied, EditorEvent::UndoApplied) => {}
+                (EditorEvent::RedoApplied, EditorEvent::RedoApplied) => {}
                 _ => panic!("roundtrip mismatch"),
             }
         }

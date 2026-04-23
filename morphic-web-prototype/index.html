@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Morphic Engine Unified Prototype</title>
+  <title>Morphic Engine Browser Editor</title>
   <style>
     :root {
       color-scheme: dark;
@@ -114,17 +114,20 @@
 </head>
 <body>
   <section class="hero">
-    <p class="eyebrow">Unified Branch</p>
-    <h1>Morphic Engine Browser Playground</h1>
+    <p class="eyebrow">Authoring Workspace</p>
+    <h1>Morphic Engine Browser Editor</h1>
     <p>
-      This branch keeps the Rust engine intact and folds the browser prototype into
-      the repo as a standalone ES module demo. Click a morph to inspect it, right-click
-      for actions, and use the console for trusted local experiments.
+      This browser-side workspace stays build-free, mirrors the shared editor protocol,
+      and now supports authored save, undo, and redo alongside the Rust scene bridge.
+      With the backend connected, saves write back to the real <code>.hsc</code> source file
+      and the inspector can browse project assets with bitmap preview.
     </p>
     <div class="tips">
       <span class="tip">Click to select</span>
       <span class="tip">Right-click for actions</span>
-      <span class="tip">Edit via console helpers</span>
+      <span class="tip">Ctrl+S saves or downloads .hsc</span>
+      <span class="tip">Ctrl+Z / Ctrl+Y history</span>
+      <span class="tip">Backend mode previews .bmp and .tga assets</span>
     </div>
   </section>
   <div id="demo-root"></div>

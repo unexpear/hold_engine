@@ -6,12 +6,19 @@
 //! Supports uploading meshes (VAO/VBO/EBO), compiling GLSL shaders,
 //! uploading RGBA8 textures, and issuing indexed draw calls.
 
-use super::{opengl_shaders, Color, DebugLine, Renderer, ScreenQuad};
-use crate::assets::mesh::MeshData;
-use crate::assets::mesh::Vertex;
-use crate::assets::types::{GpuMesh, GpuTexture, Texture, TextureFormat};
+use super::{
+    opengl_shaders, Color, DebugLine, DrawItem, LightItem, ParticleBatch, RenderFrame, RenderView,
+    Renderer, ScreenQuad, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
+};
+use crate::assets::mesh::{MeshData, Vertex};
+use crate::assets::types::{
+    GpuMesh, GpuTexture, Material, MeshHandle, Shader, ShaderHandle, Texture, TextureFormat,
+    TextureHandle,
+};
+use crate::assets::AssetStore;
 use crate::math::{Mat4, Vec3};
 use crate::platform::ffi::*;
+use crate::terrain::Heightmap;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
@@ -27,6 +34,15 @@ type GLboolean = u8;
 type GLsizei = i32;
 type GLsizeiptr = isize;
 type GLchar = i8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TerrainPatchMeshKey {
+    origin_x_bits: u32,
+    origin_z_bits: u32,
+    size_bits: u32,
+    height_scale_bits: u32,
+    lod_level: u8,
+}
 
 // ── Core clear/enable constants ───────────────────────────────────────────────
 
@@ -85,6 +101,9 @@ const GL_CLAMP_TO_EDGE: GLint = 0x812F;
 
 #[allow(dead_code)]
 const GL_LEQUAL: GLenum = 0x0203;
+const GL_BLEND: GLenum = 0x0BE2;
+const GL_SRC_ALPHA: GLenum = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 
 // ── Function pointer types ────────────────────────────────────────────────────
 
@@ -240,6 +259,103 @@ unsafe fn compile_gl_stage(gl: &GlFns, kind: GLenum, src: &str) -> GLuint {
 /// modern functions (like glCreateShader) come from wglGetProcAddress.
 /// The `opengl32` module handle must have been loaded once at startup and
 /// passed here — it is NOT freed by this function.
+fn terrain_patch_mesh_key(patch: &TerrainPatchItem) -> TerrainPatchMeshKey {
+    TerrainPatchMeshKey {
+        origin_x_bits: patch.origin.x.to_bits(),
+        origin_z_bits: patch.origin.z.to_bits(),
+        size_bits: patch.size.to_bits(),
+        height_scale_bits: patch.height_scale.to_bits(),
+        lod_level: patch.lod_level,
+    }
+}
+
+fn terrain_patch_subdivisions(lod_level: u8) -> usize {
+    match lod_level {
+        0 => 16,
+        1 => 8,
+        _ => 4,
+    }
+}
+
+fn terrain_patch_heightmap(height_scale: f32) -> Heightmap {
+    Heightmap::new((height_scale * 0.25).max(1.0), 0.012, 4)
+}
+
+fn billboard_model_matrix(position: Vec3, size: f32, camera_position: Vec3) -> Mat4 {
+    let to_camera = camera_position - position;
+    let facing = if to_camera.length_sq() > 1e-8 {
+        to_camera.normalize()
+    } else {
+        Vec3::Z
+    };
+    let reference_up = if facing.y.abs() > 0.95 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let right = reference_up.cross(facing).normalize();
+    let up = facing.cross(right).normalize();
+    let size = size.max(0.01);
+
+    Mat4 {
+        cols: [
+            [right.x * size, right.y * size, right.z * size, 0.0],
+            [facing.x * size, facing.y * size, facing.z * size, 0.0],
+            [up.x * size, up.y * size, up.z * size, 0.0],
+            [position.x, position.y, position.z, 1.0],
+        ],
+    }
+}
+
+fn build_terrain_patch_mesh(patch: &TerrainPatchItem) -> MeshData {
+    let subdivisions = terrain_patch_subdivisions(patch.lod_level);
+    let row_stride = subdivisions + 1;
+    let step = patch.size / subdivisions as f32;
+    let heightmap = terrain_patch_heightmap(patch.height_scale);
+
+    let mut vertices = Vec::with_capacity(row_stride * row_stride);
+    let mut indices = Vec::with_capacity(subdivisions * subdivisions * 6);
+
+    for iz in 0..=subdivisions {
+        for ix in 0..=subdivisions {
+            let local_x = ix as f32 * step;
+            let local_z = iz as f32 * step;
+            let world_x = patch.origin.x + local_x;
+            let world_z = patch.origin.z + local_z;
+            let world_y = heightmap.sample(world_x, world_z);
+
+            let hx0 = heightmap.sample(world_x - step, world_z);
+            let hx1 = heightmap.sample(world_x + step, world_z);
+            let hz0 = heightmap.sample(world_x, world_z - step);
+            let hz1 = heightmap.sample(world_x, world_z + step);
+            let tangent_x = Vec3::new(2.0 * step, hx1 - hx0, 0.0);
+            let tangent_z = Vec3::new(0.0, hz1 - hz0, 2.0 * step);
+            let normal = tangent_z.cross(tangent_x).normalize();
+
+            vertices.push(Vertex {
+                pos: [world_x, world_y, world_z],
+                normal: [normal.x, normal.y, normal.z],
+                uv: [
+                    local_x / patch.size.max(1.0),
+                    1.0 - local_z / patch.size.max(1.0),
+                ],
+            });
+        }
+    }
+
+    for iz in 0..subdivisions {
+        for ix in 0..subdivisions {
+            let tl = (iz * row_stride + ix) as u32;
+            let tr = tl + 1;
+            let bl = tl + row_stride as u32;
+            let br = bl + 1;
+            indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+        }
+    }
+
+    MeshData::from_raw(vertices, indices)
+}
+
 unsafe fn load_gl_fn(name: &str, opengl32: HMODULE) -> *const c_void {
     let cname = cstr(name);
     // Try wglGetProcAddress first (extensions / modern GL).
@@ -276,6 +392,7 @@ struct GlFns {
     clear: GlClear,
     viewport: GlViewport,
     enable: GlEnable,
+    disable: GlDisable,
 
     // VAO
     gen_vertex_arrays: GlGenVertexArrays,
@@ -325,6 +442,9 @@ struct GlFns {
     active_texture: GlActiveTexture,
     generate_mipmap: GlGenerateMipmap,
     pixel_storei: GlPixelStorei,
+
+    // State
+    blend_func: GlBlendFunc,
 }
 
 impl GlFns {
@@ -339,6 +459,8 @@ impl GlFns {
             std::mem::transmute::<*const c_void, GlViewport>(load_gl_fn("glViewport", opengl32));
         let enable =
             std::mem::transmute::<*const c_void, GlEnable>(load_gl_fn("glEnable", opengl32));
+        let disable =
+            std::mem::transmute::<*const c_void, GlDisable>(load_gl_fn("glDisable", opengl32));
 
         // ── Modern GL — unwrap: a missing entry means the driver is broken ─────
         let gen_vertex_arrays = gl_fn!(opengl32, glGenVertexArrays, GlGenVertexArrays).unwrap();
@@ -393,12 +515,14 @@ impl GlFns {
         let active_texture = gl_fn!(opengl32, glActiveTexture, GlActiveTexture).unwrap();
         let generate_mipmap = gl_fn!(opengl32, glGenerateMipmap, GlGenerateMipmap).unwrap();
         let pixel_storei = gl_fn!(opengl32, glPixelStorei, GlPixelStorei).unwrap();
+        let blend_func = gl_fn!(opengl32, glBlendFunc, GlBlendFunc).unwrap();
 
         Self {
             clear_color,
             clear,
             viewport,
             enable,
+            disable,
             gen_vertex_arrays,
             bind_vertex_array,
             delete_vertex_arrays,
@@ -436,6 +560,7 @@ impl GlFns {
             active_texture,
             generate_mipmap,
             pixel_storei,
+            blend_func,
         }
     }
 }
@@ -499,6 +624,11 @@ pub struct OpenGLRenderer {
     /// VAO and VBO for batched debug line segments (updated each frame).
     line_vao: GLuint,
     line_vbo: GLuint,
+    frame_mesh_cache: HashMap<MeshHandle, GpuMesh>,
+    frame_texture_cache: HashMap<TextureHandle, GpuTexture>,
+    frame_program_cache: HashMap<ShaderHandle, GLuint>,
+    terrain_patch_mesh_cache: HashMap<TerrainPatchMeshKey, GpuMesh>,
+    unit_plane_mesh: Option<GpuMesh>,
 }
 
 impl OpenGLRenderer {
@@ -581,6 +711,11 @@ impl OpenGLRenderer {
                 line_program,
                 line_vao,
                 line_vbo,
+                frame_mesh_cache: HashMap::new(),
+                frame_texture_cache: HashMap::new(),
+                frame_program_cache: HashMap::new(),
+                terrain_patch_mesh_cache: HashMap::new(),
+                unit_plane_mesh: None,
             }
         }
     }
@@ -592,6 +727,280 @@ impl OpenGLRenderer {
     /// Returns the device context handle.
     pub fn hdc(&self) -> HDC {
         self.hdc
+    }
+
+    fn cached_frame_mesh(&mut self, assets: &AssetStore, handle: MeshHandle) -> Option<GpuMesh> {
+        if handle.is_null() {
+            return None;
+        }
+        if let Some(mesh) = self.frame_mesh_cache.get(&handle) {
+            return Some(*mesh);
+        }
+
+        let gpu_mesh = self.upload_mesh(assets.get::<MeshData>(handle)?);
+        self.frame_mesh_cache.insert(handle, gpu_mesh);
+        Some(gpu_mesh)
+    }
+
+    fn cached_frame_texture(
+        &mut self,
+        assets: &AssetStore,
+        handle: TextureHandle,
+    ) -> Option<GpuTexture> {
+        if handle.is_null() {
+            return None;
+        }
+        if let Some(texture) = self.frame_texture_cache.get(&handle) {
+            return Some(*texture);
+        }
+
+        let gpu_texture = self.upload_texture(assets.get::<Texture>(handle)?);
+        self.frame_texture_cache.insert(handle, gpu_texture);
+        Some(gpu_texture)
+    }
+
+    fn cached_frame_program(
+        &mut self,
+        assets: &AssetStore,
+        handle: ShaderHandle,
+    ) -> Option<GLuint> {
+        if handle.is_null() {
+            return None;
+        }
+        if let Some(program) = self.frame_program_cache.get(&handle) {
+            return Some(*program);
+        }
+
+        let shader = assets.get::<Shader>(handle)?;
+        let program = self.compile_shader_program(&shader.vertex_source, &shader.fragment_source);
+        self.frame_program_cache.insert(handle, program);
+        Some(program)
+    }
+
+    fn cached_terrain_patch_mesh(&mut self, patch: &TerrainPatchItem) -> GpuMesh {
+        let key = terrain_patch_mesh_key(patch);
+        if let Some(mesh) = self.terrain_patch_mesh_cache.get(&key) {
+            return *mesh;
+        }
+
+        let gpu_mesh = self.upload_mesh(&build_terrain_patch_mesh(patch));
+        self.terrain_patch_mesh_cache.insert(key, gpu_mesh);
+        gpu_mesh
+    }
+
+    fn cached_unit_plane_mesh(&mut self) -> GpuMesh {
+        if let Some(mesh) = self.unit_plane_mesh {
+            return mesh;
+        }
+
+        let mesh = self.upload_mesh(&MeshData::plane(8, 8));
+        self.unit_plane_mesh = Some(mesh);
+        mesh
+    }
+
+    fn draw_submitted_view(&mut self, assets: &AssetStore, view: &RenderView) {
+        unsafe {
+            (self.gl.viewport)(
+                view.viewport.x as GLint,
+                view.viewport.y as GLint,
+                view.viewport.width as GLsizei,
+                view.viewport.height as GLsizei,
+            );
+        }
+
+        self.clear(view.clear_color);
+
+        let light = view
+            .lights
+            .first()
+            .copied()
+            .unwrap_or_else(LightItem::default);
+        for batch in &view.terrain_batches {
+            self.draw_terrain_batch(assets, view, batch, light);
+        }
+        for item in &view.draw_items {
+            self.draw_submitted_item(assets, view, item, light);
+        }
+        for batch in &view.vegetation_batches {
+            self.draw_vegetation_batch(assets, view, batch, light);
+        }
+        for batch in &view.water_batches {
+            self.draw_water_batch(assets, view, batch, light);
+        }
+        for batch in &view.particle_batches {
+            self.draw_particle_batch(assets, view, batch, light);
+        }
+    }
+
+    fn draw_submitted_item(
+        &mut self,
+        assets: &AssetStore,
+        view: &RenderView,
+        item: &DrawItem,
+        light: LightItem,
+    ) {
+        let mesh = match self.cached_frame_mesh(assets, item.mesh) {
+            Some(mesh) => mesh,
+            None => return,
+        };
+
+        self.draw_material_mesh(
+            assets,
+            view,
+            mesh,
+            item.material,
+            &item.model,
+            light,
+            Color::WHITE,
+        );
+    }
+
+    fn draw_terrain_batch(
+        &mut self,
+        assets: &AssetStore,
+        view: &RenderView,
+        batch: &TerrainBatch,
+        light: LightItem,
+    ) {
+        if batch.material.is_null() {
+            return;
+        }
+
+        for patch in &batch.patches {
+            let mesh = self.cached_terrain_patch_mesh(patch);
+            self.draw_material_mesh(
+                assets,
+                view,
+                mesh,
+                batch.material,
+                &Mat4::IDENTITY,
+                light,
+                Color::WHITE,
+            );
+        }
+    }
+
+    fn draw_vegetation_batch(
+        &mut self,
+        assets: &AssetStore,
+        view: &RenderView,
+        batch: &VegetationBatch,
+        light: LightItem,
+    ) {
+        let mesh = match self.cached_frame_mesh(assets, batch.mesh) {
+            Some(mesh) => mesh,
+            None => return,
+        };
+
+        for model in &batch.instances {
+            self.draw_material_mesh(
+                assets,
+                view,
+                mesh,
+                batch.material,
+                model,
+                light,
+                Color::WHITE,
+            );
+        }
+    }
+
+    fn draw_water_batch(
+        &mut self,
+        assets: &AssetStore,
+        view: &RenderView,
+        batch: &WaterBatch,
+        light: LightItem,
+    ) {
+        let Some(material) = batch.material else {
+            return;
+        };
+
+        let mesh = match batch.mesh {
+            Some(handle) => match self.cached_frame_mesh(assets, handle) {
+                Some(mesh) => mesh,
+                None => return,
+            },
+            None => self.cached_unit_plane_mesh(),
+        };
+
+        self.draw_material_mesh(
+            assets,
+            view,
+            mesh,
+            material,
+            &batch.model,
+            light,
+            batch.fog_color,
+        );
+    }
+
+    fn draw_particle_batch(
+        &mut self,
+        assets: &AssetStore,
+        view: &RenderView,
+        batch: &ParticleBatch,
+        light: LightItem,
+    ) {
+        let Some(material) = batch.material else {
+            return;
+        };
+        if batch.billboards.is_empty() {
+            return;
+        }
+
+        let mesh = self.cached_unit_plane_mesh();
+        unsafe {
+            (self.gl.enable)(GL_BLEND);
+            (self.gl.blend_func)(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+
+        for billboard in &batch.billboards {
+            let model =
+                billboard_model_matrix(billboard.position, billboard.size, view.camera_position);
+            self.draw_material_mesh(assets, view, mesh, material, &model, light, billboard.color);
+        }
+
+        unsafe {
+            (self.gl.disable)(GL_BLEND);
+        }
+    }
+
+    fn draw_material_mesh(
+        &mut self,
+        assets: &AssetStore,
+        view: &RenderView,
+        mesh: GpuMesh,
+        material_handle: crate::assets::MaterialHandle,
+        model: &Mat4,
+        light: LightItem,
+        tint: Color,
+    ) {
+        let material = match assets.get::<Material>(material_handle) {
+            Some(material) => material,
+            None => return,
+        };
+        let texture = match self.cached_frame_texture(assets, material.albedo) {
+            Some(texture) => texture,
+            None => return,
+        };
+        let program = match self.cached_frame_program(assets, material.shader) {
+            Some(program) => program,
+            None => return,
+        };
+
+        let mvp = view.projection * view.view * *model;
+        self.draw_mesh_textured(
+            &mesh,
+            &texture,
+            program,
+            &mvp,
+            model,
+            tint,
+            light.direction,
+            view.camera_position,
+            light.ambient,
+        );
     }
 
     // ── Geometry upload ───────────────────────────────────────────────────────
@@ -1118,6 +1527,24 @@ impl Renderer for OpenGLRenderer {
         }
     }
 
+    fn submit_frame(&mut self, assets: &AssetStore, frame: &RenderFrame) {
+        if let Some(view) = frame.primary_view() {
+            self.draw_submitted_view(assets, view);
+            let vp = view.projection * view.view;
+            self.render_debug_lines(&frame.debug_lines, &vp);
+        } else {
+            unsafe {
+                (self.gl.viewport)(0, 0, self.width as GLsizei, self.height as GLsizei);
+            }
+            self.clear(Color::BLACK);
+        }
+
+        unsafe {
+            (self.gl.viewport)(0, 0, self.width as GLsizei, self.height as GLsizei);
+        }
+        self.render_screen_quads(&frame.screen_quads);
+    }
+
     fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
         if lines.is_empty() {
             return;
@@ -1248,6 +1675,44 @@ impl Renderer for OpenGLRenderer {
 impl Drop for OpenGLRenderer {
     fn drop(&mut self) {
         unsafe {
+            let meshes: Vec<_> = self
+                .frame_mesh_cache
+                .drain()
+                .map(|(_, mesh)| mesh)
+                .collect();
+            let terrain_meshes: Vec<_> = self
+                .terrain_patch_mesh_cache
+                .drain()
+                .map(|(_, mesh)| mesh)
+                .collect();
+            let textures: Vec<_> = self
+                .frame_texture_cache
+                .drain()
+                .map(|(_, texture)| texture)
+                .collect();
+            let programs: Vec<_> = self
+                .frame_program_cache
+                .drain()
+                .map(|(_, program)| program)
+                .collect();
+
+            for mesh in meshes {
+                self.delete_vao(mesh.vao, mesh.vbo, mesh.ebo);
+            }
+            for mesh in terrain_meshes {
+                self.delete_vao(mesh.vao, mesh.vbo, mesh.ebo);
+            }
+            if let Some(mesh) = self.unit_plane_mesh.take() {
+                self.delete_vao(mesh.vao, mesh.vbo, mesh.ebo);
+            }
+            for texture in textures {
+                (self.gl.delete_textures)(1, &texture.id);
+            }
+            for program in programs {
+                self.uniform_cache.remove(&program);
+                (self.gl.delete_program)(program);
+            }
+
             // Free line rendering resources.
             (self.gl.delete_buffers)(1, &self.line_vbo);
             (self.gl.delete_vertex_arrays)(1, &self.line_vao);
@@ -1260,5 +1725,42 @@ impl Drop for OpenGLRenderer {
                 FreeLibrary(self.opengl32);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{billboard_model_matrix, build_terrain_patch_mesh, terrain_patch_subdivisions};
+    use crate::math::Vec3;
+    use crate::renderer::TerrainPatchItem;
+
+    #[test]
+    fn terrain_patch_mesh_builder_respects_lod() {
+        let patch = TerrainPatchItem {
+            origin: Vec3::new(32.0, 0.0, 48.0),
+            size: 64.0,
+            height_scale: 72.0,
+            lod_level: 1,
+        };
+
+        let mesh = build_terrain_patch_mesh(&patch);
+        let subdivisions = terrain_patch_subdivisions(patch.lod_level);
+        assert_eq!(mesh.vertices.len(), (subdivisions + 1) * (subdivisions + 1));
+        assert_eq!(mesh.indices.len(), subdivisions * subdivisions * 6);
+    }
+
+    #[test]
+    fn billboard_model_faces_camera_and_keeps_translation() {
+        let position = Vec3::new(10.0, 4.0, -2.0);
+        let camera = Vec3::new(14.0, 6.0, 5.0);
+        let model = billboard_model_matrix(position, 3.5, camera);
+        let facing = Vec3::new(model.cols[1][0], model.cols[1][1], model.cols[1][2]).normalize();
+        let expected = (camera - position).normalize();
+
+        assert!(facing.dot(expected) > 0.999);
+        assert_eq!(
+            Vec3::new(model.cols[3][0], model.cols[3][1], model.cols[3][2]),
+            position
+        );
     }
 }

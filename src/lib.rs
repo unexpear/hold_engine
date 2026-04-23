@@ -10,23 +10,38 @@ pub mod platform;
 pub mod player;
 pub mod prelude;
 pub mod renderer;
+pub mod runtime_frame;
+pub mod runtime_slice;
 pub mod scene;
 pub mod skybox;
 pub mod terrain;
 
 // Convenient re-exports at the crate root.
 pub use assets::{
-    load_bmp, load_texture, load_tga, AssetStore, GpuMesh, GpuTexture, Handle, MeshData, ObjError,
-    TexError, Texture, TextureFormat, Vertex,
+    compile_asset_from_source, compile_material_asset, compile_mesh_asset, compile_texture_asset,
+    compiled_asset_path_for_logical_name, decode_compiled_asset, decode_compiled_material_payload,
+    decode_compiled_mesh_payload, decode_compiled_texture_payload, encode_compiled_asset,
+    encode_compiled_material_payload, encode_compiled_mesh_payload,
+    encode_compiled_texture_payload, load_bmp, load_texture, load_tga,
+    parse_compiled_material_source, resolve_source_asset_path, source_asset_candidates,
+    source_asset_is_stale, write_compiled_asset, AssetCompilerError, AssetStore, CompiledAssetBlob,
+    CompiledAssetDependency, CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata,
+    CompiledAssetRuntimeError, CompiledAssetRuntimeLoader, CompiledMaterialPayload, GpuMesh,
+    GpuTexture, Handle, Material, MaterialHandle, MeshData, MeshHandle, ObjError, Shader,
+    ShaderHandle, TexError, Texture, TextureFormat, TextureHandle, Vertex, COMPILED_ASSET_MAGIC,
+    COMPILED_ASSET_VERSION,
 };
 pub use ecs::{
-    generate_particle_debug_lines, ActiveCamera, ActiveDialogue, Camera, CameraMode, CameraSystem,
-    Children, DialogueChoice, DialogueNode, DialogueTree, DirectionalLight, Entity,
-    GlobalTransform, Inventory, ItemId, ItemStack, Mut, NodeId, Parent, Particle,
-    ParticleEmitSystem, ParticleEmitter, ParticleLifetimeSystem, ParticleSource, PhysicsSystem,
-    Query2, Query2Mut, Query3, Query3Mut, Quest, QuestId, QuestLog, QuestObjective, QuestState,
-    RigidBody, SphereCollider, Stats, System, SystemAccess, SystemSchedule, Transform,
-    TransformPropagateSystem, Velocity, World,
+    generate_particle_batch, generate_particle_debug_lines, ActiveCamera, ActiveDialogue,
+    AnimationGraphState, AnimationState, AudioEmitter, Breakable, Camera, CameraMode, CameraSystem,
+    CharacterController, Children, DialogueChoice, DialogueNode, DialogueTree, DirectionalLight,
+    Entity, GlobalTransform, Health, Inventory, ItemId, ItemStack, MaterialRef, Mut, NavAgent,
+    NodeId, Parent, Particle, ParticleEmitSystem, ParticleEmitter, ParticleLifetimeSystem,
+    ParticleSource, PatrolRoute, PhysicsSystem, Query2, Query2Mut, Query3, Query3Mut, Quest,
+    QuestId, QuestLog, QuestObjective, QuestState, RigidBody, SkeletonPose, SphereCollider,
+    StaticMesh, Stats, System, SystemAccess, SystemSchedule, TerrainChunkRef, Transform,
+    TransformPropagateSystem, VegetationInstance, VehicleController, Velocity, Weapon, WheelState,
+    World,
 };
 pub use engine::{App, Engine};
 pub use events::{AppExit, EventBus, EventQueue, WindowResized};
@@ -34,7 +49,17 @@ pub use input::{InputState, MouseButton};
 pub use lod::{ChunkTier, LodChunk, LodLevel, LodMesh, LodTerrain};
 pub use math::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use player::PlayerController;
-pub use renderer::{BackendKind, Color, DebugLine, Renderer, ScreenQuad};
+pub use renderer::{
+    BackendCapabilities, BackendKind, BackendMaturity, Color, DebugLine, DrawItem, FogState,
+    LightItem, ParticleBatch, ParticleBillboard, RenderFrame, RenderView, RenderViewport, Renderer,
+    ScreenQuad, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
+};
+pub use runtime_frame::{build_runtime_slice_frame, RuntimeSliceBindings, RuntimeSliceViewConfig};
+pub use runtime_slice::{
+    BreakablePropDef, PatrolRouteDef, RuntimeSliceAuthoring, SpawnPointDef, SpawnPointKind,
+    StaticMeshActorDef, TerrainAuthoring, TerrainPaintLayer, VegetationPaintStroke,
+    VegetationPrototypeDef, VehicleSpawnerDef, WaterVolumeDef,
+};
 pub use scene::{
     load_scene, parse_scene, save_scene, serialize_scene, spawn_scene, CameraDef, EntityDef,
     LightDef, SceneData, SceneError, StatsDef, TransformDef,
@@ -51,8 +76,9 @@ pub use editor::{
     EditorBridgeServer, EditorCamera, EditorCommand, EditorCommandError, EditorDrawList,
     EditorEntity, EditorEvent, EditorInspectorCursor, EditorIoError, EditorNativeUi,
     EditorNativeUiState, EditorPipelineError, EditorPlayState, EditorProtocolError,
-    EditorRuntimeHost, EditorSceneSession, EditorSessionError, EditorUiHitRegion, EditorUiPanel,
-    EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
-    EditorViewportGizmoMode, EditorViewportOverlay, InspectorComponent, InspectorField,
-    InspectorValue, Project, SceneBridgeError, SceneDocument,
+    EditorRuntimeHost, EditorSceneSession, EditorSessionError, EditorUiActionLogEntry,
+    EditorUiActionTone, EditorUiCommandPalette, EditorUiHitRegion, EditorUiPaletteEntry,
+    EditorUiPaletteEntrySource, EditorUiPanel, EditorUiPanelRegion, EditorViewportGizmoHandle,
+    EditorViewportGizmoHandleId, EditorViewportGizmoMode, EditorViewportOverlay,
+    InspectorComponent, InspectorField, InspectorValue, Project, SceneBridgeError, SceneDocument,
 };

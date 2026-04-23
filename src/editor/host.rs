@@ -16,11 +16,15 @@ use crate::ecs::components::{ActiveCamera, Camera};
 use crate::ecs::{Entity, World};
 use crate::input::{vk, InputState, MouseButton};
 use crate::math::{Mat4, Vec3};
+use crate::runtime_slice::{
+    PatrolRouteDef, TerrainPaintLayer, VegetationPaintStroke, VehicleSpawnerDef,
+};
 
 use super::{
     command::{EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor},
     protocol::{decode_command, encode_event, EditorProtocolError},
-    EditorPlayState, EditorSceneSession, EditorSessionError, InspectorValue, SceneDocument,
+    EditorPlayState, EditorSceneSession, EditorSessionError, InspectorValue, Project,
+    SceneDocument,
 };
 
 // ── EditorCamera ──────────────────────────────────────────────────────────────
@@ -128,6 +132,13 @@ impl Default for EditorCamera {
     }
 }
 
+#[derive(Debug, Clone)]
+struct EditorHistorySnapshot {
+    scene: SceneDocument,
+    cursor: Option<EditorInspectorCursor>,
+    persistent_dirty: bool,
+}
+
 // ── EditorRuntimeHost ─────────────────────────────────────────────────────────
 
 /// Headless editor/runtime host for the authoritative scene workflow.
@@ -159,6 +170,10 @@ pub struct EditorRuntimeHost {
     /// `true` when the live world is stale and requires a rebuild to match the
     /// current scene document.
     world_requires_rebuild: bool,
+    /// Authored edit history owned by the authoritative host.
+    undo_stack: Vec<EditorHistorySnapshot>,
+    /// Redo history paired with [`Self::undo_stack`].
+    redo_stack: Vec<EditorHistorySnapshot>,
 
     // ── Editor camera ─────────────────────────────────────────────────────
     pub editor_camera: EditorCamera,
@@ -178,6 +193,8 @@ impl EditorRuntimeHost {
             persistent_dirty: false,
             pre_play_persistent_dirty: false,
             world_requires_rebuild: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             editor_camera: EditorCamera::new(),
         };
         host.rebuild_world()?;
@@ -190,14 +207,32 @@ impl EditorRuntimeHost {
         Self::new(EditorSceneSession::new(scene))
     }
 
+    pub fn from_scene_with_project(
+        scene: SceneDocument,
+        project: Project,
+    ) -> Result<Self, EditorSessionError> {
+        Self::new(EditorSceneSession::new_with_project(scene, project))
+    }
+
     pub fn open_hsc<P: AsRef<Path>>(path: P) -> Result<Self, EditorSessionError> {
         Self::new(EditorSceneSession::open_hsc(path)?)
+    }
+
+    pub fn open_hsc_with_project<P: AsRef<Path>>(
+        path: P,
+        project: Project,
+    ) -> Result<Self, EditorSessionError> {
+        Self::new(EditorSceneSession::open_hsc_with_project(path, project)?)
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────
 
     pub fn session(&self) -> &EditorSceneSession {
         &self.session
+    }
+
+    pub fn project(&self) -> Option<&Project> {
+        self.session.project()
     }
 
     pub fn session_mut(&mut self) -> &mut EditorSceneSession {
@@ -231,6 +266,16 @@ impl EditorRuntimeHost {
     /// Whether the live world is stale and needs a rebuild to match the scene.
     pub fn world_requires_rebuild(&self) -> bool {
         self.world_requires_rebuild
+    }
+
+    /// Whether an explicit authored undo is currently available.
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Whether an explicit authored redo is currently available.
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
     }
 
     /// The current inspector cursor, or `None` if the scene is empty.
@@ -416,9 +461,50 @@ impl EditorRuntimeHost {
             EditorCommand::ResumePlayMode => self.cmd_resume_play_mode(),
             EditorCommand::StopPlayMode => self.cmd_stop_play_mode(),
             EditorCommand::Save => self.cmd_save(),
+            EditorCommand::Undo => self.cmd_undo(),
+            EditorCommand::Redo => self.cmd_redo(),
             EditorCommand::ReloadSource => self.cmd_reload_source(),
             EditorCommand::ForcePatch => self.cmd_force_patch(),
             EditorCommand::ForceRebuild => self.cmd_force_rebuild(),
+            EditorCommand::SetTerrainSettings {
+                size_meters,
+                chunk_size_meters,
+                height_scale_meters,
+            } => self.cmd_set_terrain_settings(size_meters, chunk_size_meters, height_scale_meters),
+            EditorCommand::UpsertTerrainPaintLayer {
+                name,
+                material,
+                tiling,
+                weightmap_channel,
+            } => self.cmd_upsert_terrain_paint_layer(name, material, tiling, weightmap_channel),
+            EditorCommand::RemoveTerrainPaintLayer { name } => {
+                self.cmd_remove_terrain_paint_layer(name)
+            }
+            EditorCommand::PaintVegetation {
+                prototype,
+                center,
+                radius,
+                density,
+            } => self.cmd_paint_vegetation(prototype, center, radius, density),
+            EditorCommand::EraseVegetation {
+                prototype,
+                center,
+                radius,
+            } => self.cmd_erase_vegetation(prototype, center, radius),
+            EditorCommand::UpsertPatrolRoute {
+                name,
+                points,
+                looped,
+            } => self.cmd_upsert_patrol_route(name, points, looped),
+            EditorCommand::RemovePatrolRoute { name } => self.cmd_remove_patrol_route(name),
+            EditorCommand::UpsertVehicleSpawner {
+                name,
+                mesh,
+                material,
+                position,
+                facing_yaw_deg,
+            } => self.cmd_upsert_vehicle_spawner(name, mesh, material, position, facing_yaw_deg),
+            EditorCommand::RemoveVehicleSpawner { name } => self.cmd_remove_vehicle_spawner(name),
         }
     }
 
@@ -546,6 +632,7 @@ impl EditorRuntimeHost {
         target_entity_id: Option<u64>,
         target_component: &str,
         target_field: &str,
+        target_axis: Option<EditorAxis>,
     ) {
         let entities = &self.session.scene().entities;
         if entities.is_empty() {
@@ -573,6 +660,61 @@ impl EditorRuntimeHost {
             .and_then(|c| c.fields.iter().position(|f| f.name == target_field))
             .unwrap_or(0);
         self.apply_cursor_selection(entity_idx, comp_idx, field_idx);
+        if matches!(self.current_field_value(), Some(InspectorValue::Vec3(_))) {
+            self.cursor_axis = target_axis;
+        }
+    }
+
+    fn restore_cursor_snapshot(&mut self, cursor: Option<&EditorInspectorCursor>) {
+        if let Some(cursor) = cursor {
+            self.restore_cursor(
+                Some(cursor.entity_id),
+                &cursor.component_name,
+                &cursor.field_name,
+                cursor.axis,
+            );
+        } else {
+            self.init_cursor_to_first();
+        }
+    }
+
+    fn capture_history_snapshot(&self) -> EditorHistorySnapshot {
+        EditorHistorySnapshot {
+            scene: self.session.scene().clone(),
+            cursor: self.cursor(),
+            persistent_dirty: self.persistent_dirty,
+        }
+    }
+
+    fn push_undo_snapshot(&mut self, snapshot: EditorHistorySnapshot) {
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+    }
+
+    fn restore_history_snapshot(
+        &mut self,
+        snapshot: EditorHistorySnapshot,
+        history_event: EditorEvent,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let EditorHistorySnapshot {
+            scene,
+            cursor,
+            persistent_dirty,
+        } = snapshot;
+        *self.session.scene_mut() = scene;
+        self.session
+            .rebuild_world(&mut self.world)
+            .map_err(EditorCommandError::Session)?;
+        self.persistent_dirty = persistent_dirty;
+        self.pre_play_persistent_dirty = persistent_dirty;
+        self.world_requires_rebuild = false;
+        self.restore_cursor_snapshot(cursor.as_ref());
+
+        let mut events = vec![history_event, EditorEvent::WorldRebuilt];
+        if let Some(cursor) = self.cursor() {
+            events.push(EditorEvent::SelectionChanged(cursor));
+        }
+        Ok(events)
     }
 
     /// Auto-attempt `patch_world`; translate the result into events.
@@ -588,6 +730,52 @@ impl EditorRuntimeHost {
             }
             Err(err) => Err(EditorCommandError::Session(err)),
         }
+    }
+
+    fn begin_runtime_slice_edit(
+        &mut self,
+        command: &'static str,
+    ) -> Result<Option<EditorHistorySnapshot>, EditorCommandError> {
+        let play_state = self.play_state();
+        if play_state == EditorPlayState::Playing {
+            return Err(EditorCommandError::UnsupportedCommandState {
+                command,
+                state: EditorPlayState::Playing,
+            });
+        }
+        if play_state == EditorPlayState::Editing {
+            Ok(Some(self.capture_history_snapshot()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn finish_runtime_slice_edit(
+        &mut self,
+        history_snapshot: Option<EditorHistorySnapshot>,
+        path: impl Into<String>,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        if let Some(snapshot) = history_snapshot {
+            self.push_undo_snapshot(snapshot);
+            self.persistent_dirty = true;
+        }
+        let mut events = vec![EditorEvent::RuntimeSliceUpdated { path: path.into() }];
+        events.extend(self.auto_patch_events()?);
+        Ok(events)
+    }
+
+    fn validate_runtime_slice_name(
+        &self,
+        kind: &'static str,
+        name: &str,
+    ) -> Result<String, EditorCommandError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(EditorCommandError::InvalidRuntimeSliceEdit {
+                reason: format!("runtime-slice {kind} name cannot be empty"),
+            });
+        }
+        Ok(trimmed.to_string())
     }
 
     // ── Private: command implementations ──────────────────────────────────
@@ -709,8 +897,10 @@ impl EditorRuntimeHost {
     }
 
     fn cmd_apply_delta(&mut self, delta: f32) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let play_state = self.play_state();
+
         // Playing blocks field edits.
-        if self.play_state() == EditorPlayState::Playing {
+        if play_state == EditorPlayState::Playing {
             return Err(EditorCommandError::UnsupportedCommandState {
                 command: "ApplyDelta",
                 state: EditorPlayState::Playing,
@@ -753,12 +943,19 @@ impl EditorRuntimeHost {
         };
 
         // Mutate scene document.
+        let history_snapshot = if play_state == EditorPlayState::Editing {
+            Some(self.capture_history_snapshot())
+        } else {
+            None
+        };
+
         self.session
             .set_selected_value(&comp_name, &field_name, new_value.clone())
             .map_err(EditorCommandError::Session)?;
 
         // Persistent dirty — only in Editing; Paused edits are transient PIE overrides.
-        if self.play_state() == EditorPlayState::Editing {
+        if let Some(snapshot) = history_snapshot {
+            self.push_undo_snapshot(snapshot);
             self.persistent_dirty = true;
         }
 
@@ -773,6 +970,163 @@ impl EditorRuntimeHost {
         let mut events = vec![field_event];
         events.extend(self.auto_patch_events()?);
         Ok(events)
+    }
+
+    fn cmd_set_terrain_settings(
+        &mut self,
+        size_meters: Vec3,
+        chunk_size_meters: u32,
+        height_scale_meters: f32,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("SetTerrainSettings")?;
+        self.session.scene_mut().set_terrain_settings(
+            size_meters,
+            chunk_size_meters,
+            height_scale_meters,
+        );
+        self.finish_runtime_slice_edit(history, "terrain")
+    }
+
+    fn cmd_upsert_terrain_paint_layer(
+        &mut self,
+        name: String,
+        material: Option<String>,
+        tiling: f32,
+        weightmap_channel: u8,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("UpsertTerrainPaintLayer")?;
+        let name = self.validate_runtime_slice_name("terrain paint layer", &name)?;
+        self.session
+            .scene_mut()
+            .upsert_terrain_paint_layer(TerrainPaintLayer {
+                name: name.clone(),
+                material,
+                tiling,
+                weightmap_channel,
+            });
+        self.finish_runtime_slice_edit(history, format!("terrain.paint_layers.{name}"))
+    }
+
+    fn cmd_remove_terrain_paint_layer(
+        &mut self,
+        name: String,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("RemoveTerrainPaintLayer")?;
+        let name = self.validate_runtime_slice_name("terrain paint layer", &name)?;
+        if !self.session.scene_mut().remove_terrain_paint_layer(&name) {
+            return Err(EditorCommandError::MissingRuntimeSliceItem {
+                kind: "terrain paint layer",
+                name,
+            });
+        }
+        self.finish_runtime_slice_edit(history, "terrain.paint_layers")
+    }
+
+    fn cmd_paint_vegetation(
+        &mut self,
+        prototype: String,
+        center: Vec3,
+        radius: f32,
+        density: f32,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("PaintVegetation")?;
+        let prototype = self.validate_runtime_slice_name("vegetation prototype", &prototype)?;
+        self.session
+            .scene_mut()
+            .paint_vegetation(VegetationPaintStroke {
+                prototype: prototype.clone(),
+                center,
+                radius,
+                density,
+            });
+        self.finish_runtime_slice_edit(history, format!("vegetation_paints.{prototype}"))
+    }
+
+    fn cmd_erase_vegetation(
+        &mut self,
+        prototype: Option<String>,
+        center: Vec3,
+        radius: f32,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("EraseVegetation")?;
+        let normalized_prototype = match prototype {
+            Some(name) => Some(self.validate_runtime_slice_name("vegetation prototype", &name)?),
+            None => None,
+        };
+        self.session
+            .scene_mut()
+            .erase_vegetation(normalized_prototype.as_deref(), center, radius);
+        self.finish_runtime_slice_edit(history, "vegetation_paints")
+    }
+
+    fn cmd_upsert_patrol_route(
+        &mut self,
+        name: String,
+        points: Vec<Vec3>,
+        looped: bool,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("UpsertPatrolRoute")?;
+        let name = self.validate_runtime_slice_name("patrol route", &name)?;
+        self.session
+            .scene_mut()
+            .upsert_patrol_route(PatrolRouteDef {
+                name: name.clone(),
+                points,
+                looped,
+            });
+        self.finish_runtime_slice_edit(history, format!("patrol_routes.{name}"))
+    }
+
+    fn cmd_remove_patrol_route(
+        &mut self,
+        name: String,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("RemovePatrolRoute")?;
+        let name = self.validate_runtime_slice_name("patrol route", &name)?;
+        if !self.session.scene_mut().remove_patrol_route(&name) {
+            return Err(EditorCommandError::MissingRuntimeSliceItem {
+                kind: "patrol route",
+                name,
+            });
+        }
+        self.finish_runtime_slice_edit(history, "patrol_routes")
+    }
+
+    fn cmd_upsert_vehicle_spawner(
+        &mut self,
+        name: String,
+        mesh: Option<String>,
+        material: Option<String>,
+        position: Vec3,
+        facing_yaw_deg: f32,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("UpsertVehicleSpawner")?;
+        let name = self.validate_runtime_slice_name("vehicle spawner", &name)?;
+        self.session
+            .scene_mut()
+            .upsert_vehicle_spawner(VehicleSpawnerDef {
+                name: name.clone(),
+                mesh,
+                material,
+                position,
+                facing_yaw_deg,
+            });
+        self.finish_runtime_slice_edit(history, format!("vehicle_spawners.{name}"))
+    }
+
+    fn cmd_remove_vehicle_spawner(
+        &mut self,
+        name: String,
+    ) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        let history = self.begin_runtime_slice_edit("RemoveVehicleSpawner")?;
+        let name = self.validate_runtime_slice_name("vehicle spawner", &name)?;
+        if !self.session.scene_mut().remove_vehicle_spawner(&name) {
+            return Err(EditorCommandError::MissingRuntimeSliceItem {
+                kind: "vehicle spawner",
+                name,
+            });
+        }
+        self.finish_runtime_slice_edit(history, "vehicle_spawners")
     }
 
     fn cmd_enter_play_mode(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
@@ -826,10 +1180,10 @@ impl EditorRuntimeHost {
         }
 
         // Preserve cursor identity for restoration.
-        let (saved_entity_id, saved_comp, saved_field) = self
+        let (saved_entity_id, saved_comp, saved_field, saved_axis) = self
             .cursor()
-            .map(|c| (Some(c.entity_id), c.component_name, c.field_name))
-            .unwrap_or((None, String::new(), String::new()));
+            .map(|c| (Some(c.entity_id), c.component_name, c.field_name, c.axis))
+            .unwrap_or((None, String::new(), String::new(), None));
 
         self.session
             .stop_play_mode(&mut self.world)
@@ -840,7 +1194,7 @@ impl EditorRuntimeHost {
         self.world_requires_rebuild = false;
 
         // Restore cursor (clamped if the entity/component/field no longer exists).
-        self.restore_cursor(saved_entity_id, &saved_comp, &saved_field);
+        self.restore_cursor(saved_entity_id, &saved_comp, &saved_field, saved_axis);
 
         Ok(vec![
             EditorEvent::PlayModeChanged(EditorPlayState::Editing),
@@ -865,6 +1219,38 @@ impl EditorRuntimeHost {
         Ok(vec![EditorEvent::Saved])
     }
 
+    fn cmd_undo(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        if self.play_state() != EditorPlayState::Editing {
+            return Err(EditorCommandError::UnsupportedCommandState {
+                command: "Undo",
+                state: self.play_state(),
+            });
+        }
+
+        let snapshot = self
+            .undo_stack
+            .pop()
+            .ok_or(EditorCommandError::HistoryEmpty { command: "Undo" })?;
+        self.redo_stack.push(self.capture_history_snapshot());
+        self.restore_history_snapshot(snapshot, EditorEvent::UndoApplied)
+    }
+
+    fn cmd_redo(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        if self.play_state() != EditorPlayState::Editing {
+            return Err(EditorCommandError::UnsupportedCommandState {
+                command: "Redo",
+                state: self.play_state(),
+            });
+        }
+
+        let snapshot = self
+            .redo_stack
+            .pop()
+            .ok_or(EditorCommandError::HistoryEmpty { command: "Redo" })?;
+        self.undo_stack.push(self.capture_history_snapshot());
+        self.restore_history_snapshot(snapshot, EditorEvent::RedoApplied)
+    }
+
     fn cmd_reload_source(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
         if self.play_state() != EditorPlayState::Editing {
             return Err(EditorCommandError::UnsupportedCommandState {
@@ -877,22 +1263,28 @@ impl EditorRuntimeHost {
             .source_path()
             .ok_or(EditorCommandError::MissingSourcePath)?
             .to_path_buf();
+        let project = self.session.project().cloned();
 
-        let (saved_entity_id, saved_comp, saved_field) = self
+        let (saved_entity_id, saved_comp, saved_field, saved_axis) = self
             .cursor()
-            .map(|c| (Some(c.entity_id), c.component_name, c.field_name))
-            .unwrap_or((None, String::new(), String::new()));
+            .map(|c| (Some(c.entity_id), c.component_name, c.field_name, c.axis))
+            .unwrap_or((None, String::new(), String::new(), None));
 
-        self.session =
-            EditorSceneSession::open_hsc(&source_path).map_err(EditorCommandError::Session)?;
+        self.session = match project {
+            Some(project) => EditorSceneSession::open_hsc_with_project(&source_path, project),
+            None => EditorSceneSession::open_hsc(&source_path),
+        }
+        .map_err(EditorCommandError::Session)?;
         self.session
             .rebuild_world(&mut self.world)
             .map_err(EditorCommandError::Session)?;
         self.persistent_dirty = false;
         self.pre_play_persistent_dirty = false;
         self.world_requires_rebuild = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
 
-        self.restore_cursor(saved_entity_id, &saved_comp, &saved_field);
+        self.restore_cursor(saved_entity_id, &saved_comp, &saved_field, saved_axis);
         Ok(vec![EditorEvent::Reloaded, EditorEvent::WorldRebuilt])
     }
 
@@ -902,17 +1294,17 @@ impl EditorRuntimeHost {
 
     fn cmd_force_rebuild(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
         // Preserve cursor for restoration.
-        let (saved_entity_id, saved_comp, saved_field) = self
+        let (saved_entity_id, saved_comp, saved_field, saved_axis) = self
             .cursor()
-            .map(|c| (Some(c.entity_id), c.component_name, c.field_name))
-            .unwrap_or((None, String::new(), String::new()));
+            .map(|c| (Some(c.entity_id), c.component_name, c.field_name, c.axis))
+            .unwrap_or((None, String::new(), String::new(), None));
 
         self.session
             .rebuild_world(&mut self.world)
             .map_err(EditorCommandError::Session)?;
         self.world_requires_rebuild = false;
 
-        self.restore_cursor(saved_entity_id, &saved_comp, &saved_field);
+        self.restore_cursor(saved_entity_id, &saved_comp, &saved_field, saved_axis);
 
         Ok(vec![EditorEvent::WorldRebuilt])
     }
@@ -1342,6 +1734,197 @@ entity "cam" {
         assert!(host.is_dirty(), "dirty flag must survive a play cycle");
     }
 
+    #[test]
+    fn runtime_slice_authoring_commands_mutate_document_and_undo() {
+        let path = write_single_entity_scene("runtime_slice_authoring");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        let terrain_events = host
+            .execute(EditorCommand::SetTerrainSettings {
+                size_meters: Vec3::new(2048.0, 384.0, 2048.0),
+                chunk_size_meters: 128,
+                height_scale_meters: 96.0,
+            })
+            .unwrap();
+        assert!(terrain_events.iter().any(|event| matches!(
+            event,
+            EditorEvent::RuntimeSliceUpdated { path } if path == "terrain"
+        )));
+        assert!(host.is_dirty());
+        assert!(host.can_undo());
+        assert_eq!(
+            host.session().scene().runtime_slice.terrain.size_meters,
+            Vec3::new(2048.0, 384.0, 2048.0)
+        );
+
+        let route_events = host
+            .execute(EditorCommand::UpsertPatrolRoute {
+                name: "beach_patrol".into(),
+                points: vec![Vec3::new(4.0, 2.0, 8.0), Vec3::new(8.0, 2.0, 16.0)],
+                looped: true,
+            })
+            .unwrap();
+        assert!(route_events.iter().any(|event| matches!(
+            event,
+            EditorEvent::RuntimeSliceUpdated { path } if path == "patrol_routes.beach_patrol"
+        )));
+        assert_eq!(host.session().scene().runtime_slice.patrol_routes.len(), 1);
+
+        let undo_events = host.execute(EditorCommand::Undo).unwrap();
+        assert!(undo_events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::UndoApplied)));
+        assert!(host
+            .session()
+            .scene()
+            .runtime_slice
+            .patrol_routes
+            .is_empty());
+        assert_eq!(
+            host.session().scene().runtime_slice.terrain.size_meters,
+            Vec3::new(2048.0, 384.0, 2048.0)
+        );
+
+        host.execute(EditorCommand::Undo).unwrap();
+        assert_eq!(
+            host.session().scene().runtime_slice.terrain.size_meters,
+            Vec3::new(1024.0, 256.0, 1024.0)
+        );
+    }
+
+    #[test]
+    fn runtime_slice_remove_unknown_returns_typed_error() {
+        let path = write_single_entity_scene("runtime_slice_remove_unknown");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        let err = host
+            .execute(EditorCommand::RemoveVehicleSpawner {
+                name: "missing_jeep".into(),
+            })
+            .unwrap_err();
+        match err {
+            EditorCommandError::MissingRuntimeSliceItem { kind, name } => {
+                assert_eq!(kind, "vehicle spawner");
+                assert_eq!(name, "missing_jeep");
+            }
+            other => panic!("expected MissingRuntimeSliceItem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_slice_authoring_rejected_during_play() {
+        let path = write_single_entity_scene("runtime_slice_play_reject");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        host.execute(EditorCommand::EnterPlayMode).unwrap();
+        let err = host
+            .execute(EditorCommand::SetTerrainSettings {
+                size_meters: Vec3::new(512.0, 128.0, 512.0),
+                chunk_size_meters: 32,
+                height_scale_meters: 32.0,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EditorCommandError::UnsupportedCommandState {
+                command: "SetTerrainSettings",
+                state: EditorPlayState::Playing
+            }
+        ));
+    }
+
+    #[test]
+    fn undo_redo_restore_authored_scene_and_world() {
+        let path = write_single_entity_scene("undo_redo");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let cam_id = host.session().scene().entities[0].id;
+
+        host.cursor_entity_idx = Some(0);
+        host.cursor_component_idx = 0;
+        host.cursor_field_idx = 0;
+        host.cursor_axis = Some(EditorAxis::Y);
+
+        host.execute(EditorCommand::ApplyDelta(2.0)).unwrap();
+        assert!(
+            host.can_undo(),
+            "an authored edit should create undo history"
+        );
+        assert!(
+            !host.can_redo(),
+            "redo should stay empty until an undo happens"
+        );
+        assert!(host.is_dirty(), "authored edit should dirty the scene");
+        assert_eq!(
+            host.session()
+                .scene()
+                .get_value(cam_id, "Transform", "position"),
+            Some(&InspectorValue::Vec3([0.0, 7.0, 0.0]))
+        );
+
+        let undo_events = host.execute(EditorCommand::Undo).unwrap();
+        assert!(undo_events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::UndoApplied)));
+        assert!(undo_events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::WorldRebuilt)));
+        assert_eq!(
+            host.session()
+                .scene()
+                .get_value(cam_id, "Transform", "position"),
+            Some(&InspectorValue::Vec3([0.0, 5.0, 0.0]))
+        );
+        let runtime_cam = host.applied_entity(cam_id).unwrap();
+        let transform = host.world().get::<Transform>(runtime_cam).unwrap();
+        assert_eq!(transform.position, Vec3::new(0.0, 5.0, 0.0));
+        assert_eq!(host.cursor().unwrap().axis, Some(EditorAxis::Y));
+        assert!(
+            !host.is_dirty(),
+            "undo should restore the pre-edit dirty flag"
+        );
+        assert!(
+            !host.can_undo(),
+            "single edit should consume the only undo entry"
+        );
+        assert!(host.can_redo(), "redo should become available after undo");
+
+        let redo_events = host.execute(EditorCommand::Redo).unwrap();
+        assert!(redo_events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::RedoApplied)));
+        assert!(redo_events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::WorldRebuilt)));
+        assert_eq!(
+            host.session()
+                .scene()
+                .get_value(cam_id, "Transform", "position"),
+            Some(&InspectorValue::Vec3([0.0, 7.0, 0.0]))
+        );
+        let runtime_cam = host.applied_entity(cam_id).unwrap();
+        let transform = host.world().get::<Transform>(runtime_cam).unwrap();
+        assert_eq!(transform.position, Vec3::new(0.0, 7.0, 0.0));
+        assert_eq!(host.cursor().unwrap().axis, Some(EditorAxis::Y));
+        assert!(host.is_dirty(), "redo should restore the edited dirty flag");
+        assert!(host.can_undo(), "undo should be available again after redo");
+        assert!(
+            !host.can_redo(),
+            "redo stack should be exhausted after redo"
+        );
+    }
+
+    #[test]
+    fn undo_without_history_returns_typed_error() {
+        let path = write_single_entity_scene("undo_empty");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        let err = host.execute(EditorCommand::Undo).unwrap_err();
+        match err {
+            EditorCommandError::HistoryEmpty { command } => assert_eq!(command, "Undo"),
+            other => panic!("expected HistoryEmpty for Undo, got {other:?}"),
+        }
+    }
+
     // ── Patch / rebuild ───────────────────────────────────────────────────
 
     #[test]
@@ -1465,6 +2048,23 @@ entity "cam" {
                 .get_value(cursor.entity_id, "Transform", "position"),
             Some(&InspectorValue::Vec3([0.0, 5.0, 0.0]))
         );
+    }
+
+    #[test]
+    fn reload_source_preserves_project_context() {
+        let path = write_single_entity_scene("reload_project");
+        let project = Project::new("host_project", tmp_dir("reload_project_root"));
+        let mut host = EditorRuntimeHost::open_hsc_with_project(&path, project.clone()).unwrap();
+
+        host.execute(EditorCommand::ApplyDelta(2.0)).unwrap();
+        let events = host.execute(EditorCommand::ReloadSource).unwrap();
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EditorEvent::Reloaded)));
+        assert_eq!(host.project(), Some(&project));
+        assert_eq!(host.session().source_path(), Some(Path::new(&path)));
+        assert!(!host.is_dirty());
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! The game loop is driven by a caller-supplied closure.
 
 use crate::ecs::{SystemSchedule, World};
+use crate::events::AppExit;
 use crate::input::InputState;
 use crate::platform::Window;
 use crate::renderer::Renderer;
@@ -90,6 +91,10 @@ impl Engine {
             renderer.begin_frame();
             let window_title = frame_fn(&mut self.world, &mut renderer, &self.input, dt);
             renderer.end_frame();
+
+            if !self.world.events.read::<AppExit>().is_empty() {
+                break;
+            }
 
             if let Some(title) = window_title {
                 self.window.set_title(&title);

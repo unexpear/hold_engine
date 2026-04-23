@@ -1,5 +1,25 @@
 let idCounter = 1;
 
+function cloneMetadata(value) {
+  if (value == null || typeof value !== "object") {
+    return value;
+  }
+
+  if (typeof globalThis.structuredClone === "function") {
+    return globalThis.structuredClone(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneMetadata(entry));
+  }
+
+  const clone = {};
+  for (const [key, entry] of Object.entries(value)) {
+    clone[key] = cloneMetadata(entry);
+  }
+  return clone;
+}
+
 export class MorphicObject {
   constructor({
     name,
@@ -12,7 +32,7 @@ export class MorphicObject {
     const id = idCounter++;
 
     this.id = id;
-    this.name = name || `Morph ${id}`;
+    this.name = name ?? `Morph ${id}`;
     this.parent = null;
     this.children = [];
     this.position = { x: 0, y: 0, ...position };
@@ -27,7 +47,7 @@ export class MorphicObject {
       overflow: "hidden",
       ...style,
     };
-    this.metadata = { ...metadata };
+    this.metadata = cloneMetadata(metadata) ?? {};
     this.text = text;
   }
 
@@ -55,6 +75,13 @@ export class MorphicObject {
 
   move(position) {
     this.position = { ...this.position, ...position };
+    if (this.metadata?.scene?.transform?.position) {
+      this.metadata.scene.transform.position = {
+        ...this.metadata.scene.transform.position,
+        x: this.position.x,
+        y: this.position.y,
+      };
+    }
     return this;
   }
 
@@ -72,7 +99,7 @@ export class MorphicObject {
       position: { ...this.position },
       size: { ...this.size },
       style: { ...this.style },
-      metadata: { ...this.metadata },
+      metadata: cloneMetadata(this.metadata) ?? {},
       text: this.text,
     };
   }
@@ -84,7 +111,7 @@ export class MorphicObject {
       position: { ...this.position },
       size: { ...this.size },
       style: { ...this.style },
-      metadata: { ...this.metadata },
+      metadata: cloneMetadata(this.metadata) ?? {},
       text: this.text,
       children: this.children.map((child) => child.toJSON()),
     };

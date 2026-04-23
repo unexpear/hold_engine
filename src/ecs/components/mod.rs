@@ -7,6 +7,7 @@ pub mod light;
 pub mod particles;
 pub mod physics;
 pub mod quest;
+pub mod runtime_slice;
 pub mod stats;
 pub mod transform;
 
@@ -19,5 +20,10 @@ pub use light::DirectionalLight;
 pub use particles::{Particle, ParticleEmitter, ParticleSource};
 pub use physics::{RigidBody, SphereCollider, Velocity};
 pub use quest::{Quest, QuestId, QuestLog, QuestObjective, QuestState};
+pub use runtime_slice::{
+    AnimationGraphState, AnimationState, AudioEmitter, Breakable, CharacterController, Health,
+    MaterialRef, NavAgent, PatrolRoute, SkeletonPose, StaticMesh, TerrainChunkRef,
+    VegetationInstance, VehicleController, Weapon, WheelState,
+};
 pub use stats::Stats;
 pub use transform::Transform;

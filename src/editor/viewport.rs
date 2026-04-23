@@ -450,7 +450,10 @@ fn append_translate_or_scale_gizmo(
     overlay: &mut EditorViewportOverlay,
 ) {
     let active_axis = cursor_active_axis(host, field_name);
-    let entity_id = host.cursor().map(|cursor| cursor.entity_id).unwrap_or_default();
+    let entity_id = host
+        .cursor()
+        .map(|cursor| cursor.entity_id)
+        .unwrap_or_default();
 
     for (axis, world_dir, color) in [
         (EditorAxis::X, Vec3::X, AXIS_X_COLOR),
@@ -598,8 +601,14 @@ fn append_plane_handles(
         };
 
         let drag_vectors = [
-            [axis_a_end.x - origin_screen.x, axis_a_end.y - origin_screen.y],
-            [axis_b_end.x - origin_screen.x, axis_b_end.y - origin_screen.y],
+            [
+                axis_a_end.x - origin_screen.x,
+                axis_a_end.y - origin_screen.y,
+            ],
+            [
+                axis_b_end.x - origin_screen.x,
+                axis_b_end.y - origin_screen.y,
+            ],
         ];
         if solve_drag_basis(drag_vectors, [1.0, 1.0]).is_none() {
             continue;
@@ -656,7 +665,10 @@ fn append_rotate_gizmo(
     hovered_handle: Option<EditorViewportGizmoHandleId>,
     overlay: &mut EditorViewportOverlay,
 ) {
-    let entity_id = host.cursor().map(|cursor| cursor.entity_id).unwrap_or_default();
+    let entity_id = host
+        .cursor()
+        .map(|cursor| cursor.entity_id)
+        .unwrap_or_default();
     let active_axis = cursor_active_axis(host, "rotation_euler_deg");
 
     for (axis, basis_a, basis_b, color) in [
@@ -811,12 +823,7 @@ fn tint_plane_color(color: Color, active: bool, hovered: bool) -> Color {
 }
 
 fn mix_axis_colors(a: Color, b: Color) -> Color {
-    Color::new(
-        (a.r + b.r) * 0.5,
-        (a.g + b.g) * 0.5,
-        (a.b + b.b) * 0.5,
-        1.0,
-    )
+    Color::new((a.r + b.r) * 0.5, (a.g + b.g) * 0.5, (a.b + b.b) * 0.5, 1.0)
 }
 
 fn with_alpha(color: Color, alpha: f32) -> Color {
@@ -832,9 +839,13 @@ fn push_outline_rect(
     color: Color,
 ) {
     overlay.quads.push(ScreenQuad::new(x, y, w, 1.0, color));
-    overlay.quads.push(ScreenQuad::new(x, y + h - 1.0, w, 1.0, color));
+    overlay
+        .quads
+        .push(ScreenQuad::new(x, y + h - 1.0, w, 1.0, color));
     overlay.quads.push(ScreenQuad::new(x, y, 1.0, h, color));
-    overlay.quads.push(ScreenQuad::new(x + w - 1.0, y, 1.0, h, color));
+    overlay
+        .quads
+        .push(ScreenQuad::new(x + w - 1.0, y, 1.0, h, color));
 }
 
 fn project_world_to_screen(
@@ -863,11 +874,7 @@ fn project_world_to_screen(
     })
 }
 
-fn single_axis_delta(
-    drag_vector: [f32; 2],
-    delta_scale: f32,
-    motion: [f32; 2],
-) -> Option<f32> {
+fn single_axis_delta(drag_vector: [f32; 2], delta_scale: f32, motion: [f32; 2]) -> Option<f32> {
     let axis_len = vector_len(drag_vector);
     if axis_len < 8.0 {
         return None;
@@ -951,6 +958,7 @@ mod tests {
     fn test_host() -> EditorRuntimeHost {
         let scene = SceneDocument {
             name: "Viewport".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
             entities: vec![
                 EditorEntity {
                     id: 1,
@@ -975,6 +983,7 @@ mod tests {
     fn depth_test_host() -> EditorRuntimeHost {
         let scene = SceneDocument {
             name: "Depth".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
             entities: vec![
                 EditorEntity {
                     id: 1,
@@ -1051,7 +1060,8 @@ mod tests {
     #[test]
     fn translate_plane_handle_edits_two_axes() {
         let mut host = test_host();
-        host.execute(EditorCommand::SelectEntity { entity_id: 1 }).unwrap();
+        host.execute(EditorCommand::SelectEntity { entity_id: 1 })
+            .unwrap();
 
         let vp = host.active_view_proj(60.0, 16.0 / 9.0);
         let overlay = build_viewport_overlay(
@@ -1081,7 +1091,8 @@ mod tests {
     #[test]
     fn rotate_gizmo_is_pickable_from_ring_segments() {
         let mut host = test_host();
-        host.execute(EditorCommand::SelectEntity { entity_id: 1 }).unwrap();
+        host.execute(EditorCommand::SelectEntity { entity_id: 1 })
+            .unwrap();
 
         let vp = host.active_view_proj(60.0, 16.0 / 9.0);
         let overlay = build_viewport_overlay(
@@ -1122,7 +1133,8 @@ mod tests {
     #[test]
     fn scale_gizmo_includes_plane_handles_and_hover_feedback() {
         let mut host = test_host();
-        host.execute(EditorCommand::SelectEntity { entity_id: 1 }).unwrap();
+        host.execute(EditorCommand::SelectEntity { entity_id: 1 })
+            .unwrap();
 
         let vp = host.active_view_proj(60.0, 16.0 / 9.0);
         let overlay = build_viewport_overlay(
@@ -1142,6 +1154,9 @@ mod tests {
                 .any(|handle| handle.secondary_axis.is_some()),
             "scale mode should expose plane handles"
         );
-        assert!(!overlay.quads.is_empty(), "hover feedback should add outline quads");
+        assert!(
+            !overlay.quads.is_empty(),
+            "hover feedback should add outline quads"
+        );
     }
 }

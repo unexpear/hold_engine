@@ -3,6 +3,7 @@
 //! of typed ECS/runtime data.
 
 pub mod bridge;
+pub mod browser;
 pub mod command;
 pub mod drawlist;
 mod host;
@@ -22,6 +23,11 @@ use crate::ecs::components::{
 use crate::ecs::{Entity, World};
 use crate::math::{Quat, Vec3};
 use crate::renderer::Color;
+use crate::runtime_slice::{
+    BreakablePropDef, PatrolRouteDef, RuntimeSliceAuthoring, SpawnPointDef, SpawnPointKind,
+    StaticMeshActorDef, TerrainAuthoring, TerrainPaintLayer, VegetationPaintStroke,
+    VegetationPrototypeDef, VehicleSpawnerDef, WaterVolumeDef,
+};
 use crate::scene::{
     load_scene, parse_scene, save_scene, serialize_scene, CameraDef, EntityDef, LightDef,
     ParticleEmitterDef, RigidBodyDef, SceneData, SceneError, SphereColliderDef, StatsDef,
@@ -29,14 +35,19 @@ use crate::scene::{
 };
 
 pub use bridge::EditorBridgeServer;
+pub use browser::{
+    EditorBrowserEntry, EditorBrowserEntryKind, EditorBrowserError, EditorBrowserModel,
+    EditorBrowserRootKind,
+};
 pub use command::{
     EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
 };
 pub use drawlist::{generate_draw_list, EditorDrawList};
 pub use host::{EditorCamera, EditorRuntimeHost};
 pub use native_ui::{
-    build_native_ui, EditorNativeUi, EditorNativeUiState, EditorUiHitRegion, EditorUiPanel,
-    EditorUiPanelRegion,
+    build_native_ui, EditorNativeUi, EditorNativeUiState, EditorUiActionLogEntry,
+    EditorUiActionTone, EditorUiCommandPalette, EditorUiHitRegion, EditorUiPaletteEntry,
+    EditorUiPaletteEntrySource, EditorUiPanel, EditorUiPanelRegion,
 };
 pub use protocol::{
     decode_command as decode_editor_command_protocol, decode_event as decode_editor_event_protocol,
@@ -188,6 +199,7 @@ impl EditorEntity {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneDocument {
     pub name: String,
+    pub runtime_slice: RuntimeSliceAuthoring,
     pub entities: Vec<EditorEntity>,
 }
 
@@ -211,6 +223,7 @@ impl SceneDocument {
 
         Self {
             name: scene.name.clone(),
+            runtime_slice: scene.runtime_slice.clone(),
             entities,
         }
     }
@@ -272,6 +285,7 @@ impl SceneDocument {
 
         Ok(SceneData {
             name: self.name.clone(),
+            runtime_slice: self.runtime_slice.clone(),
             entities,
         })
     }
@@ -349,11 +363,124 @@ impl SceneDocument {
         true
     }
 
+    pub fn set_terrain_settings(
+        &mut self,
+        size_meters: Vec3,
+        chunk_size_meters: u32,
+        height_scale_meters: f32,
+    ) {
+        self.runtime_slice.terrain = TerrainAuthoring {
+            size_meters: Vec3::new(
+                size_meters.x.max(1.0),
+                size_meters.y.max(0.0),
+                size_meters.z.max(1.0),
+            ),
+            chunk_size_meters: chunk_size_meters.max(1),
+            height_scale_meters: height_scale_meters.max(0.0),
+            paint_layers: self.runtime_slice.terrain.paint_layers.clone(),
+        };
+    }
+
+    pub fn upsert_terrain_paint_layer(&mut self, mut layer: TerrainPaintLayer) {
+        normalize_named_runtime_slice_item(&mut layer.name);
+        layer.material = normalize_optional_runtime_slice_ref(layer.material);
+        layer.tiling = layer.tiling.max(0.01);
+        if let Some(existing) = self
+            .runtime_slice
+            .terrain
+            .paint_layers
+            .iter_mut()
+            .find(|existing| existing.name == layer.name)
+        {
+            *existing = layer;
+        } else {
+            self.runtime_slice.terrain.paint_layers.push(layer);
+        }
+    }
+
+    pub fn remove_terrain_paint_layer(&mut self, name: &str) -> bool {
+        remove_named_item(
+            &mut self.runtime_slice.terrain.paint_layers,
+            name,
+            |layer| &layer.name,
+        )
+    }
+
+    pub fn paint_vegetation(&mut self, mut stroke: VegetationPaintStroke) {
+        normalize_named_runtime_slice_item(&mut stroke.prototype);
+        stroke.radius = stroke.radius.max(0.0);
+        stroke.density = stroke.density.max(0.0);
+        self.runtime_slice.vegetation_paints.push(stroke);
+    }
+
+    pub fn erase_vegetation(
+        &mut self,
+        prototype: Option<&str>,
+        center: Vec3,
+        radius: f32,
+    ) -> usize {
+        let radius_sq = radius.max(0.0) * radius.max(0.0);
+        let prototype = prototype
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
+        let original_len = self.runtime_slice.vegetation_paints.len();
+        self.runtime_slice.vegetation_paints.retain(|stroke| {
+            let prototype_matches = prototype
+                .map(|expected| stroke.prototype == expected)
+                .unwrap_or(true);
+            !prototype_matches || stroke.center.distance_sq(center) > radius_sq
+        });
+        original_len - self.runtime_slice.vegetation_paints.len()
+    }
+
+    pub fn upsert_patrol_route(&mut self, mut route: PatrolRouteDef) {
+        normalize_named_runtime_slice_item(&mut route.name);
+        if let Some(existing) = self
+            .runtime_slice
+            .patrol_routes
+            .iter_mut()
+            .find(|existing| existing.name == route.name)
+        {
+            *existing = route;
+        } else {
+            self.runtime_slice.patrol_routes.push(route);
+        }
+    }
+
+    pub fn remove_patrol_route(&mut self, name: &str) -> bool {
+        remove_named_item(&mut self.runtime_slice.patrol_routes, name, |route| {
+            &route.name
+        })
+    }
+
+    pub fn upsert_vehicle_spawner(&mut self, mut spawner: VehicleSpawnerDef) {
+        normalize_named_runtime_slice_item(&mut spawner.name);
+        spawner.mesh = normalize_optional_runtime_slice_ref(spawner.mesh);
+        spawner.material = normalize_optional_runtime_slice_ref(spawner.material);
+        if let Some(existing) = self
+            .runtime_slice
+            .vehicle_spawners
+            .iter_mut()
+            .find(|existing| existing.name == spawner.name)
+        {
+            *existing = spawner;
+        } else {
+            self.runtime_slice.vehicle_spawners.push(spawner);
+        }
+    }
+
+    pub fn remove_vehicle_spawner(&mut self, name: &str) -> bool {
+        remove_named_item(&mut self.runtime_slice.vehicle_spawners, name, |spawner| {
+            &spawner.name
+        })
+    }
+
     /// Serialize the editor scene document to a stable line-based text format.
     pub fn to_hscene_string(&self) -> String {
         let mut out = String::new();
         out.push_str("HOLD_SCENE_DOC_V1\n");
         out.push_str(&format!("name|{}\n", escape_text(&self.name)));
+        encode_runtime_slice_lines(&mut out, &self.runtime_slice);
         for entity in &self.entities {
             out.push_str(&format!(
                 "entity|{}|{}\n",
@@ -391,6 +518,7 @@ impl SceneDocument {
 
         let mut doc = Self {
             name: unescape_text(name)?,
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: Vec::new(),
         };
 
@@ -463,6 +591,14 @@ impl SceneDocument {
                 continue;
             }
 
+            if let Some(rest) = line.strip_prefix("slice|") {
+                if current_entity.is_some() || current_component.is_some() {
+                    return Err("runtime slice data must be top-level");
+                }
+                decode_runtime_slice_line(&mut doc.runtime_slice, rest)?;
+                continue;
+            }
+
             return Err("unknown scene document line");
         }
 
@@ -530,6 +666,27 @@ impl std::fmt::Display for SceneBridgeError {
 
 impl std::error::Error for SceneBridgeError {}
 
+fn normalize_named_runtime_slice_item(name: &mut String) {
+    *name = name.trim().to_string();
+}
+
+fn normalize_optional_runtime_slice_ref(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn remove_named_item<T>(items: &mut Vec<T>, name: &str, get_name: impl Fn(&T) -> &str) -> bool {
+    let original_len = items.len();
+    items.retain(|item| get_name(item) != name);
+    original_len != items.len()
+}
+
 fn components_from_scene_entity(
     entity: &EntityDef,
     name_to_id: &HashMap<String, u64>,
@@ -555,7 +712,11 @@ fn components_from_scene_entity(
                 ),
                 vec3_field(
                     "rotation_euler_deg",
-                    [euler.x.to_degrees(), euler.y.to_degrees(), euler.z.to_degrees()],
+                    [
+                        euler.x.to_degrees(),
+                        euler.y.to_degrees(),
+                        euler.z.to_degrees(),
+                    ],
                 ),
             ],
         });
@@ -1047,6 +1208,414 @@ fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
     };
 
     Ok(InspectorField { name, value })
+}
+
+fn encode_runtime_slice_lines(out: &mut String, slice: &RuntimeSliceAuthoring) {
+    if slice.terrain != crate::runtime_slice::TerrainAuthoring::default() {
+        out.push_str(&format!(
+            "slice|terrain|{}|{}|{}|{}|{}\n",
+            slice.terrain.size_meters.x,
+            slice.terrain.size_meters.y,
+            slice.terrain.size_meters.z,
+            slice.terrain.chunk_size_meters,
+            slice.terrain.height_scale_meters,
+        ));
+    }
+
+    for layer in &slice.terrain.paint_layers {
+        out.push_str(&format!(
+            "slice|paint_layer|{}|{}|{}|{}\n",
+            escape_text(&layer.name),
+            encode_optional_text(layer.material.as_deref()),
+            layer.tiling,
+            layer.weightmap_channel,
+        ));
+    }
+
+    for prototype in &slice.vegetation_prototypes {
+        out.push_str(&format!(
+            "slice|vegetation_prototype|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&prototype.name),
+            encode_optional_text(prototype.mesh.as_deref()),
+            encode_optional_text(prototype.material.as_deref()),
+            prototype.density_per_100m2,
+            if prototype.random_yaw { 1 } else { 0 },
+            if prototype.align_to_normal { 1 } else { 0 },
+        ));
+    }
+
+    for stroke in &slice.vegetation_paints {
+        out.push_str(&format!(
+            "slice|vegetation_paint|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&stroke.prototype),
+            stroke.center.x,
+            stroke.center.y,
+            stroke.center.z,
+            stroke.radius,
+            stroke.density,
+        ));
+    }
+
+    for actor in &slice.static_mesh_actors {
+        out.push_str(&format!(
+            "slice|static_mesh_actor|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&actor.name),
+            encode_optional_text(actor.mesh.as_deref()),
+            encode_optional_text(actor.material.as_deref()),
+            actor.position.x,
+            actor.position.y,
+            actor.position.z,
+            actor.rotation_euler_deg.x,
+            actor.rotation_euler_deg.y,
+            actor.rotation_euler_deg.z,
+            actor.scale.x,
+            actor.scale.y,
+            actor.scale.z,
+        ));
+    }
+
+    for volume in &slice.water_volumes {
+        out.push_str(&format!(
+            "slice|water_volume|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&volume.name),
+            encode_optional_text(volume.material.as_deref()),
+            volume.center.x,
+            volume.center.y,
+            volume.center.z,
+            volume.extents.x,
+            volume.extents.y,
+            volume.extents.z,
+            volume.wave_strength,
+        ));
+    }
+
+    for spawn in &slice.spawn_points {
+        let kind = match spawn.kind {
+            SpawnPointKind::Generic => "generic",
+            SpawnPointKind::Player => "player",
+            SpawnPointKind::Enemy => "enemy",
+            SpawnPointKind::Vehicle => "vehicle",
+        };
+        out.push_str(&format!(
+            "slice|spawn_point|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&spawn.name),
+            kind,
+            spawn.position.x,
+            spawn.position.y,
+            spawn.position.z,
+            spawn.facing_yaw_deg,
+        ));
+    }
+
+    for route in &slice.patrol_routes {
+        out.push_str(&format!(
+            "slice|patrol_route|{}|{}\n",
+            escape_text(&route.name),
+            if route.looped { 1 } else { 0 },
+        ));
+        for point in &route.points {
+            out.push_str(&format!(
+                "slice|patrol_point|{}|{}|{}|{}\n",
+                escape_text(&route.name),
+                point.x,
+                point.y,
+                point.z,
+            ));
+        }
+    }
+
+    for spawner in &slice.vehicle_spawners {
+        out.push_str(&format!(
+            "slice|vehicle_spawner|{}|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&spawner.name),
+            encode_optional_text(spawner.mesh.as_deref()),
+            encode_optional_text(spawner.material.as_deref()),
+            spawner.position.x,
+            spawner.position.y,
+            spawner.position.z,
+            spawner.facing_yaw_deg,
+        ));
+    }
+
+    for prop in &slice.breakable_props {
+        out.push_str(&format!(
+            "slice|breakable_prop|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            escape_text(&prop.name),
+            encode_optional_text(prop.intact_mesh.as_deref()),
+            encode_optional_text(prop.broken_mesh.as_deref()),
+            encode_optional_text(prop.material.as_deref()),
+            prop.position.x,
+            prop.position.y,
+            prop.position.z,
+            prop.rotation_euler_deg.x,
+            prop.rotation_euler_deg.y,
+            prop.rotation_euler_deg.z,
+            prop.scale.x,
+            prop.scale.y,
+            prop.scale.z,
+            prop.hit_points,
+        ));
+        out.push_str(&format!(
+            "slice|breakable_prop_impulse|{}|{}\n",
+            escape_text(&prop.name),
+            prop.break_impulse,
+        ));
+    }
+}
+
+fn decode_runtime_slice_line(
+    slice: &mut RuntimeSliceAuthoring,
+    rest: &str,
+) -> Result<(), &'static str> {
+    let mut parts = rest.split('|');
+    let kind = parts.next().ok_or("missing runtime slice line kind")?;
+
+    match kind {
+        "terrain" => {
+            slice.terrain.size_meters = Vec3::new(
+                parse_doc_f32(parts.next(), "missing terrain size x")?,
+                parse_doc_f32(parts.next(), "missing terrain size y")?,
+                parse_doc_f32(parts.next(), "missing terrain size z")?,
+            );
+            slice.terrain.chunk_size_meters =
+                parse_doc_u32(parts.next(), "missing terrain chunk size")?;
+            slice.terrain.height_scale_meters =
+                parse_doc_f32(parts.next(), "missing terrain height scale")?;
+        }
+        "paint_layer" => {
+            slice.terrain.paint_layers.push(TerrainPaintLayer {
+                name: parse_doc_text(parts.next(), "missing paint layer name")?,
+                material: parse_doc_optional_text(parts.next(), "missing paint layer material")?,
+                tiling: parse_doc_f32(parts.next(), "missing paint layer tiling")?,
+                weightmap_channel: parse_doc_u8(parts.next(), "missing paint layer channel")?,
+            });
+        }
+        "vegetation_prototype" => {
+            slice.vegetation_prototypes.push(VegetationPrototypeDef {
+                name: parse_doc_text(parts.next(), "missing vegetation prototype name")?,
+                mesh: parse_doc_optional_text(parts.next(), "missing vegetation prototype mesh")?,
+                material: parse_doc_optional_text(
+                    parts.next(),
+                    "missing vegetation prototype material",
+                )?,
+                density_per_100m2: parse_doc_f32(
+                    parts.next(),
+                    "missing vegetation prototype density",
+                )?,
+                random_yaw: parse_doc_bool01(
+                    parts.next(),
+                    "missing vegetation prototype random_yaw",
+                )?,
+                align_to_normal: parse_doc_bool01(
+                    parts.next(),
+                    "missing vegetation prototype align_to_normal",
+                )?,
+            });
+        }
+        "vegetation_paint" => {
+            slice.vegetation_paints.push(VegetationPaintStroke {
+                prototype: parse_doc_text(parts.next(), "missing vegetation paint prototype")?,
+                center: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing vegetation paint center x")?,
+                    parse_doc_f32(parts.next(), "missing vegetation paint center y")?,
+                    parse_doc_f32(parts.next(), "missing vegetation paint center z")?,
+                ),
+                radius: parse_doc_f32(parts.next(), "missing vegetation paint radius")?,
+                density: parse_doc_f32(parts.next(), "missing vegetation paint density")?,
+            });
+        }
+        "static_mesh_actor" => {
+            slice.static_mesh_actors.push(StaticMeshActorDef {
+                name: parse_doc_text(parts.next(), "missing static mesh actor name")?,
+                mesh: parse_doc_optional_text(parts.next(), "missing static mesh actor mesh")?,
+                material: parse_doc_optional_text(
+                    parts.next(),
+                    "missing static mesh actor material",
+                )?,
+                position: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing static mesh actor position x")?,
+                    parse_doc_f32(parts.next(), "missing static mesh actor position y")?,
+                    parse_doc_f32(parts.next(), "missing static mesh actor position z")?,
+                ),
+                rotation_euler_deg: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing static mesh actor rotation x")?,
+                    parse_doc_f32(parts.next(), "missing static mesh actor rotation y")?,
+                    parse_doc_f32(parts.next(), "missing static mesh actor rotation z")?,
+                ),
+                scale: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing static mesh actor scale x")?,
+                    parse_doc_f32(parts.next(), "missing static mesh actor scale y")?,
+                    parse_doc_f32(parts.next(), "missing static mesh actor scale z")?,
+                ),
+            });
+        }
+        "water_volume" => {
+            slice.water_volumes.push(WaterVolumeDef {
+                name: parse_doc_text(parts.next(), "missing water volume name")?,
+                material: parse_doc_optional_text(parts.next(), "missing water volume material")?,
+                center: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing water volume center x")?,
+                    parse_doc_f32(parts.next(), "missing water volume center y")?,
+                    parse_doc_f32(parts.next(), "missing water volume center z")?,
+                ),
+                extents: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing water volume extents x")?,
+                    parse_doc_f32(parts.next(), "missing water volume extents y")?,
+                    parse_doc_f32(parts.next(), "missing water volume extents z")?,
+                ),
+                wave_strength: parse_doc_f32(parts.next(), "missing water volume wave strength")?,
+            });
+        }
+        "spawn_point" => {
+            let name = parse_doc_text(parts.next(), "missing spawn point name")?;
+            let kind = match parts.next().ok_or("missing spawn point kind")? {
+                "generic" => SpawnPointKind::Generic,
+                "player" => SpawnPointKind::Player,
+                "enemy" => SpawnPointKind::Enemy,
+                "vehicle" => SpawnPointKind::Vehicle,
+                _ => return Err("unknown spawn point kind"),
+            };
+            slice.spawn_points.push(SpawnPointDef {
+                name,
+                kind,
+                position: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing spawn point position x")?,
+                    parse_doc_f32(parts.next(), "missing spawn point position y")?,
+                    parse_doc_f32(parts.next(), "missing spawn point position z")?,
+                ),
+                facing_yaw_deg: parse_doc_f32(parts.next(), "missing spawn point yaw")?,
+            });
+        }
+        "patrol_route" => {
+            slice.patrol_routes.push(PatrolRouteDef {
+                name: parse_doc_text(parts.next(), "missing patrol route name")?,
+                points: Vec::new(),
+                looped: parse_doc_bool01(parts.next(), "missing patrol route looped")?,
+            });
+        }
+        "patrol_point" => {
+            let route_name = parse_doc_text(parts.next(), "missing patrol route name")?;
+            let route = slice
+                .patrol_routes
+                .iter_mut()
+                .find(|route| route.name == route_name)
+                .ok_or("patrol point references unknown route")?;
+            route.points.push(Vec3::new(
+                parse_doc_f32(parts.next(), "missing patrol point x")?,
+                parse_doc_f32(parts.next(), "missing patrol point y")?,
+                parse_doc_f32(parts.next(), "missing patrol point z")?,
+            ));
+        }
+        "vehicle_spawner" => {
+            slice.vehicle_spawners.push(VehicleSpawnerDef {
+                name: parse_doc_text(parts.next(), "missing vehicle spawner name")?,
+                mesh: parse_doc_optional_text(parts.next(), "missing vehicle spawner mesh")?,
+                material: parse_doc_optional_text(
+                    parts.next(),
+                    "missing vehicle spawner material",
+                )?,
+                position: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing vehicle spawner position x")?,
+                    parse_doc_f32(parts.next(), "missing vehicle spawner position y")?,
+                    parse_doc_f32(parts.next(), "missing vehicle spawner position z")?,
+                ),
+                facing_yaw_deg: parse_doc_f32(parts.next(), "missing vehicle spawner yaw")?,
+            });
+        }
+        "breakable_prop" => {
+            slice.breakable_props.push(BreakablePropDef {
+                name: parse_doc_text(parts.next(), "missing breakable prop name")?,
+                intact_mesh: parse_doc_optional_text(
+                    parts.next(),
+                    "missing breakable intact mesh",
+                )?,
+                broken_mesh: parse_doc_optional_text(
+                    parts.next(),
+                    "missing breakable broken mesh",
+                )?,
+                material: parse_doc_optional_text(parts.next(), "missing breakable material")?,
+                position: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing breakable position x")?,
+                    parse_doc_f32(parts.next(), "missing breakable position y")?,
+                    parse_doc_f32(parts.next(), "missing breakable position z")?,
+                ),
+                rotation_euler_deg: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing breakable rotation x")?,
+                    parse_doc_f32(parts.next(), "missing breakable rotation y")?,
+                    parse_doc_f32(parts.next(), "missing breakable rotation z")?,
+                ),
+                scale: Vec3::new(
+                    parse_doc_f32(parts.next(), "missing breakable scale x")?,
+                    parse_doc_f32(parts.next(), "missing breakable scale y")?,
+                    parse_doc_f32(parts.next(), "missing breakable scale z")?,
+                ),
+                hit_points: parse_doc_f32(parts.next(), "missing breakable hit points")?,
+                break_impulse: 0.0,
+            });
+        }
+        "breakable_prop_impulse" => {
+            let name = parse_doc_text(parts.next(), "missing breakable impulse name")?;
+            let impulse = parse_doc_f32(parts.next(), "missing breakable impulse value")?;
+            let prop = slice
+                .breakable_props
+                .iter_mut()
+                .find(|prop| prop.name == name)
+                .ok_or("breakable impulse references unknown prop")?;
+            prop.break_impulse = impulse;
+        }
+        _ => return Err("unknown runtime slice line"),
+    }
+
+    Ok(())
+}
+
+fn encode_optional_text(value: Option<&str>) -> String {
+    value.map(escape_text).unwrap_or_default()
+}
+
+fn parse_doc_text(value: Option<&str>, missing: &'static str) -> Result<String, &'static str> {
+    unescape_text(value.ok_or(missing)?)
+}
+
+fn parse_doc_optional_text(
+    value: Option<&str>,
+    missing: &'static str,
+) -> Result<Option<String>, &'static str> {
+    let raw = value.ok_or(missing)?;
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(unescape_text(raw)?))
+    }
+}
+
+fn parse_doc_f32(value: Option<&str>, missing: &'static str) -> Result<f32, &'static str> {
+    value
+        .ok_or(missing)?
+        .parse::<f32>()
+        .map_err(|_| "invalid numeric value")
+}
+
+fn parse_doc_u32(value: Option<&str>, missing: &'static str) -> Result<u32, &'static str> {
+    value
+        .ok_or(missing)?
+        .parse::<u32>()
+        .map_err(|_| "invalid u32 value")
+}
+
+fn parse_doc_u8(value: Option<&str>, missing: &'static str) -> Result<u8, &'static str> {
+    value
+        .ok_or(missing)?
+        .parse::<u8>()
+        .map_err(|_| "invalid u8 value")
+}
+
+fn parse_doc_bool01(value: Option<&str>, missing: &'static str) -> Result<bool, &'static str> {
+    match value.ok_or(missing)? {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err("invalid boolean value"),
+    }
 }
 
 fn escape_text(input: &str) -> String {
@@ -1607,6 +2176,80 @@ mod tests {
         )
     }
 
+    fn sample_runtime_slice() -> RuntimeSliceAuthoring {
+        RuntimeSliceAuthoring {
+            terrain: crate::runtime_slice::TerrainAuthoring {
+                size_meters: Vec3::new(1024.0, 320.0, 1024.0),
+                chunk_size_meters: 64,
+                height_scale_meters: 72.0,
+                paint_layers: vec![TerrainPaintLayer {
+                    name: "sand".into(),
+                    material: Some("materials/sand".into()),
+                    tiling: 6.0,
+                    weightmap_channel: 0,
+                }],
+            },
+            vegetation_prototypes: vec![VegetationPrototypeDef {
+                name: "palm".into(),
+                mesh: Some("meshes/palm".into()),
+                material: Some("materials/palm".into()),
+                density_per_100m2: 2.5,
+                random_yaw: true,
+                align_to_normal: true,
+            }],
+            vegetation_paints: vec![VegetationPaintStroke {
+                prototype: "palm".into(),
+                center: Vec3::new(16.0, 0.0, 24.0),
+                radius: 8.0,
+                density: 1.5,
+            }],
+            static_mesh_actors: vec![StaticMeshActorDef {
+                name: "rock".into(),
+                mesh: Some("meshes/rock".into()),
+                material: Some("materials/rock".into()),
+                position: Vec3::new(2.0, 0.0, 5.0),
+                rotation_euler_deg: Vec3::new(0.0, 30.0, 0.0),
+                scale: Vec3::new(1.5, 1.5, 1.5),
+            }],
+            water_volumes: vec![WaterVolumeDef {
+                name: "ocean".into(),
+                material: Some("materials/ocean".into()),
+                center: Vec3::new(512.0, 0.0, 512.0),
+                extents: Vec3::new(1024.0, 8.0, 1024.0),
+                wave_strength: 0.35,
+            }],
+            spawn_points: vec![SpawnPointDef {
+                name: "player_start".into(),
+                kind: SpawnPointKind::Player,
+                position: Vec3::new(32.0, 4.0, 32.0),
+                facing_yaw_deg: 180.0,
+            }],
+            patrol_routes: vec![PatrolRouteDef {
+                name: "route_a".into(),
+                points: vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 10.0)],
+                looped: true,
+            }],
+            vehicle_spawners: vec![VehicleSpawnerDef {
+                name: "jeep".into(),
+                mesh: Some("meshes/jeep".into()),
+                material: Some("materials/jeep".into()),
+                position: Vec3::new(40.0, 0.0, 40.0),
+                facing_yaw_deg: 90.0,
+            }],
+            breakable_props: vec![BreakablePropDef {
+                name: "crate".into(),
+                intact_mesh: Some("meshes/crate".into()),
+                broken_mesh: Some("meshes/crate_broken".into()),
+                material: Some("materials/crate".into()),
+                position: Vec3::new(14.0, 0.0, 20.0),
+                rotation_euler_deg: Vec3::ZERO,
+                scale: Vec3::ONE,
+                hit_points: 40.0,
+                break_impulse: 22.0,
+            }],
+        }
+    }
+
     #[test]
     fn project_layout_paths() {
         let p = Project::new("demo", "C:/games/demo");
@@ -1627,6 +2270,7 @@ mod tests {
     fn scene_document_set_value_creates_missing_path() {
         let mut doc = SceneDocument {
             name: "Level02".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: Vec::new(),
         };
 
@@ -1643,6 +2287,7 @@ mod tests {
     fn scene_document_dynamic_access() {
         let mut doc = SceneDocument {
             name: "Level01".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 1,
                 name: "Player".into(),
@@ -1678,6 +2323,7 @@ mod tests {
     fn scene_document_roundtrip() {
         let doc = SceneDocument {
             name: "Roundtrip".into(),
+            runtime_slice: sample_runtime_slice(),
             entities: vec![EditorEntity {
                 id: 7,
                 name: "Hero".into(),
@@ -1763,6 +2409,7 @@ entity "camera" {
     fn scene_bridge_roundtrip_preserves_runtime_scene_data() {
         let scene = SceneData {
             name: "Bridge".into(),
+            runtime_slice: sample_runtime_slice(),
             entities: vec![
                 EntityDef {
                     name: "player".into(),
@@ -1859,6 +2506,7 @@ entity "camera" {
         let roundtrip = doc.to_scene_data().unwrap();
 
         assert_eq!(roundtrip.name, scene.name);
+        assert_eq!(roundtrip.runtime_slice, scene.runtime_slice);
         assert_eq!(roundtrip.entities.len(), 3);
 
         let player = &roundtrip.entities[0];
@@ -1892,6 +2540,7 @@ entity "camera" {
     fn scene_document_to_scene_data_deduplicates_names_and_resolves_parent_ids() {
         let doc = SceneDocument {
             name: "Deduped".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![
                 EditorEntity {
                     id: 1,
@@ -1945,6 +2594,7 @@ entity "camera" {
 
         let doc = SceneDocument {
             name: "Level01".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 1,
                 name: "Player".into(),
@@ -1971,6 +2621,7 @@ entity "camera" {
 
         let doc = SceneDocument {
             name: "Level01".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 1,
                 name: "Sun".into(),
@@ -2021,6 +2672,7 @@ entity "camera" {
 
         let doc = SceneDocument {
             name: "Level|One".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 9,
                 name: "Boss|Unit".into(),
@@ -2043,6 +2695,7 @@ entity "camera" {
     fn apply_scene_document_to_world_maps_core_components() {
         let scene = SceneDocument {
             name: "Apply".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 100,
                 name: "Player".into(),
@@ -2090,6 +2743,7 @@ entity "camera" {
     fn apply_scene_document_to_world_supports_scene_bridge_components() {
         let scene = SceneData {
             name: "ApplyBridge".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![
                 EntityDef {
                     name: "camera_root".into(),
@@ -2205,6 +2859,7 @@ entity "camera" {
 
         let scene = SceneDocument {
             name: "Level01".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
             entities: vec![EditorEntity {
                 id: 1,
                 name: "Cam".into(),

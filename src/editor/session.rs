@@ -12,7 +12,7 @@ use crate::renderer::Color;
 use super::{
     apply_scene_document_to_world, has_any_field, load_scene_doc_from_hsc, optional_number,
     optional_text, optional_vec3, required_number, required_vec3, save_scene_doc_to_hsc,
-    EditorApplyError, EditorEntity, EditorIoError, InspectorComponent, InspectorValue,
+    EditorApplyError, EditorEntity, EditorIoError, InspectorComponent, InspectorValue, Project,
     SceneDocument,
 };
 
@@ -30,6 +30,7 @@ pub enum EditorPlayState {
 /// all drive the same scene workflow without reaching directly into demo-only glue code.
 #[derive(Debug, Clone)]
 pub struct EditorSceneSession {
+    project: Option<Project>,
     source_path: Option<PathBuf>,
     authored_scene: SceneDocument,
     scene: SceneDocument,
@@ -40,8 +41,32 @@ pub struct EditorSceneSession {
 
 impl EditorSceneSession {
     pub fn new(scene: SceneDocument) -> Self {
+        Self::from_parts(scene, None, None)
+    }
+
+    pub fn new_with_project(scene: SceneDocument, project: Project) -> Self {
+        Self::from_parts(scene, None, Some(project))
+    }
+
+    pub fn open_hsc<P: AsRef<Path>>(path: P) -> Result<Self, EditorSessionError> {
+        Self::open_hsc_with_project_impl(path, None)
+    }
+
+    pub fn open_hsc_with_project<P: AsRef<Path>>(
+        path: P,
+        project: Project,
+    ) -> Result<Self, EditorSessionError> {
+        Self::open_hsc_with_project_impl(path, Some(project))
+    }
+
+    fn from_parts(
+        scene: SceneDocument,
+        source_path: Option<PathBuf>,
+        project: Option<Project>,
+    ) -> Self {
         Self {
-            source_path: None,
+            project,
+            source_path,
             authored_scene: scene.clone(),
             scene,
             selected_entity_id: None,
@@ -50,21 +75,29 @@ impl EditorSceneSession {
         }
     }
 
-    pub fn open_hsc<P: AsRef<Path>>(path: P) -> Result<Self, EditorSessionError> {
+    fn open_hsc_with_project_impl<P: AsRef<Path>>(
+        path: P,
+        project: Option<Project>,
+    ) -> Result<Self, EditorSessionError> {
         let path = path.as_ref();
         let scene = load_scene_doc_from_hsc(path).map_err(EditorSessionError::Io)?;
-        Ok(Self {
-            source_path: Some(path.to_path_buf()),
-            authored_scene: scene.clone(),
-            scene,
-            selected_entity_id: None,
-            last_world_map: Vec::new(),
-            play_state: EditorPlayState::Editing,
-        })
+        Ok(Self::from_parts(scene, Some(path.to_path_buf()), project))
+    }
+
+    pub fn project(&self) -> Option<&Project> {
+        self.project.as_ref()
+    }
+
+    pub fn set_project(&mut self, project: Option<Project>) {
+        self.project = project;
     }
 
     pub fn source_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
+    }
+
+    pub fn set_source_path(&mut self, source_path: Option<PathBuf>) {
+        self.source_path = source_path;
     }
 
     pub fn authored_scene(&self) -> &SceneDocument {
@@ -796,6 +829,7 @@ fn patch_requires_rebuild(reason: impl Into<String>) -> EditorSessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::Project;
     use crate::{ActiveCamera, Camera, Transform, Vec3};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -837,6 +871,54 @@ entity "camera" {
         .unwrap();
 
         input_path
+    }
+
+    fn test_project(suffix: &str) -> Project {
+        let root = unique_test_dir(suffix);
+        Project::new(format!("session_project_{suffix}"), root)
+    }
+
+    #[test]
+    fn session_new_with_project_exposes_project_without_source_path() {
+        let scene = SceneDocument {
+            name: "Session".to_string(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
+            entities: Vec::new(),
+        };
+        let project = test_project("new_project");
+
+        let session = EditorSceneSession::new_with_project(scene, project.clone());
+
+        assert_eq!(session.project(), Some(&project));
+        assert!(session.source_path().is_none());
+    }
+
+    #[test]
+    fn session_open_hsc_with_project_preserves_project_and_source_path() {
+        let input_path = write_camera_test_scene("project_open");
+        let project = test_project("open_project");
+
+        let session =
+            EditorSceneSession::open_hsc_with_project(&input_path, project.clone()).unwrap();
+
+        assert_eq!(session.project(), Some(&project));
+        assert_eq!(session.source_path(), Some(Path::new(&input_path)));
+    }
+
+    #[test]
+    fn session_source_path_can_be_assigned_after_construction() {
+        let mut session = EditorSceneSession::new(SceneDocument {
+            name: "Assigned Path".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
+            entities: Vec::new(),
+        });
+        let path = PathBuf::from("examples/assigned-path.hsc");
+
+        assert_eq!(session.source_path(), None);
+
+        session.set_source_path(Some(path.clone()));
+
+        assert_eq!(session.source_path(), Some(path.as_path()));
     }
 
     #[test]

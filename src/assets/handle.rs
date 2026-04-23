@@ -1,4 +1,5 @@
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 /// A typed, opaque handle into an [`crate::assets::AssetPool`].
@@ -8,7 +9,6 @@ use std::marker::PhantomData;
 ///
 /// All trait implementations are written by hand so that they never add
 /// spurious bounds on `T` (e.g. `T: Debug`, `T: Clone`, etc.).
-#[derive(PartialEq, Eq, Hash)]
 pub struct Handle<T> {
     pub(crate) index: u32,
     pub(crate) generation: u32,
@@ -27,6 +27,23 @@ impl<T> Copy for Handle<T> {}
 impl<T> fmt::Debug for Handle<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Handle(index={}, gen={})", self.index, self.generation)
+    }
+}
+
+impl<T> PartialEq for Handle<T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && self.generation == other.generation
+    }
+}
+
+impl<T> Eq for Handle<T> {}
+
+impl<T> Hash for Handle<T> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.index.hash(state);
+        self.generation.hash(state);
     }
 }
 

@@ -15,6 +15,20 @@ We are intentionally owning the full stack (OS to gameplay) to maximize long-ter
 
 The goal is not a one-off game runtime. The goal is a reusable ecosystem that future projects can build on.
 
+## Product principles
+- free to use forever
+- no royalties
+- no subscriptions
+- no required online services
+- no dependence on paid infrastructure for core workflows
+- offline-first core workflows for development and runtime
+
+## Licensing
+- the engine core is distributed under the MIT License
+- commercial and non-commercial use are allowed under that license
+- the project should preserve the no-royalty, no-subscription, and no-required-online-services posture for core workflows
+
+
 ## Hard constraints
 ### Technical
 - Rust

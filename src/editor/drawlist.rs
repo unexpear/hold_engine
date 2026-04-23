@@ -54,9 +54,21 @@ impl EditorDrawList {
 
     /// Draw a 3-axis cross centred at `pos` with half-extent `r`.
     fn push_cross(&mut self, pos: Vec3, r: f32, color: Color) {
-        self.push(pos - Vec3::new(r, 0.0, 0.0), pos + Vec3::new(r, 0.0, 0.0), color);
-        self.push(pos - Vec3::new(0.0, r, 0.0), pos + Vec3::new(0.0, r, 0.0), color);
-        self.push(pos - Vec3::new(0.0, 0.0, r), pos + Vec3::new(0.0, 0.0, r), color);
+        self.push(
+            pos - Vec3::new(r, 0.0, 0.0),
+            pos + Vec3::new(r, 0.0, 0.0),
+            color,
+        );
+        self.push(
+            pos - Vec3::new(0.0, r, 0.0),
+            pos + Vec3::new(0.0, r, 0.0),
+            color,
+        );
+        self.push(
+            pos - Vec3::new(0.0, 0.0, r),
+            pos + Vec3::new(0.0, 0.0, r),
+            color,
+        );
     }
 }
 
@@ -84,8 +96,16 @@ pub fn generate_draw_list(
     let extent = half as f32;
     for i in -half..=half {
         let f = i as f32;
-        list.push(Vec3::new(f, 0.0, -extent), Vec3::new(f, 0.0, extent), GRID_COLOR);
-        list.push(Vec3::new(-extent, 0.0, f), Vec3::new(extent, 0.0, f), GRID_COLOR);
+        list.push(
+            Vec3::new(f, 0.0, -extent),
+            Vec3::new(f, 0.0, extent),
+            GRID_COLOR,
+        );
+        list.push(
+            Vec3::new(-extent, 0.0, f),
+            Vec3::new(extent, 0.0, f),
+            GRID_COLOR,
+        );
     }
 
     let selected_id = cursor.map(|c| c.entity_id);
@@ -150,11 +170,19 @@ mod tests {
     use crate::math::{Quat, Vec3};
 
     fn empty_scene() -> SceneDocument {
-        SceneDocument { name: String::new(), entities: vec![] }
+        SceneDocument {
+            name: String::new(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
+            entities: vec![],
+        }
     }
 
     fn make_transform(pos: Vec3) -> Transform {
-        Transform { position: pos, rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Transform {
+            position: pos,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
 
     // ── Grid ──────────────────────────────────────────────────────────────
@@ -189,8 +217,16 @@ mod tests {
         let map = vec![(42u64, entity)];
         let list = generate_draw_list(&world, &map, &empty_scene(), None);
 
-        let entity_lines: Vec<_> = list.lines.iter().filter(|l| l.color == ENTITY_COLOR).collect();
-        assert_eq!(entity_lines.len(), 3, "expect 3-axis cross for unselected entity");
+        let entity_lines: Vec<_> = list
+            .lines
+            .iter()
+            .filter(|l| l.color == ENTITY_COLOR)
+            .collect();
+        assert_eq!(
+            entity_lines.len(),
+            3,
+            "expect 3-axis cross for unselected entity"
+        );
 
         for line in &entity_lines {
             // Each arm of the cross must pass through or near x=3.
@@ -216,11 +252,25 @@ mod tests {
         let map = vec![(99u64, entity)];
         let list = generate_draw_list(&world, &map, &empty_scene(), Some(&cursor));
 
-        let sel_count = list.lines.iter().filter(|l| l.color == SELECTION_COLOR).count();
-        assert_eq!(sel_count, 3, "selected entity should have a 3-arm selection cross");
+        let sel_count = list
+            .lines
+            .iter()
+            .filter(|l| l.color == SELECTION_COLOR)
+            .count();
+        assert_eq!(
+            sel_count, 3,
+            "selected entity should have a 3-arm selection cross"
+        );
 
-        let entity_count = list.lines.iter().filter(|l| l.color == ENTITY_COLOR).count();
-        assert_eq!(entity_count, 0, "selected entity must not also get the default marker");
+        let entity_count = list
+            .lines
+            .iter()
+            .filter(|l| l.color == ENTITY_COLOR)
+            .count();
+        assert_eq!(
+            entity_count, 0,
+            "selected entity must not also get the default marker"
+        );
     }
 
     // ── Parent links ──────────────────────────────────────────────────────
@@ -238,8 +288,11 @@ mod tests {
         let map = vec![(1u64, parent), (2u64, child)];
         let list = generate_draw_list(&world, &map, &empty_scene(), None);
 
-        let parent_lines: Vec<_> =
-            list.lines.iter().filter(|l| l.color == PARENT_LINK_COLOR).collect();
+        let parent_lines: Vec<_> = list
+            .lines
+            .iter()
+            .filter(|l| l.color == PARENT_LINK_COLOR)
+            .collect();
         assert_eq!(parent_lines.len(), 1, "one parent-link line expected");
 
         let pl = parent_lines[0];

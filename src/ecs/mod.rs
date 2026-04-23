@@ -12,17 +12,20 @@ pub mod world;
 pub use access::SystemAccess;
 pub use change::Mut;
 pub use components::{
-    ActiveCamera, ActiveDialogue, Camera, CameraMode, Children, DialogueChoice, DialogueNode,
-    DialogueTree, DirectionalLight, GlobalTransform, Inventory, ItemId, ItemStack, NodeId, Parent,
-    Particle, ParticleEmitter, ParticleSource, Quest, QuestId, QuestLog, QuestObjective,
-    QuestState, RigidBody, SphereCollider, Stats, Transform, Velocity,
+    ActiveCamera, ActiveDialogue, AnimationGraphState, AnimationState, AudioEmitter, Breakable,
+    Camera, CameraMode, CharacterController, Children, DialogueChoice, DialogueNode, DialogueTree,
+    DirectionalLight, GlobalTransform, Health, Inventory, ItemId, ItemStack, MaterialRef, NavAgent,
+    NodeId, Parent, Particle, ParticleEmitter, ParticleSource, PatrolRoute, Quest, QuestId,
+    QuestLog, QuestObjective, QuestState, RigidBody, SkeletonPose, SphereCollider, StaticMesh,
+    Stats, TerrainChunkRef, Transform, VegetationInstance, VehicleController, Velocity, Weapon,
+    WheelState,
 };
 pub use entity::Entity;
 pub use query::{Query2, Query2Mut, Query3, Query3Mut};
 pub use schedule::SystemSchedule;
 pub use system::System;
 pub use systems::{
-    generate_particle_debug_lines, CameraSystem, ParticleEmitSystem, ParticleLifetimeSystem,
-    PhysicsSystem, TransformPropagateSystem,
+    generate_particle_batch, generate_particle_debug_lines, CameraSystem, ParticleEmitSystem,
+    ParticleLifetimeSystem, PhysicsSystem, TransformPropagateSystem,
 };
 pub use world::World;

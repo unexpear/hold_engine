@@ -1,3 +1,5 @@
+import { BackendClient } from "./BackendClient.js";
+import { BrowserEditorSession } from "./BrowserEditorSession.js";
 import { ContextMenu } from "./ContextMenu.js";
 import { EditorProtocol } from "./EditorProtocol.js";
 import { Inspector } from "./Inspector.js";
@@ -56,49 +58,146 @@ function createScene() {
   return root;
 }
 
-const container = document.getElementById("demo-root");
-const root = createScene();
-const tree = new MorphicTree(root);
-tree.sceneName = "Unified Branch Demo";
-
-MorphicRegistry.instance.reset();
-MorphicRegistry.instance.registerTree(root);
-
-const renderer = new Renderer(container, tree);
-window.morphic = {};
-
-function replaceTree(nextTree) {
-  MorphicRegistry.instance.reset();
-  MorphicRegistry.instance.registerTree(nextTree.root);
-  renderer.tree = nextTree;
-  window.morphic.tree = nextTree;
-  renderer.select(nextTree.root);
+function createDefaultTree() {
+  const tree = new MorphicTree(createScene());
+  tree.sceneName = "Unified Branch Demo";
+  return tree;
 }
 
-const scene = {
-  exportText() {
-    return exportTreeToScene(renderer.tree, {
-      sceneName: renderer.tree.sceneName || getSceneName(renderer.tree),
-    });
-  },
-  importText(source) {
-    const nextTree = importSceneToTree(source);
-    replaceTree(nextTree);
-    return nextTree;
-  },
-};
+async function loadInitialTree() {
+  const backendClient = await BackendClient.connect();
+  if (!backendClient?.session?.sourceText) {
+    return {
+      backendClient: null,
+      tree: createDefaultTree(),
+    };
+  }
 
-new ContextMenu(renderer);
-new Inspector(renderer, scene);
-new ScriptingConsole({ renderer, sceneBridge: scene });
+  try {
+    const tree = importSceneToTree(backendClient.session.sourceText);
+    return {
+      backendClient,
+      tree,
+    };
+  } catch (error) {
+    console.error("Failed to import the backend scene into the browser prototype.", error);
+    return {
+      backendClient: null,
+      tree: createDefaultTree(),
+    };
+  }
+}
 
-renderer.select(root);
+function isEditableTarget(target) {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+  );
+}
 
-Object.assign(window.morphic, {
-  editorProtocol: EditorProtocol,
-  renderer,
-  tree,
-  registry: MorphicRegistry.instance,
-  MorphicObject,
-  scene,
+async function boot() {
+  const container = document.getElementById("demo-root");
+  const { backendClient, tree: initialTree } = await loadInitialTree();
+
+  MorphicRegistry.instance.reset();
+  MorphicRegistry.instance.registerTree(initialTree.root);
+
+  const renderer = new Renderer(container, initialTree);
+  window.morphic = {};
+
+  function replaceTree(nextTree, selectedId = nextTree.root.id) {
+    MorphicRegistry.instance.reset();
+    MorphicRegistry.instance.registerTree(nextTree.root);
+    renderer.tree = nextTree;
+    window.morphic.tree = nextTree;
+    const nextSelection = nextTree.findById(selectedId) || nextTree.root;
+    renderer.select(nextSelection);
+  }
+
+  const scene = {
+    exportText() {
+      return exportTreeToScene(renderer.tree, {
+        sceneName: renderer.tree.sceneName ?? getSceneName(renderer.tree),
+      });
+    },
+    importText(source) {
+      const nextTree = importSceneToTree(source);
+      replaceTree(nextTree);
+      return nextTree;
+    },
+  };
+
+  const editorSession = new BrowserEditorSession({
+    renderer,
+    exportSceneText: () => scene.exportText(),
+    replaceTree,
+    saveSceneText: backendClient
+      ? (sourceText) => backendClient.saveSceneText(sourceText)
+      : null,
+  });
+
+  new ContextMenu(renderer, {
+    applyAuthoredChange: (mutator) => editorSession.applyAuthoredChange(mutator),
+  });
+  const inspector = new Inspector(renderer, scene, { editorSession, backendClient });
+  new ScriptingConsole({ renderer, sceneBridge: scene });
+
+  renderer.select(initialTree.root);
+
+  document.addEventListener("keydown", async (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || isEditableTarget(event.target)) {
+      return;
+    }
+
+    const key = event.key.toLowerCase();
+
+    try {
+      if (key === "s") {
+        event.preventDefault();
+        await inspector.saveButton.onclick();
+        return;
+      }
+
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        inspector.undoButton.onclick();
+        return;
+      }
+
+      if (key === "y" || (key === "z" && event.shiftKey)) {
+        event.preventDefault();
+        inspector.redoButton.onclick();
+      }
+    } catch (error) {
+      event.preventDefault();
+      inspector.setStatus(error.message, true);
+    }
+  });
+
+  Object.assign(window.morphic, {
+    authorEdit(mutator) {
+      return editorSession.applyAuthoredChange(mutator);
+    },
+    backend: backendClient,
+    editorProtocol: EditorProtocol,
+    editorSession,
+    renderer,
+    saveScene() {
+      return editorSession.save();
+    },
+    tree: renderer.tree,
+    undoScene() {
+      return editorSession.undo();
+    },
+    redoScene() {
+      return editorSession.redo();
+    },
+    registry: MorphicRegistry.instance,
+    MorphicObject,
+    scene,
+  });
+}
+
+boot().catch((error) => {
+  console.error("Morphic browser editor failed to boot.", error);
 });

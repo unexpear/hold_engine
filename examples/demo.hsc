@@ -1,13 +1,71 @@
 scene "Hold Demo"
 
-# Authored runtime scene for the native demo host.
-# `examples/demo.rs` still attaches demo-only behavior after spawn:
-# - `CameraMode` on `camera` for first/third-person runtime control
-# Preview/play gating for authored emitters and velocity
-# Those are intentional host-side behaviors for now, not part of `.hsc`.
+runtime_slice {
+  terrain {
+    size 1024 256 1024
+    chunk_size 64
+    height_scale 80
+  }
+  paint_layer "sand" {
+    material "materials/sand"
+    tiling 6
+    channel 0
+  }
+  vegetation_prototype "palm" {
+    mesh "meshes/palm"
+    material "materials/palm"
+    density 2.5
+    random_yaw 1
+    align_to_normal 1
+  }
+  vegetation_paint "palm" {
+    center 120 0 180
+    radius 80
+    density 0.9
+  }
+  static_mesh_actor "rock_large" {
+    mesh "meshes/rock_large"
+    material "materials/rock"
+    pos 80 0 120
+    rot 0 32 0
+    scale 8 5 7
+  }
+  water_volume "ocean" {
+    material "materials/ocean"
+    center 512 0 512
+    extents 1024 6 1024
+    wave_strength 0.35
+  }
+  spawn_point "player_start" {
+    kind "player"
+    pos 32 4 32
+    yaw 180
+  }
+  patrol_route "route_a" {
+    looped 1
+    point 96 0 96
+    point 160 0 128
+    point 128 0 192
+  }
+  vehicle_spawner "jeep" {
+    mesh "meshes/jeep"
+    material "materials/jeep"
+    pos 56 0 56
+    yaw 90
+  }
+  breakable_prop "crate" {
+    intact_mesh "meshes/crate"
+    broken_mesh "meshes/crate_broken"
+    material "materials/crate"
+    pos 70 0 68
+    rot 0 0 0
+    scale 2 2 2
+    hit_points 40
+    break_impulse 22
+  }
+}
 
 entity "model" {
-  # Scene-authored spin data for play mode.
   transform {
     pos 0 8 0
     rot 0 0 0 1
@@ -20,7 +78,6 @@ entity "model" {
 }
 
 entity "model_fx" {
-  # Authored spark fountain above the model.
   transform {
     pos 0 1.6 0
     rot 0 0 0 1
@@ -49,7 +106,6 @@ entity "model_fx" {
 }
 
 entity "sun" {
-  # Main authored directional light for terrain and mesh shading.
   light {
     dir 0.4 0.8 0.3
     color 1 1 1 1
@@ -59,7 +115,6 @@ entity "sun" {
 }
 
 entity "player" {
-  # PlayerController uses this as the authored spawn point.
   transform {
     pos 0 20 0
     rot 0 0 0 1
@@ -68,7 +123,6 @@ entity "player" {
 }
 
 entity "camera" {
-  # Lens settings and active-camera ownership live in scene data.
   transform {
     pos 0 20 0
     rot 0 0 0 1

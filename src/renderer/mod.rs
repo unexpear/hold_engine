@@ -1,12 +1,18 @@
+pub mod frame;
 pub mod opengl;
 pub mod opengl_shaders;
 pub mod software;
 pub mod vulkan;
 
+pub use frame::{
+    DrawItem, FogState, LightItem, ParticleBatch, ParticleBillboard, RenderFrame, RenderView,
+    RenderViewport, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
+};
 pub use opengl::OpenGLRenderer;
 pub use software::SoftwareRenderer;
 pub use vulkan::VulkanRenderer;
 
+use crate::assets::AssetStore;
 use crate::math::{Mat4, Vec3};
 
 // ── Color ─────────────────────────────────────────────────────────────────────
@@ -95,6 +101,28 @@ pub trait Renderer {
     fn render_screen_quads(&mut self, quads: &[ScreenQuad]) {
         let _ = quads;
     }
+
+    /// Submit a backend-neutral frame description within the current frame.
+    ///
+    /// Callers are expected to use this between [`Renderer::begin_frame`] and
+    /// [`Renderer::end_frame`]. The default path preserves the current
+    /// immediate-mode contract: clear, draw debug lines through the primary
+    /// view, then draw screen quads. Backends can override this to consume
+    /// mesh/material/terrain batches directly as the runtime slice renderer
+    /// grows.
+    fn submit_frame(&mut self, assets: &AssetStore, frame: &RenderFrame) {
+        let _ = assets;
+        let clear_color = frame
+            .primary_view()
+            .map(|view| view.clear_color)
+            .unwrap_or(Color::BLACK);
+        self.clear(clear_color);
+        if let Some(view) = frame.primary_view() {
+            let vp = view.projection * view.view;
+            self.render_debug_lines(&frame.debug_lines, &vp);
+        }
+        self.render_screen_quads(&frame.screen_quads);
+    }
 }
 
 // ── Debug draw primitive ──────────────────────────────────────────────────────
@@ -143,4 +171,143 @@ pub enum BackendKind {
     Software,
     OpenGL,
     Vulkan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendMaturity {
+    Ready,
+    Experimental,
+    FoundationOnly,
+}
+
+impl std::fmt::Display for BackendMaturity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("ready"),
+            Self::Experimental => f.write_str("experimental"),
+            Self::FoundationOnly => f.write_str("foundation-only"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub clear_and_present: bool,
+    pub resize: bool,
+    pub debug_lines: bool,
+    pub screen_quads: bool,
+    pub mesh_upload: bool,
+    pub textured_mesh: bool,
+    pub native_editor_shell_ready: bool,
+    pub maturity: BackendMaturity,
+    pub summary: &'static str,
+    pub gaps: &'static str,
+}
+
+impl BackendCapabilities {
+    pub const fn editor_overlay_ready(self) -> bool {
+        self.debug_lines && self.screen_quads
+    }
+}
+
+impl BackendKind {
+    pub const ALL: [Self; 3] = [Self::Software, Self::OpenGL, Self::Vulkan];
+
+    pub const fn cli_name(self) -> &'static str {
+        match self {
+            Self::Software => "software",
+            Self::OpenGL => "opengl",
+            Self::Vulkan => "vulkan",
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Software => "Software",
+            Self::OpenGL => "OpenGL",
+            Self::Vulkan => "Vulkan",
+        }
+    }
+
+    pub const fn capabilities(self) -> BackendCapabilities {
+        match self {
+            Self::Software => BackendCapabilities {
+                clear_and_present: true,
+                resize: true,
+                debug_lines: true,
+                screen_quads: true,
+                mesh_upload: false,
+                textured_mesh: false,
+                native_editor_shell_ready: true,
+                maturity: BackendMaturity::Ready,
+                summary: "Reference backend for the native editor shell and debug tooling.",
+                gaps: "No GPU mesh upload or textured mesh path yet.",
+            },
+            Self::OpenGL => BackendCapabilities {
+                clear_and_present: true,
+                resize: true,
+                debug_lines: true,
+                screen_quads: true,
+                mesh_upload: true,
+                textured_mesh: true,
+                native_editor_shell_ready: true,
+                maturity: BackendMaturity::Experimental,
+                summary: "GPU path with editor overlays plus mesh and texture upload helpers.",
+                gaps: "Needs broader parity validation and runtime hardening across driver setups.",
+            },
+            Self::Vulkan => BackendCapabilities {
+                clear_and_present: true,
+                resize: true,
+                debug_lines: true,
+                screen_quads: true,
+                mesh_upload: false,
+                textured_mesh: false,
+                native_editor_shell_ready: true,
+                maturity: BackendMaturity::Experimental,
+                summary: "Hybrid editor path: Vulkan swapchain/present with CPU-rasterized debug and UI overlays.",
+                gaps: "Still missing native Vulkan mesh upload, textured mesh rendering, and a pure-GPU overlay path.",
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.cli_name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackendKind, BackendMaturity};
+
+    #[test]
+    fn backend_catalog_stays_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for backend in BackendKind::ALL {
+            assert!(seen.insert(backend.cli_name()));
+        }
+        assert_eq!(seen.len(), BackendKind::ALL.len());
+    }
+
+    #[test]
+    fn editor_shell_ready_backends_have_overlay_support() {
+        for backend in BackendKind::ALL {
+            let capabilities = backend.capabilities();
+            if capabilities.native_editor_shell_ready {
+                assert!(capabilities.editor_overlay_ready());
+            }
+        }
+    }
+
+    #[test]
+    fn vulkan_is_editor_ready_but_still_missing_mesh_features() {
+        let capabilities = BackendKind::Vulkan.capabilities();
+        assert_eq!(capabilities.maturity, BackendMaturity::Experimental);
+        assert!(capabilities.native_editor_shell_ready);
+        assert!(capabilities.debug_lines);
+        assert!(capabilities.screen_quads);
+        assert!(!capabilities.mesh_upload);
+        assert!(!capabilities.textured_mesh);
+    }
 }
