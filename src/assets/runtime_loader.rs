@@ -148,6 +148,15 @@ pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAs
 
     let vertex_count = cursor.read_u32()? as usize;
     let index_count = cursor.read_u32()? as usize;
+    // Guard both untrusted counts against the remaining buffer before
+    // reserving. Each vertex is exactly VERTEX_SIZE_BYTES and each index
+    // exactly 4 bytes on the wire, so the two products bound the total.
+    // Saturating arithmetic makes an overflowing count trip the guard
+    // rather than wrap.
+    let needed = (vertex_count as u64)
+        .saturating_mul(VERTEX_SIZE_BYTES as u64)
+        .saturating_add((index_count as u64).saturating_mul(4));
+    cursor.ensure_bytes_available(needed)?;
     let mut vertices = Vec::with_capacity(vertex_count);
     let mut indices = Vec::with_capacity(index_count);
 
@@ -169,8 +178,14 @@ pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAs
         indices.push(cursor.read_u32()?);
     }
 
+    cursor.expect_end()?;
     Ok(MeshData::from_raw(vertices, indices))
 }
+
+/// On-wire size of one encoded vertex: 12 little-endian f32 values
+/// (pos3 + normal3 + uv2 + tangent4). Used to bound `vertex_count`
+/// against the buffer before allocating.
+const VERTEX_SIZE_BYTES: usize = 12 * 4;
 
 pub fn encode_compiled_texture_payload(texture: &Texture) -> Result<Vec<u8>, CompiledAssetError> {
     // 28-byte header (v3 header is 4 bigger than v2 for the colour-space tag)
@@ -202,6 +217,7 @@ pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, Compiled
     let color_space = decode_color_space(cursor.read_u32()?)?;
     let data_len = cursor.read_u64()? as usize;
     let data = cursor.read_vec(data_len)?;
+    cursor.expect_end()?;
 
     Ok(Texture {
         width,
@@ -234,13 +250,15 @@ pub fn decode_compiled_material_payload(
         return Err(CompiledAssetError::UnsupportedVersion(version));
     }
 
-    Ok(CompiledMaterialPayload {
+    let payload = CompiledMaterialPayload {
         albedo_logical_name: cursor.read_string()?,
         normal_logical_name: cursor.read_option_string()?,
         specular_gloss_logical_name: cursor.read_option_string()?,
         double_sided: cursor.read_bool()?,
         alpha_cutout: cursor.read_bool()?,
-    })
+    };
+    cursor.expect_end()?;
+    Ok(payload)
 }
 
 /// On-disk payload for a [`crate::assets::Shader`]. Two GLSL
@@ -276,11 +294,13 @@ pub fn decode_compiled_shader_payload(
         return Err(CompiledAssetError::UnsupportedVersion(version));
     }
 
-    Ok(CompiledShaderPayload {
+    let payload = CompiledShaderPayload {
         name: cursor.read_string()?,
         vertex_source: cursor.read_string()?,
         fragment_source: cursor.read_string()?,
-    })
+    };
+    cursor.expect_end()?;
+    Ok(payload)
 }
 
 /// On-disk payload for a compiled scene asset. Carries the canonical
@@ -328,10 +348,12 @@ pub fn decode_compiled_scene_payload(
         return Err(CompiledAssetError::UnsupportedVersion(version));
     }
 
-    Ok(CompiledScenePayload {
+    let payload = CompiledScenePayload {
         name: cursor.read_string()?,
         hscene_text: cursor.read_string()?,
-    })
+    };
+    cursor.expect_end()?;
+    Ok(payload)
 }
 
 pub struct CompiledAssetRuntimeLoader {
@@ -561,6 +583,39 @@ impl<'a> PayloadCursor<'a> {
         Self { bytes, pos: 0 }
     }
 
+    /// Bytes not yet consumed.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+
+    /// Reject a decode that would need more bytes than remain, before
+    /// any `Vec::with_capacity`. `needed` is the caller-computed total
+    /// minimum wire size of the elements about to be read (use
+    /// saturating arithmetic so an overflowing product still trips the
+    /// guard rather than wrapping). Closes the allocation-DoS surface
+    /// on the untrusted vertex/index counts.
+    fn ensure_bytes_available(&self, needed: u64) -> Result<(), CompiledAssetError> {
+        let remaining = self.remaining() as u64;
+        if needed > remaining {
+            return Err(CompiledAssetError::DeclaredLengthExceedsBuffer {
+                declared: needed,
+                remaining,
+            });
+        }
+        Ok(())
+    }
+
+    /// Assert every byte has been consumed. Enforces the exact-length
+    /// contract for payloads (M10): a payload slice carries exactly one
+    /// asset's fields and nothing more.
+    fn expect_end(&self) -> Result<(), CompiledAssetError> {
+        let extra = self.remaining() as u64;
+        if extra != 0 {
+            return Err(CompiledAssetError::TrailingBytes { extra });
+        }
+        Ok(())
+    }
+
     fn read_u32(&mut self) -> Result<u32, CompiledAssetError> {
         Ok(u32::from_le_bytes(self.read_array::<4>()?))
     }
@@ -627,14 +682,16 @@ mod tests {
 
     use super::{
         compiled_asset_path_for_logical_name, decode_compiled_material_payload,
-        decode_compiled_mesh_payload, decode_compiled_texture_payload,
-        encode_compiled_material_payload, encode_compiled_mesh_payload,
+        decode_compiled_mesh_payload, decode_compiled_scene_payload, decode_compiled_shader_payload,
+        decode_compiled_texture_payload, encode_compiled_material_payload,
+        encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
         encode_compiled_texture_payload, CompiledAssetRuntimeError, CompiledAssetRuntimeLoader,
-        CompiledMaterialPayload,
+        CompiledMaterialPayload, CompiledScenePayload, CompiledShaderPayload,
     };
     use crate::assets::{
         encode_compiled_asset, ColorSpace, CompiledAssetBlob, CompiledAssetDependency,
-        CompiledAssetKind, CompiledAssetMetadata, MeshData, ShaderHandle, Texture, TextureFormat,
+        CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata, MeshData, ShaderHandle,
+        Texture, TextureFormat, Vertex,
     };
 
     fn unique_test_root(label: &str) -> PathBuf {
@@ -823,5 +880,221 @@ mod tests {
         assert!(assets.get(material_asset.albedo).is_some());
 
         fs::remove_dir_all(root).ok();
+    }
+
+    // ── M10 format-stability: frozen payload version ──────────────────────
+
+    /// The shared payload version is a wire contract across all five
+    /// kinds. Freeze it so a bump is a deliberate, reviewed change (and
+    /// so M10.2's split into per-kind versions is a visible edit here).
+    #[test]
+    fn payload_version_is_frozen() {
+        assert_eq!(super::COMPILED_PAYLOAD_VERSION, 3);
+    }
+
+    // ── M10 format-stability: golden-byte fixtures per payload ────────────
+    //
+    // Exact on-disk bytes for a known input, hand-derived from the
+    // documented layout. A wire-layout change fails these immediately,
+    // where a roundtrip test would not.
+
+    #[test]
+    fn mesh_payload_golden_single_vertex_no_indices() {
+        // One vertex: pos = [1, 0, 0], everything else 0. No indices.
+        let mesh = MeshData::from_raw(
+            vec![Vertex {
+                pos: [1.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 0.0],
+                uv: [0.0, 0.0],
+                tangent: [0.0, 0.0, 0.0, 0.0],
+            }],
+            vec![],
+        );
+        let mut expected: Vec<u8> = Vec::new();
+        expected.extend_from_slice(&3u32.to_le_bytes()); // version
+        expected.extend_from_slice(&1u32.to_le_bytes()); // vertex_count
+        expected.extend_from_slice(&0u32.to_le_bytes()); // index_count
+        expected.extend_from_slice(&1.0f32.to_le_bytes()); // pos.x = 1.0 -> 00 00 80 3F
+        expected.extend_from_slice(&[0u8; 44]); // remaining 11 f32 = 0
+        assert_eq!(expected.len(), 60);
+        // pos.x is the only non-zero float; confirm the 1.0 bit pattern.
+        assert_eq!(&expected[12..16], &[0x00, 0x00, 0x80, 0x3F]);
+        assert_eq!(encode_compiled_mesh_payload(&mesh).unwrap(), expected);
+        let decoded = decode_compiled_mesh_payload(&expected).unwrap();
+        assert_eq!(decoded.vertex_count(), 1);
+    }
+
+    #[test]
+    fn texture_payload_golden_1x1_rgba8_srgb() {
+        let texture = Texture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Srgb,
+            data: vec![10, 20, 30, 40],
+        };
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x03, 0x00, 0x00, 0x00, // version = 3
+            0x01, 0x00, 0x00, 0x00, // width = 1
+            0x01, 0x00, 0x00, 0x00, // height = 1
+            0x01, 0x00, 0x00, 0x00, // format = Rgba8 (1)
+            0x01, 0x00, 0x00, 0x00, // color_space = Srgb (1)
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // data_len (u64) = 4
+            0x0A, 0x14, 0x1E, 0x28, // data
+        ];
+        assert_eq!(encode_compiled_texture_payload(&texture).unwrap(), expected);
+        assert_eq!(decode_compiled_texture_payload(&expected).unwrap(), texture);
+    }
+
+    #[test]
+    fn material_payload_golden_albedo_normal_some_spec_none() {
+        let payload = CompiledMaterialPayload {
+            albedo_logical_name: "a".into(),
+            normal_logical_name: Some("n".into()),
+            specular_gloss_logical_name: None,
+            double_sided: false,
+            alpha_cutout: true,
+        };
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x03, 0x00, 0x00, 0x00, // version = 3
+            0x01, 0x00, 0x00, 0x00, b'a', // albedo = "a"
+            0x01, 0x01, 0x00, 0x00, 0x00, b'n', // normal = Some("n") (present flag + string)
+            0x00, // specular_gloss = None
+            0x00, // double_sided = false
+            0x01, // alpha_cutout = true
+        ];
+        assert_eq!(encode_compiled_material_payload(&payload).unwrap(), expected);
+        assert_eq!(decode_compiled_material_payload(&expected).unwrap(), payload);
+    }
+
+    #[test]
+    fn shader_payload_golden_and_roundtrip() {
+        let payload = CompiledShaderPayload {
+            name: "s".into(),
+            vertex_source: "v".into(),
+            fragment_source: "f".into(),
+        };
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x03, 0x00, 0x00, 0x00, // version = 3
+            0x01, 0x00, 0x00, 0x00, b's', // name = "s"
+            0x01, 0x00, 0x00, 0x00, b'v', // vertex_source = "v"
+            0x01, 0x00, 0x00, 0x00, b'f', // fragment_source = "f"
+        ];
+        assert_eq!(encode_compiled_shader_payload(&payload).unwrap(), expected);
+        assert_eq!(decode_compiled_shader_payload(&expected).unwrap(), payload);
+    }
+
+    #[test]
+    fn scene_payload_golden_and_roundtrip() {
+        let payload = CompiledScenePayload {
+            name: "sc".into(),
+            hscene_text: "x".into(),
+        };
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x03, 0x00, 0x00, 0x00, // version = 3
+            0x02, 0x00, 0x00, 0x00, b's', b'c', // name = "sc"
+            0x01, 0x00, 0x00, 0x00, b'x', // hscene_text = "x"
+        ];
+        assert_eq!(encode_compiled_scene_payload(&payload).unwrap(), expected);
+        assert_eq!(decode_compiled_scene_payload(&expected).unwrap(), payload);
+    }
+
+    // ── M10 hardening: trailing-byte + oversized-count rejection ──────────
+
+    #[test]
+    fn texture_payload_rejects_trailing_bytes() {
+        let texture = Texture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Srgb,
+            data: vec![0, 0, 0, 255],
+        };
+        let mut bytes = encode_compiled_texture_payload(&texture).unwrap();
+        bytes.push(0xFF);
+        match decode_compiled_texture_payload(&bytes) {
+            Err(CompiledAssetRuntimeError::Envelope(CompiledAssetError::TrailingBytes {
+                extra,
+            })) => assert_eq!(extra, 1),
+            other => panic!("expected TrailingBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shader_payload_rejects_trailing_bytes() {
+        let payload = CompiledShaderPayload {
+            name: "s".into(),
+            vertex_source: "v".into(),
+            fragment_source: "f".into(),
+        };
+        let mut bytes = encode_compiled_shader_payload(&payload).unwrap();
+        bytes.push(0x00);
+        assert_eq!(
+            decode_compiled_shader_payload(&bytes).unwrap_err(),
+            CompiledAssetError::TrailingBytes { extra: 1 }
+        );
+    }
+
+    #[test]
+    fn mesh_payload_rejects_oversized_vertex_count_without_allocating() {
+        // version=3, vertex_count=u32::MAX, index_count=0, no vertex data.
+        // Decode must reject via DeclaredLengthExceedsBuffer before
+        // Vec::with_capacity tries to reserve ~206 GB of vertices.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // MeshData doesn't implement Debug, so match on the error side
+        // without formatting the (never-produced) Ok value.
+        match decode_compiled_mesh_payload(&bytes) {
+            Err(CompiledAssetError::DeclaredLengthExceedsBuffer { .. }) => {}
+            Err(other) => panic!("expected DeclaredLengthExceedsBuffer, got {other:?}"),
+            Ok(_) => panic!("expected DeclaredLengthExceedsBuffer, got Ok(mesh)"),
+        }
+    }
+
+    #[test]
+    fn shader_and_scene_payloads_reject_truncation() {
+        let shader = encode_compiled_shader_payload(&CompiledShaderPayload {
+            name: "s".into(),
+            vertex_source: "v".into(),
+            fragment_source: "f".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            decode_compiled_shader_payload(&shader[..shader.len() - 1]).unwrap_err(),
+            CompiledAssetError::UnexpectedEof
+        );
+
+        let scene = encode_compiled_scene_payload(&CompiledScenePayload {
+            name: "sc".into(),
+            hscene_text: "x".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            decode_compiled_scene_payload(&scene[..scene.len() - 1]).unwrap_err(),
+            CompiledAssetError::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn payloads_reject_unsupported_version() {
+        // Patch the version field (first 4 bytes) of a valid shader
+        // payload to an unsupported value.
+        let mut bytes = encode_compiled_shader_payload(&CompiledShaderPayload {
+            name: "s".into(),
+            vertex_source: "v".into(),
+            fragment_source: "f".into(),
+        })
+        .unwrap();
+        bytes[0..4].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(
+            decode_compiled_shader_payload(&bytes).unwrap_err(),
+            CompiledAssetError::UnsupportedVersion(99)
+        );
     }
 }

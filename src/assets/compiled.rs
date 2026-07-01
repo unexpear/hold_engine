@@ -83,6 +83,21 @@ pub enum CompiledAssetError {
     UnexpectedEof,
     Utf8,
     LengthOverflow,
+    /// A declared count or length field would require more bytes than
+    /// remain in the buffer. Distinct from [`Self::UnexpectedEof`]
+    /// (which fires when a read actually runs off the end): this fires
+    /// *before* a speculative `Vec::with_capacity(untrusted_count)`, so
+    /// a malformed header cannot request a multi-gigabyte allocation
+    /// from a handful of on-disk bytes. Carries the declared element
+    /// count and the bytes actually remaining so the failure is
+    /// reproducible from the error alone (ADR 0003 Pillar 4).
+    DeclaredLengthExceedsBuffer { declared: u64, remaining: u64 },
+    /// Bytes remained after the last declared field was consumed. The
+    /// compiled format is exact-length by contract — any additive
+    /// extension must bump the version — so trailing bytes signal
+    /// corruption or a version/layout mismatch, never a
+    /// forward-compatible append. See `docs/formats/compiled-asset.md`.
+    TrailingBytes { extra: u64 },
 }
 
 impl fmt::Display for CompiledAssetError {
@@ -96,6 +111,14 @@ impl fmt::Display for CompiledAssetError {
             Self::UnexpectedEof => f.write_str("compiled asset payload truncated"),
             Self::Utf8 => f.write_str("compiled asset metadata is not valid UTF-8"),
             Self::LengthOverflow => f.write_str("compiled asset string or payload is too large"),
+            Self::DeclaredLengthExceedsBuffer { declared, remaining } => write!(
+                f,
+                "compiled asset declares {declared} elements but only {remaining} bytes remain"
+            ),
+            Self::TrailingBytes { extra } => write!(
+                f,
+                "compiled asset has {extra} unexpected trailing byte(s) after the final field"
+            ),
         }
     }
 }
@@ -139,6 +162,11 @@ pub fn decode_compiled_asset(bytes: &[u8]) -> Result<CompiledAssetBlob, Compiled
     let compiler_tag = cursor.read_string()?;
     let runtime_path = cursor.read_string()?;
     let dependency_count = cursor.read_u32()? as usize;
+    // Guard the untrusted count before reserving. Each dependency is at
+    // least DEPENDENCY_MIN_BYTES on the wire (kind tag + two zero-length
+    // strings), so a count implying more bytes than remain is malformed
+    // and is rejected before `Vec::with_capacity` can over-allocate.
+    cursor.ensure_count_bound(dependency_count, DEPENDENCY_MIN_BYTES)?;
     let mut dependencies = Vec::with_capacity(dependency_count);
     for _ in 0..dependency_count {
         dependencies.push(CompiledAssetDependency {
@@ -150,6 +178,10 @@ pub fn decode_compiled_asset(bytes: &[u8]) -> Result<CompiledAssetBlob, Compiled
 
     let payload_len = cursor.read_u64()? as usize;
     let payload = cursor.read_vec(payload_len)?;
+    // The envelope is exact-length: nothing legitimately follows the
+    // payload. Reject trailing bytes so corruption / version drift
+    // surfaces as a typed error instead of silent acceptance.
+    cursor.expect_end()?;
     Ok(CompiledAssetBlob {
         metadata: CompiledAssetMetadata {
             kind,
@@ -162,6 +194,12 @@ pub fn decode_compiled_asset(bytes: &[u8]) -> Result<CompiledAssetBlob, Compiled
         payload,
     })
 }
+
+/// Minimum on-wire size of one dependency record: a u32 kind tag plus
+/// two u32-length-prefixed strings at their zero-length minimum
+/// (4 + 4 + 4). Used to bound `dependency_count` against the remaining
+/// buffer before allocating.
+const DEPENDENCY_MIN_BYTES: usize = 12;
 
 fn write_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
@@ -186,6 +224,42 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
+    }
+
+    /// Bytes not yet consumed.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+
+    /// Reject a declared element count that could not possibly fit in
+    /// the remaining buffer, given each element's minimum wire size.
+    /// Called before `Vec::with_capacity` to close the allocation-DoS
+    /// surface (a u32 count times a small element size can request
+    /// gigabytes from a few bytes of input).
+    fn ensure_count_bound(
+        &self,
+        count: usize,
+        min_elem_size: usize,
+    ) -> Result<(), CompiledAssetError> {
+        let needed = (count as u64).saturating_mul(min_elem_size as u64);
+        let remaining = self.remaining() as u64;
+        if needed > remaining {
+            return Err(CompiledAssetError::DeclaredLengthExceedsBuffer {
+                declared: count as u64,
+                remaining,
+            });
+        }
+        Ok(())
+    }
+
+    /// Assert every byte has been consumed. Call at the end of a decode
+    /// to enforce the exact-length contract.
+    fn expect_end(&self) -> Result<(), CompiledAssetError> {
+        let extra = self.remaining() as u64;
+        if extra != 0 {
+            return Err(CompiledAssetError::TrailingBytes { extra });
+        }
+        Ok(())
     }
 
     fn read_u32(&mut self) -> Result<u32, CompiledAssetError> {
@@ -292,5 +366,208 @@ mod tests {
 
         let err = decode_compiled_asset(&encoded).unwrap_err();
         assert_eq!(err, CompiledAssetError::UnexpectedEof);
+    }
+
+    // ── M10 format-stability: frozen constants ────────────────────────────
+
+    /// The magic and version are a wire contract. If either changes,
+    /// every previously-compiled `.hcmp` on disk becomes unreadable —
+    /// this test forces that to be a deliberate, reviewed edit rather
+    /// than an accidental one. See docs/formats/compiled-asset.md.
+    #[test]
+    fn envelope_magic_and_version_are_frozen() {
+        assert_eq!(&super::COMPILED_ASSET_MAGIC, b"HOLDCMP1");
+        assert_eq!(super::COMPILED_ASSET_VERSION, 1);
+    }
+
+    // ── M10 format-stability: golden-byte fixtures ────────────────────────
+    //
+    // These assert the EXACT on-disk bytes for a known input. Unlike a
+    // roundtrip test (encode -> decode -> equal), which passes even if
+    // encoder and decoder drift together, a golden fixture fails the
+    // moment the wire layout changes — which is exactly the guarantee
+    // M10 is about. The expected vectors are derived by hand from the
+    // documented field layout, NOT captured from current output, so a
+    // latent layout bug would show up here as a mismatch instead of
+    // being silently frozen.
+
+    /// The minimal envelope: Mesh kind, all-empty metadata strings, no
+    /// dependencies, empty payload. Exactly 44 bytes.
+    #[test]
+    fn envelope_golden_minimal_44_bytes() {
+        let asset = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Mesh,
+                logical_name: String::new(),
+                source_path: String::new(),
+                compiler_tag: String::new(),
+                runtime_path: String::new(),
+                dependencies: vec![],
+            },
+            payload: vec![],
+        };
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            b'H', b'O', b'L', b'D', b'C', b'M', b'P', b'1', // magic
+            0x01, 0x00, 0x00, 0x00, // version = 1
+            0x01, 0x00, 0x00, 0x00, // kind = Mesh (1)
+            0x00, 0x00, 0x00, 0x00, // logical_name len = 0
+            0x00, 0x00, 0x00, 0x00, // source_path len = 0
+            0x00, 0x00, 0x00, 0x00, // compiler_tag len = 0
+            0x00, 0x00, 0x00, 0x00, // runtime_path len = 0
+            0x00, 0x00, 0x00, 0x00, // dependency_count = 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // payload_len (u64) = 0
+        ];
+        assert_eq!(expected.len(), 44);
+        assert_eq!(encode_compiled_asset(&asset).unwrap(), expected);
+        // Round-trips too.
+        assert_eq!(decode_compiled_asset(&expected).unwrap(), asset);
+    }
+
+    /// A richer envelope exercising a non-empty logical name, one
+    /// dependency, and a two-byte payload — pins the string framing,
+    /// dependency-record framing, and the asymmetric u64 payload length.
+    #[test]
+    fn envelope_golden_with_metadata_and_dependency() {
+        let asset = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Texture,
+                logical_name: "tex".into(),
+                source_path: String::new(),
+                compiler_tag: String::new(),
+                runtime_path: String::new(),
+                dependencies: vec![CompiledAssetDependency {
+                    kind: CompiledAssetKind::Mesh,
+                    logical_name: "m".into(),
+                    source_path: String::new(),
+                }],
+            },
+            payload: vec![0xAB, 0xCD],
+        };
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            b'H', b'O', b'L', b'D', b'C', b'M', b'P', b'1', // magic
+            0x01, 0x00, 0x00, 0x00, // version = 1
+            0x03, 0x00, 0x00, 0x00, // kind = Texture (3)
+            0x03, 0x00, 0x00, 0x00, b't', b'e', b'x', // logical_name = "tex"
+            0x00, 0x00, 0x00, 0x00, // source_path len = 0
+            0x00, 0x00, 0x00, 0x00, // compiler_tag len = 0
+            0x00, 0x00, 0x00, 0x00, // runtime_path len = 0
+            0x01, 0x00, 0x00, 0x00, // dependency_count = 1
+            0x01, 0x00, 0x00, 0x00, // dep[0].kind = Mesh (1)
+            0x01, 0x00, 0x00, 0x00, b'm', // dep[0].logical_name = "m"
+            0x00, 0x00, 0x00, 0x00, // dep[0].source_path len = 0
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // payload_len (u64) = 2
+            0xAB, 0xCD, // payload
+        ];
+        assert_eq!(encode_compiled_asset(&asset).unwrap(), expected);
+        assert_eq!(decode_compiled_asset(&expected).unwrap(), asset);
+    }
+
+    // ── M10 hardening: negative / typed-error coverage ────────────────────
+
+    /// Build the 44-byte minimal Mesh envelope so negative tests can
+    /// patch individual fields.
+    fn minimal_envelope_bytes() -> Vec<u8> {
+        let asset = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Mesh,
+                logical_name: String::new(),
+                source_path: String::new(),
+                compiler_tag: String::new(),
+                runtime_path: String::new(),
+                dependencies: vec![],
+            },
+            payload: vec![],
+        };
+        encode_compiled_asset(&asset).unwrap()
+    }
+
+    #[test]
+    fn envelope_rejects_unsupported_version() {
+        let mut bytes = minimal_envelope_bytes();
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes()); // version field
+        assert_eq!(
+            decode_compiled_asset(&bytes).unwrap_err(),
+            CompiledAssetError::UnsupportedVersion(2)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_invalid_top_level_kind() {
+        let mut bytes = minimal_envelope_bytes();
+        bytes[12..16].copy_from_slice(&99u32.to_le_bytes()); // kind field
+        assert_eq!(
+            decode_compiled_asset(&bytes).unwrap_err(),
+            CompiledAssetError::InvalidKind(99)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_invalid_dependency_kind() {
+        // Envelope with one dependency whose kind tag is invalid.
+        let asset = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Material,
+                logical_name: String::new(),
+                source_path: String::new(),
+                compiler_tag: String::new(),
+                runtime_path: String::new(),
+                dependencies: vec![CompiledAssetDependency {
+                    kind: CompiledAssetKind::Texture,
+                    logical_name: String::new(),
+                    source_path: String::new(),
+                }],
+            },
+            payload: vec![],
+        };
+        let mut bytes = encode_compiled_asset(&asset).unwrap();
+        // dep[0].kind sits right after dependency_count. Offsets:
+        // magic8 + ver4 + kind4 + 4 empty strings (16) + dep_count4 = 36.
+        bytes[36..40].copy_from_slice(&77u32.to_le_bytes());
+        assert_eq!(
+            decode_compiled_asset(&bytes).unwrap_err(),
+            CompiledAssetError::InvalidKind(77)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_invalid_utf8_string() {
+        // magic + version + kind + logical_name(len=1, byte 0xFF).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"HOLDCMP1");
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // version
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // kind = Mesh
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // logical_name len = 1
+        bytes.push(0xFF); // invalid UTF-8
+        assert_eq!(
+            decode_compiled_asset(&bytes).unwrap_err(),
+            CompiledAssetError::Utf8
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_trailing_bytes() {
+        let mut bytes = minimal_envelope_bytes();
+        bytes.push(0x00); // one byte past the declared payload
+        assert_eq!(
+            decode_compiled_asset(&bytes).unwrap_err(),
+            CompiledAssetError::TrailingBytes { extra: 1 }
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_oversized_dependency_count_without_allocating() {
+        // Patch dependency_count (offset 32..36 in the minimal envelope)
+        // to u32::MAX. Decode must reject via DeclaredLengthExceedsBuffer
+        // BEFORE Vec::with_capacity would try to reserve ~51 GB.
+        let mut bytes = minimal_envelope_bytes();
+        bytes[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        match decode_compiled_asset(&bytes).unwrap_err() {
+            CompiledAssetError::DeclaredLengthExceedsBuffer { declared, .. } => {
+                assert_eq!(declared, u32::MAX as u64);
+            }
+            other => panic!("expected DeclaredLengthExceedsBuffer, got {other:?}"),
+        }
     }
 }
