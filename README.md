@@ -127,3 +127,7 @@ Roadmap pointers:
 - **Differentiation and competitive posture**: `docs/adr/0003-differentiation-and-competitive-posture.md` (the five pillars; pain-point targeting; M7–M12 sequence)
 - **Hot-reload architecture**: `docs/adr/0004-hot-reload-architecture.md` (M7: file watcher + compile queue + reload dispatcher + invalidation bus; "hot-reloaded state ≡ clean-reload state" as a load-bearing promise)
 - Project charter: `docs/PROJECT_CHARTER.md`
+
+Binary format specs:
+
+- Compiled-asset (`.hcmp`) envelope + payloads: `docs/formats/compiled-asset.md` (M10: versioned envelope, per-kind payload versions, CRC-32 integrity footer, migration-on-read, field-by-field byte layout pinned by golden tests)
