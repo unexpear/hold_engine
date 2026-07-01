@@ -29,11 +29,12 @@ pub use mesh_map::{compute_ao_per_vertex, compute_curvature_per_vertex};
 pub use pool::AssetPool;
 pub use runtime_loader::{
     compiled_asset_path_for_logical_name, decode_compiled_material_payload,
-    decode_compiled_mesh_payload, decode_compiled_scene_payload, decode_compiled_shader_payload,
-    decode_compiled_texture_payload, encode_compiled_material_payload,
-    encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
-    encode_compiled_texture_payload, CompiledAssetRuntimeError, CompiledAssetRuntimeLoader,
-    CompiledMaterialPayload, CompiledScenePayload, CompiledShaderPayload,
+    decode_compiled_mesh_payload, decode_compiled_normal_map_payload, decode_compiled_scene_payload,
+    decode_compiled_shader_payload, decode_compiled_texture_payload,
+    encode_compiled_material_payload, encode_compiled_mesh_payload, encode_compiled_scene_payload,
+    encode_compiled_shader_payload, encode_compiled_texture_payload,
+    encode_compiled_texture_payload_with_convention, CompiledAssetRuntimeError,
+    CompiledAssetRuntimeLoader, CompiledMaterialPayload, CompiledScenePayload, CompiledShaderPayload,
 };
 pub use store::AssetStore;
 pub use texture::{decode_bmp, decode_tga, load_bmp, load_texture, load_tga, TexError};

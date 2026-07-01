@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use super::{
     decode_compiled_asset, AssetStore, ColorSpace, CompiledAssetBlob, CompiledAssetError,
-    CompiledAssetKind, Material, MaterialHandle, MeshData, MeshHandle, NormalMap, NormalMapHandle,
-    ShaderHandle, Texture, TextureFormat, TextureHandle, Vertex,
+    CompiledAssetKind, Material, MaterialHandle, MeshData, MeshHandle, NormalMap,
+    NormalMapConvention, NormalMapHandle, ShaderHandle, Texture, TextureFormat, TextureHandle,
+    Vertex,
 };
 
 // ── Per-kind payload versions (M10.2) ─────────────────────────────────────
@@ -29,7 +30,14 @@ use super::{
 //
 // See `docs/formats/compiled-asset.md` for the per-kind version policy.
 const MESH_PAYLOAD_VERSION: u32 = 3;
-const TEXTURE_PAYLOAD_VERSION: u32 = 3;
+/// Texture payload version. Bumped 3 -> 4 in M10.4 to carry a
+/// [`NormalMapConvention`] tag after the colour-space field, so a
+/// normal map's authored convention travels through the compiled
+/// pipeline instead of being assumed at the resolution boundary. v3
+/// payloads (no tag) migrate by defaulting to OpenGL — the exact
+/// behaviour before M10.4, so existing v3 texture blobs load
+/// identically.
+const TEXTURE_PAYLOAD_VERSION: u32 = 4;
 const MATERIAL_PAYLOAD_VERSION: u32 = 3;
 const SHADER_PAYLOAD_VERSION: u32 = 3;
 const SCENE_PAYLOAD_VERSION: u32 = 3;
@@ -46,6 +54,7 @@ const SCENE_PAYLOAD_VERSION: u32 = 3;
 pub(crate) fn expected_payload_version(kind: CompiledAssetKind) -> Option<u32> {
     match kind {
         CompiledAssetKind::Mesh => Some(MESH_PAYLOAD_VERSION),
+        // Texture and normal maps share the Texture kind + payload.
         CompiledAssetKind::Texture => Some(TEXTURE_PAYLOAD_VERSION),
         CompiledAssetKind::Material => Some(MATERIAL_PAYLOAD_VERSION),
         CompiledAssetKind::Shader => Some(SHADER_PAYLOAD_VERSION),
@@ -81,6 +90,7 @@ pub enum CompiledAssetRuntimeError {
     },
     InvalidTextureFormat(u32),
     InvalidColorSpace(u32),
+    InvalidNormalMapConvention(u32),
 }
 
 impl fmt::Display for CompiledAssetRuntimeError {
@@ -107,6 +117,9 @@ impl fmt::Display for CompiledAssetRuntimeError {
             }
             Self::InvalidColorSpace(raw) => {
                 write!(f, "invalid compiled colour-space tag {raw}")
+            }
+            Self::InvalidNormalMapConvention(raw) => {
+                write!(f, "invalid compiled normal-map convention tag {raw}")
             }
         }
     }
@@ -230,14 +243,30 @@ fn decode_mesh_v3(cursor: &mut PayloadCursor) -> Result<MeshData, CompiledAssetE
 const VERTEX_SIZE_BYTES: usize = 12 * 4;
 
 pub fn encode_compiled_texture_payload(texture: &Texture) -> Result<Vec<u8>, CompiledAssetError> {
-    // 28-byte header (v3 header is 4 bigger than v2 for the colour-space tag)
-    // plus pixel data.
-    let mut out = Vec::with_capacity(texture.data.len() + 28);
+    // Colour textures carry the OpenGL convention tag (irrelevant for
+    // colour data, but the field is shared with the normal-map path).
+    encode_compiled_texture_payload_with_convention(texture, NormalMapConvention::OpenGl)
+}
+
+/// Encode a texture payload (v4) with an explicit normal-map
+/// convention. Colour textures use [`encode_compiled_texture_payload`]
+/// (OpenGL); the convention is meaningful only when the payload is later
+/// resolved as a normal map (see [`decode_compiled_normal_map_payload`]).
+/// The stored pixels are the RAW source bytes; any DirectX→OpenGL flip
+/// happens on load, not here — so the convention tag describes the
+/// stored data's authored orientation.
+pub fn encode_compiled_texture_payload_with_convention(
+    texture: &Texture,
+    convention: NormalMapConvention,
+) -> Result<Vec<u8>, CompiledAssetError> {
+    // 32-byte header (v4 adds a 4-byte convention tag over v3) plus pixels.
+    let mut out = Vec::with_capacity(texture.data.len() + 32);
     write_u32(&mut out, TEXTURE_PAYLOAD_VERSION);
     write_u32(&mut out, texture.width);
     write_u32(&mut out, texture.height);
     write_u32(&mut out, encode_texture_format(texture.format));
     write_u32(&mut out, encode_color_space(texture.color_space));
+    write_u32(&mut out, encode_normal_map_convention(convention));
     write_u64(
         &mut out,
         u64::try_from(texture.data.len()).map_err(|_| CompiledAssetError::LengthOverflow)?,
@@ -246,16 +275,72 @@ pub fn encode_compiled_texture_payload(texture: &Texture) -> Result<Vec<u8>, Com
     Ok(out)
 }
 
+/// The raw fields of a decoded texture payload, before it is projected
+/// into either a colour [`Texture`] (convention dropped) or a
+/// [`NormalMap`] (convention applied). Kept internal so both public
+/// decoders share one body parser per version and cannot drift.
+struct DecodedTexturePayload {
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    color_space: ColorSpace,
+    /// Authored convention of the stored (raw) pixels. v3 payloads have
+    /// no tag and default to OpenGL.
+    convention: NormalMapConvention,
+    data: Vec<u8>,
+}
+
 pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, CompiledAssetRuntimeError> {
+    let decoded = decode_texture_payload_raw(bytes)?;
+    // Colour path: the convention tag is irrelevant and dropped.
+    Ok(Texture {
+        width: decoded.width,
+        height: decoded.height,
+        format: decoded.format,
+        color_space: decoded.color_space,
+        data: decoded.data,
+    })
+}
+
+/// Resolve a compiled texture payload as a [`NormalMap`], applying its
+/// authored convention (M10.4). A DirectX-convention payload has its
+/// green channel flipped on load so the stored GPU bytes are canonical
+/// OpenGL Y+, and `source_convention` records the original — fixing the
+/// pre-M10.4 bug where every normal map was assumed OpenGL and the
+/// convention never round-tripped. v3 payloads default to OpenGL, so
+/// existing blobs resolve exactly as before.
+pub fn decode_compiled_normal_map_payload(
+    bytes: &[u8],
+) -> Result<NormalMap, CompiledAssetRuntimeError> {
+    let decoded = decode_texture_payload_raw(bytes)?;
+    let normal_map = match decoded.convention {
+        NormalMapConvention::OpenGl => {
+            NormalMap::new_opengl(decoded.width, decoded.height, decoded.format, decoded.data)
+        }
+        NormalMapConvention::DirectX => {
+            NormalMap::from_directx(decoded.width, decoded.height, decoded.format, decoded.data)
+        }
+    };
+    Ok(normal_map)
+}
+
+fn decode_texture_payload_raw(
+    bytes: &[u8],
+) -> Result<DecodedTexturePayload, CompiledAssetRuntimeError> {
     let mut cursor = PayloadCursor::new(bytes);
     let version = cursor.read_u32()?;
     match version {
         3 => decode_texture_v3(&mut cursor),
+        4 => decode_texture_v4(&mut cursor),
         _ => Err(CompiledAssetError::UnsupportedVersion(version).into()),
     }
 }
 
-fn decode_texture_v3(cursor: &mut PayloadCursor) -> Result<Texture, CompiledAssetRuntimeError> {
+/// v3 texture body: no convention tag. Migrates by defaulting the
+/// convention to OpenGL — the exact pre-M10.4 behaviour.
+fn decode_texture_v3(
+    cursor: &mut PayloadCursor,
+) -> Result<DecodedTexturePayload, CompiledAssetRuntimeError> {
     let width = cursor.read_u32()?;
     let height = cursor.read_u32()?;
     let format = decode_texture_format(cursor.read_u32()?)?;
@@ -263,12 +348,35 @@ fn decode_texture_v3(cursor: &mut PayloadCursor) -> Result<Texture, CompiledAsse
     let data_len = cursor.read_u64()? as usize;
     let data = cursor.read_vec(data_len)?;
     cursor.expect_end()?;
-
-    Ok(Texture {
+    Ok(DecodedTexturePayload {
         width,
         height,
         format,
         color_space,
+        convention: NormalMapConvention::OpenGl,
+        data,
+    })
+}
+
+/// v4 texture body: adds the normal-map convention tag after the
+/// colour-space field.
+fn decode_texture_v4(
+    cursor: &mut PayloadCursor,
+) -> Result<DecodedTexturePayload, CompiledAssetRuntimeError> {
+    let width = cursor.read_u32()?;
+    let height = cursor.read_u32()?;
+    let format = decode_texture_format(cursor.read_u32()?)?;
+    let color_space = decode_color_space(cursor.read_u32()?)?;
+    let convention = decode_normal_map_convention(cursor.read_u32()?)?;
+    let data_len = cursor.read_u64()? as usize;
+    let data = cursor.read_vec(data_len)?;
+    cursor.expect_end()?;
+    Ok(DecodedTexturePayload {
+        width,
+        height,
+        format,
+        color_space,
+        convention,
         data,
     })
 }
@@ -476,15 +584,21 @@ impl CompiledAssetRuntimeLoader {
     }
 
     /// Resolve a logical name as a [`NormalMap`] asset. Reads the same
-    /// compiled-texture payload that [`Self::ensure_texture`] does, but inserts
-    /// the result as a typed [`NormalMap`] (defaulting to OpenGL Y+
-    /// convention) so it can be bound only to a [`Material`]'s normal slot.
-    /// See ADR 0002 Q4.
+    /// compiled-texture payload (kind [`CompiledAssetKind::Texture`]) that
+    /// [`Self::ensure_texture`] does, but resolves it through
+    /// [`decode_compiled_normal_map_payload`] so the payload's authored
+    /// [`NormalMapConvention`] (M10.4) is honoured: a DirectX-convention
+    /// payload is flipped to canonical OpenGL Y+ on load, and the source
+    /// convention round-trips onto the [`NormalMap`]. A v3 payload (no
+    /// convention tag) defaults to OpenGL — the pre-M10.4 behaviour — so
+    /// existing compiled normal maps resolve unchanged. See ADR 0002 Q4.
     ///
-    /// **TODO (M5):** the compiled-asset envelope should grow a dedicated
-    /// `CompiledAssetKind::NormalMap` so the convention can travel through the
-    /// pipeline rather than being assumed at the resolution boundary. Until
-    /// then, source data is assumed to already be in the canonical convention.
+    /// Follow-up: the compiler still emits OpenGL-convention texture
+    /// payloads by default (a raw image carries no convention metadata);
+    /// wiring a per-normal-map convention declaration from material
+    /// sources into `compile_*` so DirectX sources compile as DirectX is
+    /// tracked separately. The format and this loader now carry and honour
+    /// the convention end to end.
     pub fn ensure_normal_map(
         &mut self,
         assets: &mut AssetStore,
@@ -495,9 +609,7 @@ impl CompiledAssetRuntimeLoader {
         }
 
         let blob = self.load_blob(logical_name, CompiledAssetKind::Texture)?;
-        let texture = decode_compiled_texture_payload(&blob.payload)?;
-        let normal_map =
-            NormalMap::new_opengl(texture.width, texture.height, texture.format, texture.data);
+        let normal_map = decode_compiled_normal_map_payload(&blob.payload)?;
         let handle = assets.insert(normal_map);
         self.normal_map_handles
             .insert(logical_name.to_string(), handle);
@@ -595,6 +707,21 @@ fn decode_color_space(raw: u32) -> Result<ColorSpace, CompiledAssetRuntimeError>
         1 => Ok(ColorSpace::Srgb),
         2 => Ok(ColorSpace::Linear),
         _ => Err(CompiledAssetRuntimeError::InvalidColorSpace(raw)),
+    }
+}
+
+fn encode_normal_map_convention(convention: NormalMapConvention) -> u32 {
+    match convention {
+        NormalMapConvention::OpenGl => 1,
+        NormalMapConvention::DirectX => 2,
+    }
+}
+
+fn decode_normal_map_convention(raw: u32) -> Result<NormalMapConvention, CompiledAssetRuntimeError> {
+    match raw {
+        1 => Ok(NormalMapConvention::OpenGl),
+        2 => Ok(NormalMapConvention::DirectX),
+        _ => Err(CompiledAssetRuntimeError::InvalidNormalMapConvention(raw)),
     }
 }
 
@@ -738,16 +865,18 @@ mod tests {
 
     use super::{
         compiled_asset_path_for_logical_name, decode_compiled_material_payload,
-        decode_compiled_mesh_payload, decode_compiled_scene_payload, decode_compiled_shader_payload,
+        decode_compiled_mesh_payload, decode_compiled_normal_map_payload,
+        decode_compiled_scene_payload, decode_compiled_shader_payload,
         decode_compiled_texture_payload, encode_compiled_material_payload,
         encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
-        encode_compiled_texture_payload, CompiledAssetRuntimeError, CompiledAssetRuntimeLoader,
-        CompiledMaterialPayload, CompiledScenePayload, CompiledShaderPayload,
+        encode_compiled_texture_payload, encode_compiled_texture_payload_with_convention,
+        CompiledAssetRuntimeError, CompiledAssetRuntimeLoader, CompiledMaterialPayload,
+        CompiledScenePayload, CompiledShaderPayload,
     };
     use crate::assets::{
         encode_compiled_asset, ColorSpace, CompiledAssetBlob, CompiledAssetDependency,
-        CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata, MeshData, ShaderHandle,
-        Texture, TextureFormat, Vertex,
+        CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata, MeshData, NormalMapConvention,
+        ShaderHandle, Texture, TextureFormat, Vertex,
     };
 
     fn unique_test_root(label: &str) -> PathBuf {
@@ -809,8 +938,9 @@ mod tests {
             data: vec![0, 0, 0, 255],
         };
         let mut bytes = encode_compiled_texture_payload(&texture).unwrap();
-        // Overwrite the color_space field (4 bytes at offset 16) with
-        // an invalid tag (99).
+        // Overwrite the color_space field (4 bytes at offset 16: u32
+        // version, width, height, format, color_space) with an invalid
+        // tag (99). The convention field follows at offset 20 in v4.
         bytes[16] = 99;
         bytes[17] = 0;
         bytes[18] = 0;
@@ -948,7 +1078,7 @@ mod tests {
     #[test]
     fn payload_versions_are_frozen() {
         assert_eq!(super::MESH_PAYLOAD_VERSION, 3);
-        assert_eq!(super::TEXTURE_PAYLOAD_VERSION, 3);
+        assert_eq!(super::TEXTURE_PAYLOAD_VERSION, 4); // bumped in M10.4
         assert_eq!(super::MATERIAL_PAYLOAD_VERSION, 3);
         assert_eq!(super::SHADER_PAYLOAD_VERSION, 3);
         assert_eq!(super::SCENE_PAYLOAD_VERSION, 3);
@@ -987,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn texture_payload_golden_1x1_rgba8_srgb() {
+    fn texture_payload_golden_v4_1x1_rgba8_srgb() {
         let texture = Texture {
             width: 1,
             height: 1,
@@ -997,16 +1127,105 @@ mod tests {
         };
         #[rustfmt::skip]
         let expected: Vec<u8> = vec![
-            0x03, 0x00, 0x00, 0x00, // version = 3
+            0x04, 0x00, 0x00, 0x00, // version = 4
             0x01, 0x00, 0x00, 0x00, // width = 1
             0x01, 0x00, 0x00, 0x00, // height = 1
             0x01, 0x00, 0x00, 0x00, // format = Rgba8 (1)
             0x01, 0x00, 0x00, 0x00, // color_space = Srgb (1)
+            0x01, 0x00, 0x00, 0x00, // normal-map convention = OpenGl (1)
             0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // data_len (u64) = 4
             0x0A, 0x14, 0x1E, 0x28, // data
         ];
         assert_eq!(encode_compiled_texture_payload(&texture).unwrap(), expected);
         assert_eq!(decode_compiled_texture_payload(&expected).unwrap(), texture);
+    }
+
+    /// Reference payload migration (M10.4): a hand-authored v3 texture
+    /// payload — no convention tag — resolves as a normal map with the
+    /// OpenGL convention and its pixels UNCHANGED, exactly matching the
+    /// pre-M10.4 behaviour. Proves bumping the texture payload to v4 did
+    /// not orphan existing v3 blobs.
+    #[test]
+    fn texture_payload_v3_migrates_to_opengl_normal_map() {
+        #[rustfmt::skip]
+        let v3_bytes: Vec<u8> = vec![
+            0x03, 0x00, 0x00, 0x00, // version = 3 (old, no convention tag)
+            0x01, 0x00, 0x00, 0x00, // width = 1
+            0x01, 0x00, 0x00, 0x00, // height = 1
+            0x01, 0x00, 0x00, 0x00, // format = Rgba8 (1)
+            0x02, 0x00, 0x00, 0x00, // color_space = Linear (2)
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // data_len (u64) = 4
+            0x0A, 0xF5, 0x1E, 0xFF, // one RGBA pixel, green = 245
+        ];
+        // As a colour texture: pixels intact.
+        let tex = decode_compiled_texture_payload(&v3_bytes).unwrap();
+        assert_eq!(tex.data, vec![0x0A, 0xF5, 0x1E, 0xFF]);
+        // As a normal map: OpenGL default, green NOT flipped.
+        let nm = decode_compiled_normal_map_payload(&v3_bytes).unwrap();
+        assert_eq!(nm.source_convention, NormalMapConvention::OpenGl);
+        assert_eq!(nm.data, vec![0x0A, 0xF5, 0x1E, 0xFF]);
+    }
+
+    /// v4 lets a normal map's authored convention travel. A DirectX
+    /// payload is flipped to canonical OpenGL Y+ on load (green channel
+    /// inverted) and records DirectX as its source convention — the fix
+    /// for the pre-M10.4 bug where every normal map was assumed OpenGL.
+    /// An OpenGL payload loads unflipped. Both are exercised through the
+    /// real encoder, not hand-authored bytes.
+    #[test]
+    fn normal_map_payload_v4_applies_convention_on_load() {
+        // One RGBA pixel with green = 245; raw source bytes are stored.
+        let texture = Texture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Linear,
+            data: vec![0x0A, 0xF5, 0x1E, 0xFF],
+        };
+
+        // OpenGL: no flip, green stays 245.
+        let og_bytes = encode_compiled_texture_payload_with_convention(
+            &texture,
+            NormalMapConvention::OpenGl,
+        )
+        .unwrap();
+        let og = decode_compiled_normal_map_payload(&og_bytes).unwrap();
+        assert_eq!(og.source_convention, NormalMapConvention::OpenGl);
+        assert_eq!(og.data[1], 0xF5);
+
+        // DirectX: green flipped to 255 - 245 = 10, convention recorded.
+        let dx_bytes = encode_compiled_texture_payload_with_convention(
+            &texture,
+            NormalMapConvention::DirectX,
+        )
+        .unwrap();
+        let dx = decode_compiled_normal_map_payload(&dx_bytes).unwrap();
+        assert_eq!(dx.source_convention, NormalMapConvention::DirectX);
+        assert_eq!(dx.data[1], 0x0A, "green channel must be flipped on load");
+        // Red / blue / alpha untouched.
+        assert_eq!(dx.data[0], 0x0A);
+        assert_eq!(dx.data[2], 0x1E);
+        assert_eq!(dx.data[3], 0xFF);
+    }
+
+    /// An unknown convention tag surfaces a typed error rather than
+    /// silently defaulting.
+    #[test]
+    fn texture_payload_v4_rejects_unknown_convention_tag() {
+        let texture = Texture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Srgb,
+            data: vec![0, 0, 0, 255],
+        };
+        let mut bytes = encode_compiled_texture_payload(&texture).unwrap();
+        // convention tag is the 6th u32 (offset 20..24).
+        bytes[20..24].copy_from_slice(&99u32.to_le_bytes());
+        match decode_compiled_normal_map_payload(&bytes) {
+            Err(CompiledAssetRuntimeError::InvalidNormalMapConvention(99)) => {}
+            other => panic!("expected InvalidNormalMapConvention(99), got {other:?}"),
+        }
     }
 
     #[test]
