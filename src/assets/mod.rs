@@ -9,6 +9,7 @@ pub mod runtime_loader;
 pub mod store;
 pub mod texture;
 pub mod types;
+pub(crate) mod wire;
 
 pub use compiled::{
     decode_compiled_asset, encode_compiled_asset, CompiledAssetBlob, CompiledAssetDependency,

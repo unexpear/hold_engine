@@ -1,5 +1,7 @@
 use std::fmt;
 
+use super::wire::{write_string, write_u32, write_u64, ByteReader};
+
 pub const COMPILED_ASSET_MAGIC: [u8; 8] = *b"HOLDCMP1";
 /// Current compiled-asset envelope version the encoder writes.
 ///
@@ -121,6 +123,17 @@ pub enum CompiledAssetError {
     /// "regenerate from source", not "the format is wrong". Carries
     /// both values so the corruption is reproducible from the error.
     ChecksumMismatch { stored: u32, computed: u32 },
+    /// A texture payload's format tag was not a known [`TextureFormat`].
+    /// A payload-body error (lives here rather than in
+    /// `CompiledAssetRuntimeError` so all payload decoders share one
+    /// error type — M10.5). Carries the raw tag.
+    InvalidTextureFormat(u32),
+    /// A texture payload's colour-space tag was not a known
+    /// [`ColorSpace`]. Carries the raw tag.
+    InvalidColorSpace(u32),
+    /// A texture payload's normal-map convention tag (v4+) was not a
+    /// known [`NormalMapConvention`]. Carries the raw tag.
+    InvalidNormalMapConvention(u32),
 }
 
 impl fmt::Display for CompiledAssetError {
@@ -146,6 +159,11 @@ impl fmt::Display for CompiledAssetError {
                 f,
                 "compiled asset checksum mismatch: stored {stored:#010x}, computed {computed:#010x}"
             ),
+            Self::InvalidTextureFormat(raw) => write!(f, "invalid compiled texture format {raw}"),
+            Self::InvalidColorSpace(raw) => write!(f, "invalid compiled colour-space tag {raw}"),
+            Self::InvalidNormalMapConvention(raw) => {
+                write!(f, "invalid compiled normal-map convention tag {raw}")
+            }
         }
     }
 }
@@ -199,7 +217,7 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 pub fn decode_compiled_asset(bytes: &[u8]) -> Result<CompiledAssetBlob, CompiledAssetError> {
-    let mut cursor = Cursor::new(bytes);
+    let mut cursor = ByteReader::new(bytes);
     if cursor.read_array::<8>()? != COMPILED_ASSET_MAGIC {
         return Err(CompiledAssetError::InvalidMagic);
     }
@@ -242,7 +260,7 @@ pub fn decode_compiled_asset(bytes: &[u8]) -> Result<CompiledAssetBlob, Compiled
 /// version-specific terminal handling (v1 ends here; v2 has a CRC
 /// footer). Split out so both version arms of [`decode_compiled_asset`]
 /// share one body parser and cannot drift apart.
-fn read_envelope_body(cursor: &mut Cursor) -> Result<CompiledAssetBlob, CompiledAssetError> {
+fn read_envelope_body(cursor: &mut ByteReader) -> Result<CompiledAssetBlob, CompiledAssetError> {
     let kind = CompiledAssetKind::from_raw(cursor.read_u32()?)?;
     let logical_name = cursor.read_string()?;
     let source_path = cursor.read_string()?;
@@ -283,109 +301,6 @@ fn read_envelope_body(cursor: &mut Cursor) -> Result<CompiledAssetBlob, Compiled
 /// (4 + 4 + 4). Used to bound `dependency_count` against the remaining
 /// buffer before allocating.
 const DEPENDENCY_MIN_BYTES: usize = 12;
-
-fn write_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_string(out: &mut Vec<u8>, value: &str) -> Result<(), CompiledAssetError> {
-    let len = u32::try_from(value.len()).map_err(|_| CompiledAssetError::LengthOverflow)?;
-    write_u32(out, len);
-    out.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
-    }
-
-    /// Bytes not yet consumed.
-    fn remaining(&self) -> usize {
-        self.bytes.len().saturating_sub(self.pos)
-    }
-
-    /// Reject a declared element count that could not possibly fit in
-    /// the remaining buffer, given each element's minimum wire size.
-    /// Called before `Vec::with_capacity` to close the allocation-DoS
-    /// surface (a u32 count times a small element size can request
-    /// gigabytes from a few bytes of input).
-    fn ensure_count_bound(
-        &self,
-        count: usize,
-        min_elem_size: usize,
-    ) -> Result<(), CompiledAssetError> {
-        let needed = (count as u64).saturating_mul(min_elem_size as u64);
-        let remaining = self.remaining() as u64;
-        if needed > remaining {
-            return Err(CompiledAssetError::DeclaredLengthExceedsBuffer {
-                declared: count as u64,
-                remaining,
-            });
-        }
-        Ok(())
-    }
-
-    /// Assert every byte has been consumed. Call at the end of a decode
-    /// to enforce the exact-length contract.
-    fn expect_end(&self) -> Result<(), CompiledAssetError> {
-        let extra = self.remaining() as u64;
-        if extra != 0 {
-            return Err(CompiledAssetError::TrailingBytes { extra });
-        }
-        Ok(())
-    }
-
-    fn read_u32(&mut self) -> Result<u32, CompiledAssetError> {
-        Ok(u32::from_le_bytes(self.read_array::<4>()?))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, CompiledAssetError> {
-        Ok(u64::from_le_bytes(self.read_array::<8>()?))
-    }
-
-    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], CompiledAssetError> {
-        let end = self
-            .pos
-            .checked_add(N)
-            .ok_or(CompiledAssetError::UnexpectedEof)?;
-        if end > self.bytes.len() {
-            return Err(CompiledAssetError::UnexpectedEof);
-        }
-        let mut out = [0u8; N];
-        out.copy_from_slice(&self.bytes[self.pos..end]);
-        self.pos = end;
-        Ok(out)
-    }
-
-    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>, CompiledAssetError> {
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or(CompiledAssetError::UnexpectedEof)?;
-        if end > self.bytes.len() {
-            return Err(CompiledAssetError::UnexpectedEof);
-        }
-        let out = self.bytes[self.pos..end].to_vec();
-        self.pos = end;
-        Ok(out)
-    }
-
-    fn read_string(&mut self) -> Result<String, CompiledAssetError> {
-        let len = self.read_u32()? as usize;
-        let bytes = self.read_vec(len)?;
-        String::from_utf8(bytes).map_err(|_| CompiledAssetError::Utf8)
-    }
-}
 
 #[cfg(test)]
 mod tests {

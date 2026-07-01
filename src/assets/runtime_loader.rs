@@ -3,6 +3,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::wire::{
+    write_bool, write_f32, write_option_string, write_string, write_u32, write_u64, ByteReader,
+};
 use super::{
     decode_compiled_asset, AssetStore, ColorSpace, CompiledAssetBlob, CompiledAssetError,
     CompiledAssetKind, Material, MaterialHandle, MeshData, MeshHandle, NormalMap,
@@ -88,9 +91,6 @@ pub enum CompiledAssetRuntimeError {
         expected_logical_name: String,
         found_logical_name: String,
     },
-    InvalidTextureFormat(u32),
-    InvalidColorSpace(u32),
-    InvalidNormalMapConvention(u32),
 }
 
 impl fmt::Display for CompiledAssetRuntimeError {
@@ -112,15 +112,6 @@ impl fmt::Display for CompiledAssetRuntimeError {
                 f,
                 "compiled asset logical name mismatch: expected '{expected_logical_name}', found '{found_logical_name}'"
             ),
-            Self::InvalidTextureFormat(raw) => {
-                write!(f, "invalid compiled texture format {raw}")
-            }
-            Self::InvalidColorSpace(raw) => {
-                write!(f, "invalid compiled colour-space tag {raw}")
-            }
-            Self::InvalidNormalMapConvention(raw) => {
-                write!(f, "invalid compiled normal-map convention tag {raw}")
-            }
         }
     }
 }
@@ -192,7 +183,7 @@ pub fn encode_compiled_mesh_payload(mesh: &MeshData) -> Result<Vec<u8>, Compiled
 }
 
 pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAssetError> {
-    let mut cursor = PayloadCursor::new(bytes);
+    let mut cursor = ByteReader::new(bytes);
     let version = cursor.read_u32()?;
     match version {
         3 => decode_mesh_v3(&mut cursor),
@@ -200,7 +191,7 @@ pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAs
     }
 }
 
-fn decode_mesh_v3(cursor: &mut PayloadCursor) -> Result<MeshData, CompiledAssetError> {
+fn decode_mesh_v3(cursor: &mut ByteReader) -> Result<MeshData, CompiledAssetError> {
     let vertex_count = cursor.read_u32()? as usize;
     let index_count = cursor.read_u32()? as usize;
     // Guard both untrusted counts against the remaining buffer before
@@ -290,7 +281,7 @@ struct DecodedTexturePayload {
     data: Vec<u8>,
 }
 
-pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, CompiledAssetRuntimeError> {
+pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, CompiledAssetError> {
     let decoded = decode_texture_payload_raw(bytes)?;
     // Colour path: the convention tag is irrelevant and dropped.
     Ok(Texture {
@@ -311,7 +302,7 @@ pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, Compiled
 /// existing blobs resolve exactly as before.
 pub fn decode_compiled_normal_map_payload(
     bytes: &[u8],
-) -> Result<NormalMap, CompiledAssetRuntimeError> {
+) -> Result<NormalMap, CompiledAssetError> {
     let decoded = decode_texture_payload_raw(bytes)?;
     let normal_map = match decoded.convention {
         NormalMapConvention::OpenGl => {
@@ -324,23 +315,19 @@ pub fn decode_compiled_normal_map_payload(
     Ok(normal_map)
 }
 
-fn decode_texture_payload_raw(
-    bytes: &[u8],
-) -> Result<DecodedTexturePayload, CompiledAssetRuntimeError> {
-    let mut cursor = PayloadCursor::new(bytes);
+fn decode_texture_payload_raw(bytes: &[u8]) -> Result<DecodedTexturePayload, CompiledAssetError> {
+    let mut cursor = ByteReader::new(bytes);
     let version = cursor.read_u32()?;
     match version {
         3 => decode_texture_v3(&mut cursor),
         4 => decode_texture_v4(&mut cursor),
-        _ => Err(CompiledAssetError::UnsupportedVersion(version).into()),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version)),
     }
 }
 
 /// v3 texture body: no convention tag. Migrates by defaulting the
 /// convention to OpenGL — the exact pre-M10.4 behaviour.
-fn decode_texture_v3(
-    cursor: &mut PayloadCursor,
-) -> Result<DecodedTexturePayload, CompiledAssetRuntimeError> {
+fn decode_texture_v3(cursor: &mut ByteReader) -> Result<DecodedTexturePayload, CompiledAssetError> {
     let width = cursor.read_u32()?;
     let height = cursor.read_u32()?;
     let format = decode_texture_format(cursor.read_u32()?)?;
@@ -360,9 +347,7 @@ fn decode_texture_v3(
 
 /// v4 texture body: adds the normal-map convention tag after the
 /// colour-space field.
-fn decode_texture_v4(
-    cursor: &mut PayloadCursor,
-) -> Result<DecodedTexturePayload, CompiledAssetRuntimeError> {
+fn decode_texture_v4(cursor: &mut ByteReader) -> Result<DecodedTexturePayload, CompiledAssetError> {
     let width = cursor.read_u32()?;
     let height = cursor.read_u32()?;
     let format = decode_texture_format(cursor.read_u32()?)?;
@@ -397,7 +382,7 @@ pub fn encode_compiled_material_payload(
 pub fn decode_compiled_material_payload(
     bytes: &[u8],
 ) -> Result<CompiledMaterialPayload, CompiledAssetError> {
-    let mut cursor = PayloadCursor::new(bytes);
+    let mut cursor = ByteReader::new(bytes);
     let version = cursor.read_u32()?;
     match version {
         3 => decode_material_v3(&mut cursor),
@@ -406,7 +391,7 @@ pub fn decode_compiled_material_payload(
 }
 
 fn decode_material_v3(
-    cursor: &mut PayloadCursor,
+    cursor: &mut ByteReader,
 ) -> Result<CompiledMaterialPayload, CompiledAssetError> {
     let payload = CompiledMaterialPayload {
         albedo_logical_name: cursor.read_string()?,
@@ -446,7 +431,7 @@ pub fn encode_compiled_shader_payload(
 pub fn decode_compiled_shader_payload(
     bytes: &[u8],
 ) -> Result<CompiledShaderPayload, CompiledAssetError> {
-    let mut cursor = PayloadCursor::new(bytes);
+    let mut cursor = ByteReader::new(bytes);
     let version = cursor.read_u32()?;
     match version {
         3 => decode_shader_v3(&mut cursor),
@@ -454,7 +439,7 @@ pub fn decode_compiled_shader_payload(
     }
 }
 
-fn decode_shader_v3(cursor: &mut PayloadCursor) -> Result<CompiledShaderPayload, CompiledAssetError> {
+fn decode_shader_v3(cursor: &mut ByteReader) -> Result<CompiledShaderPayload, CompiledAssetError> {
     let payload = CompiledShaderPayload {
         name: cursor.read_string()?,
         vertex_source: cursor.read_string()?,
@@ -503,7 +488,7 @@ pub fn encode_compiled_scene_payload(
 pub fn decode_compiled_scene_payload(
     bytes: &[u8],
 ) -> Result<CompiledScenePayload, CompiledAssetError> {
-    let mut cursor = PayloadCursor::new(bytes);
+    let mut cursor = ByteReader::new(bytes);
     let version = cursor.read_u32()?;
     match version {
         3 => decode_scene_v3(&mut cursor),
@@ -511,7 +496,7 @@ pub fn decode_compiled_scene_payload(
     }
 }
 
-fn decode_scene_v3(cursor: &mut PayloadCursor) -> Result<CompiledScenePayload, CompiledAssetError> {
+fn decode_scene_v3(cursor: &mut ByteReader) -> Result<CompiledScenePayload, CompiledAssetError> {
     let payload = CompiledScenePayload {
         name: cursor.read_string()?,
         hscene_text: cursor.read_string()?,
@@ -686,12 +671,12 @@ fn encode_texture_format(format: TextureFormat) -> u32 {
     }
 }
 
-fn decode_texture_format(raw: u32) -> Result<TextureFormat, CompiledAssetRuntimeError> {
+fn decode_texture_format(raw: u32) -> Result<TextureFormat, CompiledAssetError> {
     match raw {
         1 => Ok(TextureFormat::Rgba8),
         2 => Ok(TextureFormat::Rgb8),
         3 => Ok(TextureFormat::R8),
-        _ => Err(CompiledAssetRuntimeError::InvalidTextureFormat(raw)),
+        _ => Err(CompiledAssetError::InvalidTextureFormat(raw)),
     }
 }
 
@@ -702,11 +687,11 @@ fn encode_color_space(space: ColorSpace) -> u32 {
     }
 }
 
-fn decode_color_space(raw: u32) -> Result<ColorSpace, CompiledAssetRuntimeError> {
+fn decode_color_space(raw: u32) -> Result<ColorSpace, CompiledAssetError> {
     match raw {
         1 => Ok(ColorSpace::Srgb),
         2 => Ok(ColorSpace::Linear),
-        _ => Err(CompiledAssetRuntimeError::InvalidColorSpace(raw)),
+        _ => Err(CompiledAssetError::InvalidColorSpace(raw)),
     }
 }
 
@@ -717,143 +702,11 @@ fn encode_normal_map_convention(convention: NormalMapConvention) -> u32 {
     }
 }
 
-fn decode_normal_map_convention(raw: u32) -> Result<NormalMapConvention, CompiledAssetRuntimeError> {
+fn decode_normal_map_convention(raw: u32) -> Result<NormalMapConvention, CompiledAssetError> {
     match raw {
         1 => Ok(NormalMapConvention::OpenGl),
         2 => Ok(NormalMapConvention::DirectX),
-        _ => Err(CompiledAssetRuntimeError::InvalidNormalMapConvention(raw)),
-    }
-}
-
-fn write_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_bool(out: &mut Vec<u8>, value: bool) {
-    out.push(if value { 1 } else { 0 });
-}
-
-fn write_string(out: &mut Vec<u8>, value: &str) -> Result<(), CompiledAssetError> {
-    let len = u32::try_from(value.len()).map_err(|_| CompiledAssetError::LengthOverflow)?;
-    write_u32(out, len);
-    out.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn write_option_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<(), CompiledAssetError> {
-    write_bool(out, value.is_some());
-    if let Some(value) = value {
-        write_string(out, value)?;
-    }
-    Ok(())
-}
-
-struct PayloadCursor<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> PayloadCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
-    }
-
-    /// Bytes not yet consumed.
-    fn remaining(&self) -> usize {
-        self.bytes.len().saturating_sub(self.pos)
-    }
-
-    /// Reject a decode that would need more bytes than remain, before
-    /// any `Vec::with_capacity`. `needed` is the caller-computed total
-    /// minimum wire size of the elements about to be read (use
-    /// saturating arithmetic so an overflowing product still trips the
-    /// guard rather than wrapping). Closes the allocation-DoS surface
-    /// on the untrusted vertex/index counts.
-    fn ensure_bytes_available(&self, needed: u64) -> Result<(), CompiledAssetError> {
-        let remaining = self.remaining() as u64;
-        if needed > remaining {
-            return Err(CompiledAssetError::DeclaredLengthExceedsBuffer {
-                declared: needed,
-                remaining,
-            });
-        }
-        Ok(())
-    }
-
-    /// Assert every byte has been consumed. Enforces the exact-length
-    /// contract for payloads (M10): a payload slice carries exactly one
-    /// asset's fields and nothing more.
-    fn expect_end(&self) -> Result<(), CompiledAssetError> {
-        let extra = self.remaining() as u64;
-        if extra != 0 {
-            return Err(CompiledAssetError::TrailingBytes { extra });
-        }
-        Ok(())
-    }
-
-    fn read_u32(&mut self) -> Result<u32, CompiledAssetError> {
-        Ok(u32::from_le_bytes(self.read_array::<4>()?))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, CompiledAssetError> {
-        Ok(u64::from_le_bytes(self.read_array::<8>()?))
-    }
-
-    fn read_f32(&mut self) -> Result<f32, CompiledAssetError> {
-        Ok(f32::from_le_bytes(self.read_array::<4>()?))
-    }
-
-    fn read_bool(&mut self) -> Result<bool, CompiledAssetError> {
-        Ok(self.read_array::<1>()?[0] != 0)
-    }
-
-    fn read_string(&mut self) -> Result<String, CompiledAssetError> {
-        let len = self.read_u32()? as usize;
-        let bytes = self.read_vec(len)?;
-        String::from_utf8(bytes).map_err(|_| CompiledAssetError::Utf8)
-    }
-
-    fn read_option_string(&mut self) -> Result<Option<String>, CompiledAssetError> {
-        if self.read_bool()? {
-            Ok(Some(self.read_string()?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>, CompiledAssetError> {
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or(CompiledAssetError::UnexpectedEof)?;
-        if end > self.bytes.len() {
-            return Err(CompiledAssetError::UnexpectedEof);
-        }
-        let out = self.bytes[self.pos..end].to_vec();
-        self.pos = end;
-        Ok(out)
-    }
-
-    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], CompiledAssetError> {
-        let end = self
-            .pos
-            .checked_add(N)
-            .ok_or(CompiledAssetError::UnexpectedEof)?;
-        if end > self.bytes.len() {
-            return Err(CompiledAssetError::UnexpectedEof);
-        }
-        let mut out = [0u8; N];
-        out.copy_from_slice(&self.bytes[self.pos..end]);
-        self.pos = end;
-        Ok(out)
+        _ => Err(CompiledAssetError::InvalidNormalMapConvention(raw)),
     }
 }
 
@@ -870,8 +723,8 @@ mod tests {
         decode_compiled_texture_payload, encode_compiled_material_payload,
         encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
         encode_compiled_texture_payload, encode_compiled_texture_payload_with_convention,
-        CompiledAssetRuntimeError, CompiledAssetRuntimeLoader, CompiledMaterialPayload,
-        CompiledScenePayload, CompiledShaderPayload,
+        CompiledAssetRuntimeLoader, CompiledMaterialPayload, CompiledScenePayload,
+        CompiledShaderPayload,
     };
     use crate::assets::{
         encode_compiled_asset, ColorSpace, CompiledAssetBlob, CompiledAssetDependency,
@@ -946,7 +799,7 @@ mod tests {
         bytes[18] = 0;
         bytes[19] = 0;
         match decode_compiled_texture_payload(&bytes) {
-            Err(CompiledAssetRuntimeError::InvalidColorSpace(99)) => {}
+            Err(CompiledAssetError::InvalidColorSpace(99)) => {}
             other => panic!("expected InvalidColorSpace(99), got {:?}", other),
         }
     }
@@ -1223,7 +1076,7 @@ mod tests {
         // convention tag is the 6th u32 (offset 20..24).
         bytes[20..24].copy_from_slice(&99u32.to_le_bytes());
         match decode_compiled_normal_map_payload(&bytes) {
-            Err(CompiledAssetRuntimeError::InvalidNormalMapConvention(99)) => {}
+            Err(CompiledAssetError::InvalidNormalMapConvention(99)) => {}
             other => panic!("expected InvalidNormalMapConvention(99), got {other:?}"),
         }
     }
@@ -1298,9 +1151,7 @@ mod tests {
         let mut bytes = encode_compiled_texture_payload(&texture).unwrap();
         bytes.push(0xFF);
         match decode_compiled_texture_payload(&bytes) {
-            Err(CompiledAssetRuntimeError::Envelope(CompiledAssetError::TrailingBytes {
-                extra,
-            })) => assert_eq!(extra, 1),
+            Err(CompiledAssetError::TrailingBytes { extra }) => assert_eq!(extra, 1),
             other => panic!("expected TrailingBytes, got {other:?}"),
         }
     }
