@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HOLD — A game engine that respects your time</title>
+
+<!--
+   ╭──────────────────────────────────────────────────────────────────╮
+   │ HOLD — Landing v1, JUNIOR PASS                                   │
+   │                                                                  │
+   │ Status: GREYBOXED. Hero rendered to set the tone; other sections │
+   │ are labeled with reasoning notes for review BEFORE visual polish.│
+   │ One thousand no's for every yes. Show first, build second.       │
+   │                                                                  │
+   │ Visual direction: B + C blend.                                   │
+   │   • B (Stripe / PostgreSQL Docs technical confidence) for body   │
+   │   • C (editor showcase) for hero                                 │
+   │                                                                  │
+   │ Identity proposed in design/landing-v1/brand-spec.md:            │
+   │   Type:   Fraunces (display + body) + JetBrains Mono (code)     │
+   │   Color:  Paper #FAF7F2 / Ink #1A1612 / Rust #B8431A             │
+   │   Logo:   wordmark "HOLD" — no icon mark in v1                   │
+   │                                                                  │
+   │ Charter conflict: the n8n-style visual scripting flips ADR 0003  │
+   │ non-goal #1. Treating this landing as forward-projection; charter│
+   │ amendment is a follow-up.                                        │
+   ╰──────────────────────────────────────────────────────────────────╯
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400..700,30..100&family=JetBrains+Mono:wght@400;500;700&display=swap"
+  rel="stylesheet"
+/>
+
+<style>
+  /* ──────────────────────────────────────────────────────────────
+     Brand tokens — see brand-spec.md
+     ────────────────────────────────────────────────────────────── */
+  :root {
+    --paper: #faf7f2;
+    --ink: #1a1612;
+    --rust: #b8431a;
+    --forest: #2d4a2a;
+    --stone: #6b5f52;
+    --pencil: #d9d0c3;
+
+    --font-display: "Fraunces", "Charter", "Iowan Old Style", Georgia, serif;
+    --font-body: "Fraunces", "Charter", "Iowan Old Style", Georgia, serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --max-w: 1200px;
+    --gutter: 32px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+  html {
+    background: var(--paper);
+  }
+  body {
+    margin: 0;
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 18px;
+    line-height: 1.55;
+    font-feature-settings: "ss01", "kern";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Optical-size tuning per element */
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    margin: 0;
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+
+  a {
+    color: var(--rust);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 120ms ease;
+  }
+  a:hover {
+    border-bottom-color: var(--rust);
+  }
+
+  code,
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    font-feature-settings: "ss01", "ss02", "calt";
+  }
+
+  .container {
+    max-width: var(--max-w);
+    margin: 0 auto;
+    padding: 0 var(--gutter);
+  }
+
+  /* ──────────────────────────────────────────────────────────────
+     NAV
+     ────────────────────────────────────────────────────────────── */
+  nav {
+    padding: 32px 0;
+    border-bottom: 1px solid var(--pencil);
+  }
+  nav .row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .wordmark {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-variation-settings: "opsz" 144, "wght" 600, "SOFT" 50;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .wordmark .dot {
+    color: var(--rust);
+  }
+  nav .links {
+    display: flex;
+    gap: 28px;
+    font-family: var(--font-body);
+    font-size: 16px;
+    font-variation-settings: "opsz" 14, "wght" 500;
+  }
+  nav .links a {
+    color: var(--ink);
+    border-bottom: none;
+  }
+  nav .links a:hover {
+    color: var(--rust);
+  }
+
+  /* ──────────────────────────────────────────────────────────────
+     HERO — only fully-realized section in this Junior pass
+     ────────────────────────────────────────────────────────────── */
+  .hero {
+    padding: 96px 0 72px;
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.05fr;
+    gap: 72px;
+    align-items: start;
+  }
+  @media (max-width: 960px) {
+    .hero-grid {
+      grid-template-columns: 1fr;
+      gap: 40px;
+    }
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    color: var(--stone);
+    text-transform: lowercase;
+    margin-bottom: 24px;
+  }
+  .eyebrow::before {
+    content: "→ ";
+    color: var(--rust);
+  }
+
+  h1 {
+    font-variation-settings: "opsz" 144, "wght" 600, "SOFT" 30;
+    font-size: clamp(48px, 6vw, 80px);
+    line-height: 1.02;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+  }
+  h1 .accent {
+    color: var(--rust);
+    font-style: italic;
+    font-variation-settings: "opsz" 144, "wght" 500, "SOFT" 70, "WONK" 1;
+  }
+  .hero p.lede {
+    font-family: var(--font-body);
+    font-variation-settings: "opsz" 24, "wght" 400;
+    font-size: 22px;
+    line-height: 1.5;
+    margin: 32px 0 0;
+    max-width: 36ch;
+    color: var(--ink);
+  }
+  .hero p.lede strong {
+    font-variation-settings: "opsz" 24, "wght" 600;
+    color: var(--ink);
+  }
+
+  .cta-row {
+    margin-top: 40px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 22px;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--font-body);
+    font-variation-settings: "opsz" 14, "wght" 500;
+    font-size: 15px;
+    border: 1px solid var(--ink);
+    border-radius: 0; /* no rounded corners; we are not Material */
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .btn-primary:hover {
+    background: var(--rust);
+    border-color: var(--rust);
+  }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 22px;
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--pencil);
+    font-family: var(--font-body);
+    font-variation-settings: "opsz" 14, "wght" 500;
+    font-size: 15px;
+  }
+  .btn-secondary:hover {
+    border-color: var(--ink);
+  }
+  .cta-meta {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--stone);
+  }
+
+  /* ── Hero right column: editor mockup (n8n-style nodes + code) ── */
+  .editor-mock {
+    background: #fff;
+    border: 1px solid var(--pencil);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), 0 24px 48px rgba(26, 22, 18, 0.08);
+    overflow: hidden;
+    position: relative;
+  }
+  .editor-mock-chrome {
+    height: 32px;
+    border-bottom: 1px solid var(--pencil);
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--stone);
+    letter-spacing: 0.04em;
+  }
+  .editor-mock-chrome .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--pencil);
+  }
+  .editor-mock-chrome .filename {
+    margin-left: auto;
+  }
+
+  .editor-mock-body {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    height: 420px;
+  }
+
+  /* The "node graph" panel (left half) */
+  .node-graph {
+    position: relative;
+    background: var(--paper);
+    background-image:
+      linear-gradient(var(--pencil) 1px, transparent 1px),
+      linear-gradient(90deg, var(--pencil) 1px, transparent 1px);
+    background-size: 24px 24px;
+    background-position: -1px -1px;
+    border-right: 1px solid var(--pencil);
+    overflow: hidden;
+  }
+
+  .node {
+    position: absolute;
+    background: #fff;
+    border: 1px solid var(--ink);
+    box-shadow: 2px 2px 0 var(--ink);
+    font-family: var(--font-body);
+    font-variation-settings: "opsz" 14, "wght" 500;
+    font-size: 13px;
+    color: var(--ink);
+    min-width: 140px;
+  }
+  .node-title {
+    padding: 8px 12px 6px;
+    border-bottom: 1px solid var(--pencil);
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .node-kind {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--stone);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .node-body {
+    padding: 8px 12px 10px;
+    font-size: 12px;
+    color: var(--ink);
+    font-variation-settings: "opsz" 12, "wght" 400;
+  }
+  .node-port {
+    position: absolute;
+    width: 9px;
+    height: 9px;
+    background: var(--rust);
+    border: 1px solid var(--ink);
+    border-radius: 50%;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .node-port.left {
+    left: -5px;
+  }
+  .node-port.right {
+    right: -5px;
+  }
+
+  /* Position 4 nodes — schematic, not naturalistic */
+  .node-1 { top: 24px;  left: 16px;  }
+  .node-2 { top: 130px; left: 200px; }
+  .node-3 { top: 24px;  left: 380px; }
+  .node-4 { top: 240px; left: 200px; }
+
+  /* Connection lines — drawn with SVG */
+  .node-graph svg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  /* Code escape-hatch panel (right half) */
+  .code-panel {
+    background: var(--paper);
+    padding: 18px 20px;
+    overflow: auto;
+  }
+  .code-panel pre {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink);
+    white-space: pre;
+  }
+  .code-panel .kw {
+    color: var(--rust);
+    font-weight: 700;
+  }
+  .code-panel .com {
+    color: var(--stone);
+    font-style: italic;
+  }
+  .code-panel .lit {
+    color: var(--forest);
+  }
+  .code-panel .label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--stone);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .code-panel .label .kbd {
+    color: var(--ink);
+  }
+
+  /* Hero meta-row under the editor mock — facts not buzzwords */
+  .hero-facts {
+    margin-top: 40px;
+    padding-top: 28px;
+    border-top: 1px solid var(--pencil);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+  }
+  @media (max-width: 720px) {
+    .hero-facts {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 28px;
+    }
+  }
+  .fact-num {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 96, "wght" 500;
+    font-size: 36px;
+    line-height: 1;
+    color: var(--ink);
+    letter-spacing: -0.02em;
+  }
+  .fact-num .unit {
+    font-size: 18px;
+    color: var(--stone);
+    font-variation-settings: "opsz" 18, "wght" 500;
+  }
+  .fact-label {
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--stone);
+    letter-spacing: 0.04em;
+  }
+
+  /* ──────────────────────────────────────────────────────────────
+     SECTION SCAFFOLDING — the rest of the page is GREYBOX
+     showing structure + reasoning, not visual polish
+     ────────────────────────────────────────────────────────────── */
+
+  .section {
+    padding: 96px 0;
+    border-top: 1px solid var(--pencil);
+  }
+  .section h2 {
+    font-variation-settings: "opsz" 96, "wght" 500;
+    font-size: clamp(36px, 4vw, 56px);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin-bottom: 24px;
+    max-width: 22ch;
+  }
+  .section h2 .accent {
+    color: var(--rust);
+  }
+
+  /* The "junior pass note" — visible callout describing what this
+     section will become, why it's structured this way, and what
+     placeholders are stand-ins. Only renders in the Junior pass.
+     Removed before any visual polish lands. */
+  .junior-note {
+    background: #fff;
+    border: 1px dashed var(--rust);
+    padding: 20px 24px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink);
+    margin: 24px 0;
+  }
+  .junior-note .tag {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    background: var(--rust);
+    color: var(--paper);
+    padding: 3px 8px;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+  }
+  .junior-note h3 {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 36, "wght" 500;
+    font-size: 20px;
+    line-height: 1.2;
+    margin: 4px 0 8px;
+    color: var(--ink);
+  }
+  .junior-note ul {
+    margin: 8px 0 4px 0;
+    padding-left: 22px;
+  }
+  .junior-note li {
+    margin: 4px 0;
+  }
+  .junior-note .ref {
+    color: var(--stone);
+    font-size: 12px;
+    margin-top: 12px;
+    border-top: 1px dotted var(--pencil);
+    padding-top: 10px;
+  }
+
+  /* Faux content greybox blocks */
+  .greybox {
+    background: var(--pencil);
+    border: 1px solid var(--pencil);
+    height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--stone);
+    margin: 20px 0;
+  }
+
+  .pillar-greybox-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    margin: 32px 0;
+  }
+  @media (max-width: 960px) {
+    .pillar-greybox-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  .pillar-greybox {
+    background: #fff;
+    border: 1px solid var(--pencil);
+    padding: 20px;
+    min-height: 220px;
+  }
+  .pillar-greybox .num {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--stone);
+    letter-spacing: 0.06em;
+  }
+  .pillar-greybox .title {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 24, "wght" 500;
+    font-size: 19px;
+    line-height: 1.2;
+    margin: 10px 0 8px;
+  }
+  .pillar-greybox .body {
+    font-family: var(--font-body);
+    font-variation-settings: "opsz" 14, "wght" 400;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--stone);
+  }
+
+  /* Comparison table greybox */
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 32px;
+    font-family: var(--font-body);
+    font-size: 15px;
+  }
+  .compare-table th,
+  .compare-table td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--pencil);
+    text-align: left;
+  }
+  .compare-table th {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    color: var(--stone);
+    font-weight: 500;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--ink);
+  }
+  .compare-table td.us {
+    background: rgba(184, 67, 26, 0.04);
+  }
+  .compare-table td.us strong {
+    color: var(--ink);
+  }
+  .compare-yes {
+    color: var(--forest);
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+  .compare-no {
+    color: var(--ink);
+    opacity: 0.3;
+    font-family: var(--font-mono);
+  }
+
+  /* Footer */
+  footer {
+    padding: 80px 0 96px;
+    border-top: 1px solid var(--pencil);
+    margin-top: 0;
+  }
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr 1fr;
+    gap: 40px;
+    align-items: start;
+  }
+  @media (max-width: 720px) {
+    .footer-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  footer .wordmark-big {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 144, "wght" 600, "SOFT" 30;
+    font-size: 88px;
+    line-height: 0.9;
+    letter-spacing: -0.03em;
+    color: var(--ink);
+  }
+  footer .wordmark-big .dot {
+    color: var(--rust);
+  }
+  footer .footer-tag {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--stone);
+    margin-top: 8px;
+    letter-spacing: 0.04em;
+  }
+  footer h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--stone);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 0 0 16px;
+    font-weight: 500;
+  }
+  footer ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-body);
+    font-variation-settings: "opsz" 14, "wght" 400;
+    font-size: 14px;
+    line-height: 2;
+  }
+  footer ul a {
+    color: var(--ink);
+    border-bottom: none;
+  }
+  footer ul a:hover {
+    color: var(--rust);
+  }
+
+  /* Designer's notes header — prominent on Junior pass */
+  .designer-banner {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 18px 0;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.02em;
+  }
+  .designer-banner .container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+  .designer-banner .label {
+    color: var(--rust);
+    font-weight: 700;
+    margin-right: 12px;
+  }
+</style>
+</head>
+
+<body>
+
+<!-- Designer's banner — visible only in Junior pass -->
+<div class="designer-banner">
+  <div class="container">
+    <div>
+      <span class="label">JUNIOR PASS</span>
+      Hero rendered. Other sections are greyboxed with reasoning notes — review these before any polish lands.
+    </div>
+    <div>v1 · 2026-05-02</div>
+  </div>
+</div>
+
+<!-- ──────────────────────────────────────────────────────────────
+     NAV
+     ────────────────────────────────────────────────────────────── -->
+<nav>
+  <div class="container row">
+    <div class="wordmark">HOLD<span class="dot">.</span></div>
+    <div class="links">
+      <a href="#engine">Engine</a>
+      <a href="#editor">Editor</a>
+      <a href="#compare">Compare</a>
+      <a href="#docs">Docs</a>
+      <a href="#github">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ──────────────────────────────────────────────────────────────
+     HERO — fully realized in Junior pass
+     ────────────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-grid">
+      <!-- Left: copy + CTA -->
+      <div>
+        <div class="eyebrow">v0.1 · open source · MIT forever</div>
+        <h1>
+          Build games <span class="accent">visually</span>.<br />
+          Or in Rust. Or both.
+        </h1>
+        <p class="lede">
+          An open-source game engine for people who got tired of paying
+          royalties to ship their work. <strong>Hot-reload that doesn't
+          lie.</strong> Deterministic by default. Under ten megabytes.
+          Yours forever.
+        </p>
+        <div class="cta-row">
+          <a class="btn-primary" href="#github">View on GitHub →</a>
+          <a class="btn-secondary" href="#charter">Read the charter</a>
+          <span class="cta-meta">★ 0&nbsp;&nbsp;·&nbsp;&nbsp;Forks 0&nbsp;&nbsp;·&nbsp;&nbsp;not yet released</span>
+        </div>
+      </div>
+
+      <!-- Right: editor mock — n8n-style nodes + Rust code -->
+      <div>
+        <div class="editor-mock">
+          <div class="editor-mock-chrome">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span style="margin-left:14px;">hold-editor</span>
+            <span class="filename">level01.hsc · player_logic</span>
+          </div>
+          <div class="editor-mock-body">
+            <!-- Node graph -->
+            <div class="node-graph">
+              <svg width="100%" height="100%" viewBox="0 0 540 420" preserveAspectRatio="none">
+                <!-- Connections — schematic, drawn as right-angle paths in ink -->
+                <path d="M 156 50 L 200 50 L 200 145 L 200 145" stroke="#1a1612" stroke-width="1.5" fill="none" />
+                <path d="M 340 145 L 380 145 L 380 50" stroke="#1a1612" stroke-width="1.5" fill="none" />
+                <path d="M 200 200 L 200 240 L 200 260" stroke="#1a1612" stroke-width="1.5" fill="none" />
+              </svg>
+              <div class="node node-1">
+                <div class="node-title"><span>Input</span><span class="node-kind">event</span></div>
+                <div class="node-body">on_key_down(W)</div>
+                <span class="node-port right"></span>
+              </div>
+              <div class="node node-2">
+                <div class="node-title"><span>Move Forward</span><span class="node-kind">action</span></div>
+                <div class="node-body">player.velocity.x += 1.0</div>
+                <span class="node-port left"></span>
+                <span class="node-port right"></span>
+              </div>
+              <div class="node node-3">
+                <div class="node-title"><span>Animate</span><span class="node-kind">action</span></div>
+                <div class="node-body">play "walk"</div>
+                <span class="node-port left"></span>
+              </div>
+              <div class="node node-4">
+                <div class="node-title"><span>Camera Shake</span><span class="node-kind">on collide</span></div>
+                <div class="node-body">amplitude=0.3 duration=120ms</div>
+                <span class="node-port left"></span>
+              </div>
+            </div>
+
+            <!-- Rust escape-hatch -->
+            <div class="code-panel">
+              <div class="label"><span>player_logic.rs</span><span class="kbd">⌘E</span></div>
+<pre><span class="com">// Drop into Rust whenever you need</span>
+<span class="com">// the visual graph can't express.</span>
+<span class="kw">impl</span> System <span class="kw">for</span> PlayerLogic {
+  <span class="kw">fn</span> update(&<span class="kw">mut</span> self,
+            world: &<span class="kw">mut</span> World,
+            dt: <span class="kw">f32</span>) {
+    <span class="kw">let</span> input = world.input();
+    <span class="kw">if</span> input.key_pressed(vk::W) {
+      <span class="kw">if let</span> <span class="kw">Some</span>(v) =
+          world.get_mut::&lt;Velocity&gt;(self.entity) {
+        v.linear.x += <span class="lit">1.0</span>;
+      }
+    }
+  }
+}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hero facts — real measured values, not buzzwords -->
+    <div class="hero-facts">
+      <div>
+        <div class="fact-num">&lt;10<span class="unit">&nbsp;MB</span></div>
+        <div class="fact-label">engine binary</div>
+      </div>
+      <div>
+        <div class="fact-num">0<span class="unit">&nbsp;crates</span></div>
+        <div class="fact-label">external dependencies</div>
+      </div>
+      <div>
+        <div class="fact-num">&lt;1<span class="unit">&nbsp;s</span></div>
+        <div class="fact-label">editor cold start</div>
+      </div>
+      <div>
+        <div class="fact-num">0<span class="unit">&nbsp;%</span></div>
+        <div class="fact-label">royalty, forever</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ──────────────────────────────────────────────────────────────
+     PILLARS — greyboxed
+     ────────────────────────────────────────────────────────────── -->
+<section class="section" id="engine">
+  <div class="container">
+    <h2>Five pillars. <span class="accent">All non-negotiable.</span></h2>
+    <p style="max-width: 56ch; color: var(--stone); font-size: 18px;">
+      ADR 0003 picks five fronts to compete on, picks five non-goals to
+      refuse, and ships the discipline as the artifact. Each pillar gets
+      its own card below — currently greyboxed.
+    </p>
+
+    <div class="junior-note">
+      <span class="tag">Junior note · Pillar grid</span>
+      <h3>What goes in each card</h3>
+      <ul>
+        <li>One pillar per card — drawn from <code>docs/adr/0003-differentiation-and-competitive-posture.md</code></li>
+        <li>Each card: number (P1–P5) · pillar title · one-sentence promise · one specific receipt linking to the ADR section that backs it</li>
+        <li>Real receipt examples to use:
+          <ul>
+            <li>P1 — "MIT forever. No royalties, ever." → ADR 0003 §"Pillar 1: Economics and trust"</li>
+            <li>P2 — "<10MB binary, sub-second cold start, hot reload that doesn't lie." → ADR 0003 §"Pillar 2: Iteration speed" + ADR 0004 (full)</li>
+            <li>P3 — "One scene file. Editor and runtime read the same bytes." → ADR 0003 §"Pillar 3: Editor-runtime unification"</li>
+            <li>P4 — "Same seed, same input, identical state. CI-pinned." → ADR 0003 §"Pillar 4: Determinism" + ADR 0005</li>
+            <li>P5 — "Zero external crates. Every byte auditable." → ADR 0003 §"Pillar 5: Footprint and source quality"</li>
+          </ul>
+        </li>
+        <li>Visual: small numeric prefix in JetBrains Mono Stone, then Fraunces title, then 2-3 lines of Stone-colored body</li>
+        <li>No icons. No emoji. No left-border accents. The number IS the visual.</li>
+      </ul>
+      <div class="ref">
+        Charter ref: PROJECT_CHARTER.md "Differentiating pillars" · ADR ref: 0003 Q2
+      </div>
+    </div>
+
+    <div class="pillar-greybox-grid">
+      <div class="pillar-greybox">
+        <div class="num">P1</div>
+        <div class="title">Economics &amp; trust</div>
+        <div class="body">No royalties, no subscriptions, no required online services. MIT forever. <em>[full copy in next pass]</em></div>
+      </div>
+      <div class="pillar-greybox">
+        <div class="num">P2</div>
+        <div class="title">Iteration speed</div>
+        <div class="body">Sub-second cold start. Hot reload that doesn't lie. Shaders compiled at import. <em>[full copy + ADR link in next pass]</em></div>
+      </div>
+      <div class="pillar-greybox">
+        <div class="num">P3</div>
+        <div class="title">Editor &amp; runtime unified</div>
+        <div class="body">One scene file, one execution model. "Works in editor, breaks in build" is structurally precluded. <em>[next pass]</em></div>
+      </div>
+      <div class="pillar-greybox">
+        <div class="num">P4</div>
+        <div class="title">Determinism &amp; debug</div>
+        <div class="body">Same seed, same input → bit-identical state. Frame inspector + per-pass thumbnails as first-class. <em>[next pass]</em></div>
+      </div>
+      <div class="pillar-greybox">
+        <div class="num">P5</div>
+        <div class="title">Footprint &amp; source</div>
+        <div class="body">Engine under 10 MB. Zero external crates. Open formats end-to-end. <em>[next pass]</em></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ──────────────────────────────────────────────────────────────
+     COMPARISON — greyboxed but seeded with real rows
+     ────────────────────────────────────────────────────────────── -->
+<section class="section" id="compare">
+  <div class="container">
+    <h2>What you'll <span class="accent">stop fighting.</span></h2>
+    <p style="max-width: 56ch; color: var(--stone); font-size: 18px;">
+      The pillars are abstract; this table is what they cash out as.
+      Real numbers, no hyperbole. <em>"Blazing fast" is not a unit of
+      measurement.</em>
+    </p>
+
+    <div class="junior-note">
+      <span class="tag">Junior note · Comparison table</span>
+      <h3>Honest comparison, not marketing chart</h3>
+      <ul>
+        <li>Three columns: <strong>Hold</strong> · <strong>Unity</strong> · <strong>Unreal</strong>. We take the rightmost (us) column. No fake "winners and losers" graphic.</li>
+        <li>Symbols: <span class="compare-yes">✓</span> Forest for "have it" · <span class="compare-no">✗</span> 30%-Ink for "don't" · <em>never red</em></li>
+        <li>Real rows below as a starting set — every claim must be sourced before it ships:
+          <ul>
+            <li>Royalties — Hold 0%, Unity tiered, Unreal 5% over $1M (gross)</li>
+            <li>Source code access — Hold full+MIT, Unity binary-only on free tier, Unreal source available</li>
+            <li>Engine binary size — Hold &lt;10MB, Unity ~250MB editor, Unreal ~50GB editor</li>
+            <li>Hot reload that survives — Hold yes (ADR 0004 Q14a entity diff), Unity partial, Unreal partial</li>
+            <li>Deterministic by default — Hold yes (ADR 0005 harness), Unity opt-in (DOTS only), Unreal partial</li>
+            <li>Visual scripting — Hold yes (n8n-style + Rust escape), Unity Visual Scripting plugin, Unreal Blueprints</li>
+            <li>Required online for core dev — Hold no, Unity sign-in often, Unreal sign-in often</li>
+            <li>Phone-home telemetry — Hold no, Unity yes (opt-out historically painful), Unreal opt-in</li>
+          </ul>
+        </li>
+        <li>One row I'm <em>not</em> putting in: "AAA graphics features" — Unreal wins that decisively for now and pretending otherwise would burn the credibility we just built</li>
+      </ul>
+      <div class="ref">
+        ADR refs: 0003 Q1 (pillars) · 0004 (hot-reload) · 0005 (determinism)
+      </div>
+    </div>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Unity</th>
+          <th>Unreal</th>
+          <th>Hold</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Royalty after revenue</td>
+          <td>tiered</td>
+          <td>5% over $1M</td>
+          <td class="us"><strong>0% — forever</strong></td>
+        </tr>
+        <tr>
+          <td>Engine binary size</td>
+          <td>~250 MB</td>
+          <td>~50 GB</td>
+          <td class="us"><strong>&lt; 10 MB</strong></td>
+        </tr>
+        <tr>
+          <td>External runtime crates</td>
+          <td>many</td>
+          <td>many</td>
+          <td class="us"><strong>0</strong></td>
+        </tr>
+        <tr>
+          <td>Hot reload survives runtime state</td>
+          <td><span class="compare-no">✗</span></td>
+          <td><span class="compare-no">✗</span></td>
+          <td class="us"><span class="compare-yes">✓</span> <span class="mono" style="color:var(--stone)">ADR 0004 Q14a</span></td>
+        </tr>
+        <tr>
+          <td>Deterministic simulation by default</td>
+          <td>opt-in</td>
+          <td>partial</td>
+          <td class="us"><span class="compare-yes">✓</span> <span class="mono" style="color:var(--stone)">ADR 0005</span></td>
+        </tr>
+        <tr>
+          <td>Visual gameplay graph + code escape</td>
+          <td>plugin</td>
+          <td>Blueprints</td>
+          <td class="us"><span class="compare-yes">✓</span> native</td>
+        </tr>
+        <tr style="background: rgba(0,0,0,0.02);">
+          <td colspan="4" style="font-style: italic; color: var(--stone); font-size: 14px;">
+            Unreal still wins on AAA graphics. We don't pretend otherwise. <span class="mono">[next pass — soften this row's tone]</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ──────────────────────────────────────────────────────────────
+     EDITOR DEEP-DIVE — greyboxed
+     ────────────────────────────────────────────────────────────── -->
+<section class="section" id="editor">
+  <div class="container">
+    <h2>The editor is the <span class="accent">runtime.</span></h2>
+    <p style="max-width: 56ch; color: var(--stone); font-size: 18px;">
+      You do not switch out of "edit mode" to test your game. You play
+      it inside the editor, you tweak a value and the value changes,
+      you save the file and the file is what ships.
+    </p>
+
+    <div class="junior-note">
+      <span class="tag">Junior note · Editor section</span>
+      <h3>One screenshot doing one job</h3>
+      <ul>
+        <li>Hero already shows the n8n-style graph. This section shows the editor in a <em>different</em> state — playing the game live, with hot-reload firing, scene inspector open, action log scrolling</li>
+        <li>Annotation pattern: small numbered circles in Rust, callout text in Stone, leader lines drawn as 1px Pencil — like a 1970s technical manual diagram</li>
+        <li>Three callouts maximum:
+          <ol>
+            <li>"Hot-reload status panel — shows the last reload, even when the game's running"</li>
+            <li>"Inspector — entity / component / field — the same path the API uses"</li>
+            <li>"F11 records inputs · F12 replays them · same world state, every time"</li>
+          </ol>
+        </li>
+        <li>Real screenshot pending — the current <code>native_ui.rs</code> looks more like a debugger than a Maya, so we either:
+          <ul>
+            <li>(a) ship the honest screenshot and lean into "it's a working tool, not a render"</li>
+            <li>(b) mock up an aspirational editor and label it "what we're building toward"</li>
+          </ul>
+          I lean (a) — the brand is "honest". User's call.</li>
+      </ul>
+      <div class="ref">
+        Source ref: examples/editor_shell.rs · src/editor/native_ui.rs · ADR 0004 Q9 (status panel) · ADR 0005 Q5–Q7 (replay UX)
+      </div>
+    </div>
+
+    <div class="greybox" style="height: 480px;">
+      [Screenshot placeholder · 1200 × 720 · running editor with annotations]
+    </div>
+  </div>
+</section>
+
+<!-- ──────────────────────────────────────────────────────────────
+     PROOF / RECEIPTS — greyboxed
+     ────────────────────────────────────────────────────────────── -->
+<section class="section">
+  <div class="container">
+    <h2>Every claim has a <span class="accent">receipt.</span></h2>
+    <p style="max-width: 56ch; color: var(--stone); font-size: 18px;">
+      Every promise on this page maps to a numbered ADR question or a
+      named CI test. If a claim's not true, the build is red.
+    </p>
+
+    <div class="junior-note">
+      <span class="tag">Junior note · Receipts section</span>
+      <h3>Why this section exists at all</h3>
+      <ul>
+        <li>Anyone can write "deterministic" on a landing page. Few link to the test that enforces it. We do.</li>
+        <li>Three columns of citations. Each row: the claim (Fraunces), the receipt (JetBrains Mono linkified to ADR/test), the date the test last passed (Stone).</li>
+        <li>Real receipts to seed:
+          <ul>
+            <li>"Hot-reload that doesn't lie" → <code>tests::hot_reloaded_scene_equals_clean_loaded_scene</code> (last green: 2026-05-02)</li>
+            <li>"Determinism by default" → <code>tests::determinism_harness_round_trip_matches_digests</code> (last green: 2026-05-02)</li>
+            <li>"Identity preserved across reload" → <code>tests::handle_identity_survives_pipeline_reload</code></li>
+            <li>"Replay locks reload" → <code>tests::dispatch_buffers_when_replay_lock_active</code></li>
+            <li>"Frame digest is byte-stable" → <code>tests::fnv_1a_reference_vector_foobar</code></li>
+          </ul>
+        </li>
+        <li>Visual: a 3-column grid that reads as a footnote table from a journal article. Not a "trusted by" logo strip.</li>
+      </ul>
+      <div class="ref">
+        Source ref: 357 lib tests passing (as of 2026-05-02) · CI: Windows-only x86_64
+      </div>
+    </div>
+
+    <div class="greybox" style="height: 240px;">
+      [Receipts table placeholder · 3-column citations · 357 tests / 5 ADRs]
+    </div>
+  </div>
+</section>
+
+<!-- ──────────────────────────────────────────────────────────────
+     CTA / FOOTER
+     ────────────────────────────────────────────────────────────── -->
+<section class="section" style="text-align: center;" id="github">
+  <div class="container">
+    <h2 style="max-width: 30ch; margin: 0 auto;">
+      <span class="accent">Hold the line.</span> Ship the game.
+    </h2>
+    <p style="max-width: 48ch; margin: 24px auto 0; color: var(--stone); font-size: 18px;">
+      v0.1 ships when the proving-ground game ships. Star the repo to
+      get notified. Or read the charter — it's the only marketing we
+      believe in.
+    </p>
+    <div class="cta-row" style="justify-content: center; margin-top: 40px;">
+      <a class="btn-primary" href="#">Star on GitHub →</a>
+      <a class="btn-secondary" href="#">PROJECT_CHARTER.md</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <div class="wordmark-big">HOLD<span class="dot">.</span></div>
+        <div class="footer-tag">a game engine that respects your time</div>
+      </div>
+      <div>
+        <h4>Engine</h4>
+        <ul>
+          <li><a href="#">Charter</a></li>
+          <li><a href="#">ADR index</a></li>
+          <li><a href="#">Source on GitHub</a></li>
+          <li><a href="#">License (MIT)</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Editor</h4>
+        <ul>
+          <li><a href="#">Quick start</a></li>
+          <li><a href="#">Visual graph guide</a></li>
+          <li><a href="#">Rust API ref</a></li>
+          <li><a href="#">Hot-reload</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Receipts</h4>
+        <ul>
+          <li><a href="#">Determinism harness</a></li>
+          <li><a href="#">Equivalence harness</a></li>
+          <li><a href="#">CI status</a></li>
+          <li><a href="#">Changelog</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
