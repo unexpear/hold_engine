@@ -34,6 +34,30 @@ const MATERIAL_PAYLOAD_VERSION: u32 = 3;
 const SHADER_PAYLOAD_VERSION: u32 = 3;
 const SCENE_PAYLOAD_VERSION: u32 = 3;
 
+/// The current on-disk payload version for a given asset kind, or
+/// `None` for kinds that don't yet have an encoded payload
+/// (TerrainLayerSet, VegetationPrototype, Skeleton, AnimationClip,
+/// AudioClip — reserved in [`CompiledAssetKind`] but not implemented).
+///
+/// Used by version-aware staleness (M10.3): a compiled blob whose
+/// payload version differs from this is out of date and must be
+/// recompiled from source, even if its file mtime is newer. Reading
+/// this alongside the envelope version closes both format axes.
+pub(crate) fn expected_payload_version(kind: CompiledAssetKind) -> Option<u32> {
+    match kind {
+        CompiledAssetKind::Mesh => Some(MESH_PAYLOAD_VERSION),
+        CompiledAssetKind::Texture => Some(TEXTURE_PAYLOAD_VERSION),
+        CompiledAssetKind::Material => Some(MATERIAL_PAYLOAD_VERSION),
+        CompiledAssetKind::Shader => Some(SHADER_PAYLOAD_VERSION),
+        CompiledAssetKind::Scene => Some(SCENE_PAYLOAD_VERSION),
+        CompiledAssetKind::TerrainLayerSet
+        | CompiledAssetKind::VegetationPrototype
+        | CompiledAssetKind::Skeleton
+        | CompiledAssetKind::AnimationClip
+        | CompiledAssetKind::AudioClip => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledMaterialPayload {
     pub albedo_logical_name: String,

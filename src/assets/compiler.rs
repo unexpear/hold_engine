@@ -3,12 +3,14 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::runtime_loader::expected_payload_version;
 use super::{
-    compiled_asset_path_for_logical_name, encode_compiled_asset, encode_compiled_material_payload,
-    encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
-    encode_compiled_texture_payload, load_texture, CompiledAssetBlob, CompiledAssetDependency,
-    CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata, CompiledMaterialPayload,
-    CompiledScenePayload, CompiledShaderPayload, MeshData, ObjError, TexError,
+    compiled_asset_path_for_logical_name, decode_compiled_asset, encode_compiled_asset,
+    encode_compiled_material_payload, encode_compiled_mesh_payload, encode_compiled_scene_payload,
+    encode_compiled_shader_payload, encode_compiled_texture_payload, load_texture,
+    CompiledAssetBlob, CompiledAssetDependency, CompiledAssetError, CompiledAssetKind,
+    CompiledAssetMetadata, CompiledMaterialPayload, CompiledScenePayload, CompiledShaderPayload,
+    MeshData, ObjError, TexError, COMPILED_ASSET_MAGIC, COMPILED_ASSET_VERSION,
 };
 
 const COMPILER_TAG: &str = "hold_assetc@runtime-slice-0.1";
@@ -400,9 +402,63 @@ pub fn source_asset_is_stale(
         return Ok(true);
     }
 
+    // Mtime staleness: the source has been edited since the last compile.
     let source_modified = fs::metadata(source_path)?.modified()?;
-    let compiled_modified = fs::metadata(compiled_path)?.modified()?;
-    Ok(source_modified > compiled_modified)
+    let compiled_modified = fs::metadata(&compiled_path)?.modified()?;
+    if source_modified > compiled_modified {
+        return Ok(true);
+    }
+
+    // Format staleness (M10.3): a compiled blob from an older envelope
+    // or payload version — or one that no longer decodes (corruption,
+    // failed checksum) — must be regenerated even when its mtime is
+    // newer than the source. Without this, bumping a format version
+    // leaves stale blobs that pass the mtime check and only explode at
+    // runtime decode. Reading the blob here costs one file read on the
+    // not-mtime-stale path; staleness runs at build/import time, never
+    // in the render loop, so that cost is acceptable.
+    let compiled_bytes = fs::read(&compiled_path)?;
+    Ok(!compiled_blob_is_current(&compiled_bytes))
+}
+
+/// Whether an on-disk compiled blob matches the CURRENT format on both
+/// version axes. Returns `false` (⇒ stale ⇒ recompile) when the
+/// envelope version is old, when the blob no longer decodes (structural
+/// corruption or a failed CRC), or when the payload version is old.
+fn compiled_blob_is_current(bytes: &[u8]) -> bool {
+    // Envelope version at its fixed offset (after the 8-byte magic).
+    // A v1 blob is still *decodable* via migration, so decode success
+    // alone doesn't mean "current" — check the written version directly.
+    if bytes.len() < 12 || bytes[..8] != COMPILED_ASSET_MAGIC {
+        return false;
+    }
+    let envelope_version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    if envelope_version != COMPILED_ASSET_VERSION {
+        return false;
+    }
+
+    // Full decode validates structure + the v2 CRC footer; any error
+    // means the blob can't be trusted and should be regenerated.
+    let blob = match decode_compiled_asset(bytes) {
+        Ok(blob) => blob,
+        Err(_) => return false,
+    };
+
+    // Payload version (first 4 bytes of the payload), compared against
+    // the current per-kind version. Kinds without an encoded payload
+    // (None) are considered current once the envelope check passes.
+    match expected_payload_version(blob.metadata.kind) {
+        Some(expected) => {
+            blob.payload.len() >= 4
+                && u32::from_le_bytes([
+                    blob.payload[0],
+                    blob.payload[1],
+                    blob.payload[2],
+                    blob.payload[3],
+                ]) == expected
+        }
+        None => true,
+    }
 }
 
 pub fn compile_texture_asset(
@@ -638,6 +694,87 @@ alpha_cutout 1
             "o crate\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\n",
         )
         .unwrap();
+        assert!(source_asset_is_stale(&compiled_root, &source_path, "meshes/crate").unwrap());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Version-aware staleness (M10.3): a compiled blob written from an
+    /// OLDER envelope version is stale even when its file mtime is newer
+    /// than the source. Without this, bumping the format leaves blobs
+    /// that pass the mtime check and blow up at runtime decode.
+    #[test]
+    fn source_asset_is_stale_detects_old_format_version() {
+        let root = unique_test_root("stale_format");
+        let source_root = root.join("source");
+        let compiled_root = root.join("compiled");
+        fs::create_dir_all(source_root.join("meshes")).unwrap();
+        fs::create_dir_all(compiled_root.join("meshes")).unwrap();
+        let source_path = source_root.join("meshes").join("crate.obj");
+        fs::write(&source_path, "o crate\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+
+        let compiled_path = compiled_asset_path_for_logical_name(&compiled_root, "meshes/crate");
+        let blob = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Mesh,
+                logical_name: "meshes/crate".into(),
+                source_path: source_path.display().to_string(),
+                compiler_tag: "test".into(),
+                runtime_path: "compiled/meshes/crate.hcmp".into(),
+                dependencies: Vec::new(),
+            },
+            payload: encode_compiled_mesh_payload(&MeshData::cube()).unwrap(),
+        };
+
+        // A current (v2) blob written after the source is fresh.
+        fs::write(&compiled_path, encode_compiled_asset(&blob).unwrap()).unwrap();
+        assert!(!source_asset_is_stale(&compiled_root, &source_path, "meshes/crate").unwrap());
+
+        // Downgrade the on-disk blob to a v1 envelope (patch the version
+        // field to 1, drop the v2 CRC footer) and give it the newest
+        // mtime. mtime says fresh, but the envelope version is behind the
+        // current v2 -> stale.
+        let mut v1_bytes = encode_compiled_asset(&blob).unwrap();
+        v1_bytes.truncate(v1_bytes.len() - 4); // remove CRC footer
+        v1_bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // version -> 1
+        thread::sleep(Duration::from_millis(10));
+        fs::write(&compiled_path, &v1_bytes).unwrap();
+        assert!(source_asset_is_stale(&compiled_root, &source_path, "meshes/crate").unwrap());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A corrupt compiled blob (failed CRC) reads as stale so it gets
+    /// regenerated from source rather than failing at runtime decode.
+    #[test]
+    fn source_asset_is_stale_treats_corruption_as_stale() {
+        let root = unique_test_root("stale_corrupt");
+        let source_root = root.join("source");
+        let compiled_root = root.join("compiled");
+        fs::create_dir_all(source_root.join("meshes")).unwrap();
+        fs::create_dir_all(compiled_root.join("meshes")).unwrap();
+        let source_path = source_root.join("meshes").join("crate.obj");
+        fs::write(&source_path, "o crate\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+
+        let compiled_path = compiled_asset_path_for_logical_name(&compiled_root, "meshes/crate");
+        let blob = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Mesh,
+                logical_name: "meshes/crate".into(),
+                source_path: source_path.display().to_string(),
+                compiler_tag: "test".into(),
+                runtime_path: "compiled/meshes/crate.hcmp".into(),
+                dependencies: Vec::new(),
+            },
+            payload: encode_compiled_mesh_payload(&MeshData::cube()).unwrap(),
+        };
+
+        // Flip a payload byte so the structure stays valid but the CRC
+        // fails, then give it the newest mtime.
+        let mut corrupt = encode_compiled_asset(&blob).unwrap();
+        let idx = corrupt.len() - 8; // inside the mesh payload, before footer
+        corrupt[idx] ^= 0xFF;
+        fs::write(&compiled_path, &corrupt).unwrap();
         assert!(source_asset_is_stale(&compiled_root, &source_path, "meshes/crate").unwrap());
 
         fs::remove_dir_all(root).ok();
