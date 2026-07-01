@@ -41,10 +41,10 @@ use std::sync::mpsc::Receiver;
 
 use crate::assets::{
     decode_compiled_material_payload, decode_compiled_mesh_payload,
-    decode_compiled_scene_payload, decode_compiled_shader_payload, decode_compiled_texture_payload,
-    AssetInvalidated, AssetKind, AssetStore, ColorSpace, CompiledAssetKind, Handle, Material,
-    MaterialHandle, MeshData, MeshHandle, NormalMap, NormalMapHandle, Shader, ShaderHandle,
-    Texture, TextureHandle,
+    decode_compiled_normal_map_payload, decode_compiled_scene_payload,
+    decode_compiled_shader_payload, decode_compiled_texture_payload, AssetInvalidated, AssetKind,
+    AssetStore, CompiledAssetKind, Handle, Material, MaterialHandle, MeshData, MeshHandle,
+    NormalMap, NormalMapHandle, Shader, ShaderHandle, Texture, TextureHandle,
 };
 use crate::editor::{EditorPlayState, SceneDocument};
 
@@ -658,25 +658,23 @@ impl ReloadDispatcher {
                 }))
             }
             (CompiledAssetKind::Texture, AssetBinding::NormalMap { handle_index, handle_generation }) => {
-                // The compile target was registered as a normal
-                // map; the texture payload is the raw pixel data,
-                // wrapped into a NormalMap with engine-canonical
-                // OpenGL Y+ convention. Mirrors the runtime
-                // loader's `ensure_normal_map` path.
-                let texture = decode_compiled_texture_payload(&ok.payload).map_err(|e| {
+                // The compile target was registered as a normal map.
+                // Resolve the payload through the SAME decoder the
+                // runtime loader's `ensure_normal_map` uses, so the
+                // payload's authored NormalMapConvention (M10.4) is
+                // honoured: a DirectX payload is green-flipped to the
+                // engine-canonical OpenGL Y+ on load, and the source
+                // convention round-trips. Decoding via
+                // `decode_compiled_texture_payload` here (which drops
+                // the convention tag) would leave a DirectX normal map
+                // unflipped and mislabelled, diverging from the runtime
+                // loader for the identical on-disk blob.
+                let normal_map = decode_compiled_normal_map_payload(&ok.payload).map_err(|e| {
                     DispatchError::DecodeFailed {
                         logical_name: ok.logical_name.clone(),
                         error: format!("{}", e),
                     }
                 })?;
-                let normal_map = NormalMap {
-                    width: texture.width,
-                    height: texture.height,
-                    format: texture.format,
-                    source_convention: crate::assets::NormalMapConvention::OpenGl,
-                    data: texture.data,
-                };
-                let _ = ColorSpace::Srgb; // silence unused-import lint when texture path is the only one in this binary
                 let handle: NormalMapHandle =
                     Handle::<NormalMap>::new(handle_index, handle_generation);
                 let _previous = assets.replace(handle, normal_map);
@@ -921,6 +919,62 @@ mod tests {
         assert_eq!(summary.applied[0].kind, AssetKind::Texture);
         assert_eq!(summary.applied[0].handle_index, handle.index);
         assert_eq!(summary.applied[0].logical_name, "textures/test");
+    }
+
+    /// Regression (M10.4 review): a normal-map reload must honour the
+    /// payload's authored convention. A DirectX-convention texture
+    /// payload applied to a NormalMap binding is green-flipped on load
+    /// exactly as the runtime loader's `ensure_normal_map` does, so the
+    /// identical on-disk blob yields identical in-memory pixels via
+    /// both paths. Guards against the dispatcher decoding via the
+    /// convention-dropping `decode_compiled_texture_payload`.
+    #[test]
+    fn dispatch_normal_map_reload_honours_directx_convention() {
+        use crate::assets::{
+            decode_compiled_normal_map_payload, encode_compiled_texture_payload_with_convention,
+            NormalMap, NormalMapConvention,
+        };
+        let mut assets = AssetStore::new();
+        let seed = NormalMap::new_opengl(1, 1, TextureFormat::Rgba8, vec![0, 0, 0, 255]);
+        let handle = assets.insert(seed);
+
+        let (tx, rx) = channel::<CompileResult>();
+        let mut dispatcher = ReloadDispatcher::new(rx);
+        dispatcher.register_normal_map("normals/test", handle);
+
+        // DirectX-convention payload: one RGBA pixel, green = 200.
+        let texture = Texture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Linear,
+            data: vec![10, 200, 30, 255],
+        };
+        let payload =
+            encode_compiled_texture_payload_with_convention(&texture, NormalMapConvention::DirectX)
+                .unwrap();
+        tx.send(CompileResult::Ok(CompileOk {
+            logical_name: "normals/test".into(),
+            kind: CompiledAssetKind::Texture,
+            payload: payload.clone(),
+            generation: Generation(1),
+        }))
+        .unwrap();
+
+        let summary = dispatcher.dispatch(&mut assets);
+        assert_eq!(summary.applied.len(), 1);
+        let reloaded = assets.get(handle).unwrap();
+        // Green flipped (255 - 200 = 55); convention recorded.
+        assert_eq!(
+            reloaded.data[1], 55,
+            "dispatcher must flip DirectX green on reload"
+        );
+        assert_eq!(reloaded.source_convention, NormalMapConvention::DirectX);
+
+        // Byte-identical to the runtime-loader decoder for the same blob.
+        let via_loader = decode_compiled_normal_map_payload(&payload).unwrap();
+        assert_eq!(reloaded.data, via_loader.data);
+        assert_eq!(reloaded.source_convention, via_loader.source_convention);
     }
 
     /// Last-wins via channel order: when two `Ok` results for the

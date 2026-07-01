@@ -723,8 +723,8 @@ mod tests {
         decode_compiled_texture_payload, encode_compiled_material_payload,
         encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
         encode_compiled_texture_payload, encode_compiled_texture_payload_with_convention,
-        CompiledAssetRuntimeLoader, CompiledMaterialPayload, CompiledScenePayload,
-        CompiledShaderPayload,
+        CompiledAssetRuntimeError, CompiledAssetRuntimeLoader, CompiledMaterialPayload,
+        CompiledScenePayload, CompiledShaderPayload,
     };
     use crate::assets::{
         encode_compiled_asset, ColorSpace, CompiledAssetBlob, CompiledAssetDependency,
@@ -1228,5 +1228,142 @@ mod tests {
             decode_compiled_shader_payload(&bytes).unwrap_err(),
             CompiledAssetError::UnsupportedVersion(99)
         );
+    }
+
+    // ── Loader structural guards (M10 review coverage) ────────────────────
+
+    /// `load_blob` rejects a blob whose kind differs from the kind the
+    /// caller asked for — the guard against a mislabeled asset. A
+    /// Texture blob filed where a mesh was requested must surface
+    /// UnexpectedKind, not decode as garbage.
+    #[test]
+    fn ensure_mesh_rejects_wrong_kind_blob() {
+        let root = unique_test_root("wrong_kind");
+        // Write a *Texture* blob at the "meshes/crate" logical path.
+        write_blob(
+            &root,
+            &CompiledAssetBlob {
+                metadata: CompiledAssetMetadata {
+                    kind: CompiledAssetKind::Texture,
+                    logical_name: "meshes/crate".into(),
+                    source_path: "source/crate.tga".into(),
+                    compiler_tag: "test".into(),
+                    runtime_path: "compiled/meshes/crate.hcmp".into(),
+                    dependencies: Vec::new(),
+                },
+                payload: encode_compiled_texture_payload(&Texture {
+                    width: 1,
+                    height: 1,
+                    format: TextureFormat::Rgba8,
+                    color_space: ColorSpace::Srgb,
+                    data: vec![0, 0, 0, 255],
+                })
+                .unwrap(),
+            },
+        );
+        let mut assets = crate::assets::AssetStore::new();
+        let mut loader = CompiledAssetRuntimeLoader::new(&root);
+        match loader.ensure_mesh(&mut assets, "meshes/crate") {
+            Err(CompiledAssetRuntimeError::UnexpectedKind { expected, found }) => {
+                assert_eq!(expected, CompiledAssetKind::Mesh);
+                assert_eq!(found, CompiledAssetKind::Texture);
+            }
+            other => panic!("expected UnexpectedKind, got {other:?}"),
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// `load_blob` rejects a blob whose stored logical name differs from
+    /// the one requested — the guard against a misfiled asset (right
+    /// kind, wrong identity). Written to the requested path but stamped
+    /// with a different logical name.
+    #[test]
+    fn ensure_mesh_rejects_logical_name_mismatch() {
+        let root = unique_test_root("name_mismatch");
+        // Compute the on-disk path for "meshes/crate" but stamp the
+        // blob's metadata with a *different* logical name.
+        let path = compiled_asset_path_for_logical_name(&root, "meshes/crate");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let blob = CompiledAssetBlob {
+            metadata: CompiledAssetMetadata {
+                kind: CompiledAssetKind::Mesh,
+                logical_name: "meshes/other".into(), // != requested
+                source_path: "source/other.obj".into(),
+                compiler_tag: "test".into(),
+                runtime_path: "compiled/meshes/other.hcmp".into(),
+                dependencies: Vec::new(),
+            },
+            payload: encode_compiled_mesh_payload(&MeshData::cube()).unwrap(),
+        };
+        fs::write(&path, encode_compiled_asset(&blob).unwrap()).unwrap();
+
+        let mut assets = crate::assets::AssetStore::new();
+        let mut loader = CompiledAssetRuntimeLoader::new(&root);
+        match loader.ensure_mesh(&mut assets, "meshes/crate") {
+            Err(CompiledAssetRuntimeError::MetadataMismatch {
+                expected_logical_name,
+                found_logical_name,
+            }) => {
+                assert_eq!(expected_logical_name, "meshes/crate");
+                assert_eq!(found_logical_name, "meshes/other");
+            }
+            other => panic!("expected MetadataMismatch, got {other:?}"),
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// End-to-end (M10.4): a normal map's convention survives a full
+    /// compile-payload -> envelope -> disk -> ensure_normal_map round
+    /// trip. A DirectX blob resolves flipped with DirectX recorded; an
+    /// OpenGL blob resolves unflipped. This is the disk path the
+    /// dispatcher's in-memory path must match.
+    #[test]
+    fn ensure_normal_map_full_disk_roundtrip_honours_convention() {
+        let root = unique_test_root("nm_roundtrip");
+        let write_nm = |logical: &str, convention: NormalMapConvention| {
+            let path = compiled_asset_path_for_logical_name(&root, logical);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let payload = encode_compiled_texture_payload_with_convention(
+                &Texture {
+                    width: 1,
+                    height: 1,
+                    format: TextureFormat::Rgba8,
+                    color_space: ColorSpace::Linear,
+                    data: vec![10, 200, 30, 255], // green = 200
+                },
+                convention,
+            )
+            .unwrap();
+            let blob = CompiledAssetBlob {
+                metadata: CompiledAssetMetadata {
+                    kind: CompiledAssetKind::Texture,
+                    logical_name: logical.into(),
+                    source_path: "source/n.tga".into(),
+                    compiler_tag: "test".into(),
+                    runtime_path: "compiled/n.hcmp".into(),
+                    dependencies: Vec::new(),
+                },
+                payload,
+            };
+            fs::write(&path, encode_compiled_asset(&blob).unwrap()).unwrap();
+        };
+
+        write_nm("normals/og", NormalMapConvention::OpenGl);
+        write_nm("normals/dx", NormalMapConvention::DirectX);
+
+        let mut assets = crate::assets::AssetStore::new();
+        let mut loader = CompiledAssetRuntimeLoader::new(&root);
+
+        let og_handle = loader.ensure_normal_map(&mut assets, "normals/og").unwrap();
+        let og = assets.get(og_handle).unwrap();
+        assert_eq!(og.source_convention, NormalMapConvention::OpenGl);
+        assert_eq!(og.data[1], 200, "OpenGL green unflipped");
+
+        let dx_handle = loader.ensure_normal_map(&mut assets, "normals/dx").unwrap();
+        let dx = assets.get(dx_handle).unwrap();
+        assert_eq!(dx.source_convention, NormalMapConvention::DirectX);
+        assert_eq!(dx.data[1], 55, "DirectX green flipped (255 - 200)");
+
+        fs::remove_dir_all(root).ok();
     }
 }
