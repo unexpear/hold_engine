@@ -9,15 +9,30 @@ use super::{
     ShaderHandle, Texture, TextureFormat, TextureHandle, Vertex,
 };
 
-/// On-disk payload version for compiled assets. Bumped whenever any encoded
-/// payload (mesh / texture / material) changes shape. Old payloads are rejected
-/// rather than migrated; the asset compiler regenerates them.
-///
-/// Version history:
-/// - 1: initial format. Vertex = pos(3) + normal(3) + uv(2).
-/// - 2: vertex layout extended with tangent(4). See ADR 0002 Q4.
-/// - 3: texture payload tagged with `ColorSpace`. See ADR 0002 Q3.
-const COMPILED_PAYLOAD_VERSION: u32 = 3;
+// ── Per-kind payload versions (M10.2) ─────────────────────────────────────
+//
+// Each compiled-payload kind carries its own independent version field.
+// Before M10.2 a single shared `COMPILED_PAYLOAD_VERSION` counter was
+// written by every kind, so changing one kind's layout re-versioned all
+// five and a version number alone could not say which kind had changed.
+// Splitting the counter means a future mesh change bumps only
+// MESH_PAYLOAD_VERSION, leaving texture/material/shader/scene blobs valid,
+// and a migration table can be keyed by (kind, version).
+//
+// All five start at 3: the shared-counter era ended at version 3 (v1 =
+// initial mesh pos/normal/uv; v2 = mesh tangent, ADR 0002 Q4; v3 = texture
+// ColorSpace tag, ADR 0002 Q3), so every kind's current on-disk shape is
+// "version 3". Keeping them all at 3 makes the split byte-for-byte
+// wire-preserving (guarded by the golden fixtures). Later milestones bump
+// individual kinds: M10.4 takes the texture payload to 4 for normal-map
+// convention travel.
+//
+// See `docs/formats/compiled-asset.md` for the per-kind version policy.
+const MESH_PAYLOAD_VERSION: u32 = 3;
+const TEXTURE_PAYLOAD_VERSION: u32 = 3;
+const MATERIAL_PAYLOAD_VERSION: u32 = 3;
+const SHADER_PAYLOAD_VERSION: u32 = 3;
+const SCENE_PAYLOAD_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledMaterialPayload {
@@ -116,7 +131,7 @@ pub fn encode_compiled_mesh_payload(mesh: &MeshData) -> Result<Vec<u8>, Compiled
     let mut out = Vec::with_capacity(
         12 + mesh.vertices.len() * (12 * std::mem::size_of::<f32>()) + mesh.indices.len() * 4,
     );
-    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_u32(&mut out, MESH_PAYLOAD_VERSION);
     write_u32(&mut out, vertex_count);
     write_u32(&mut out, index_count);
     for vertex in &mesh.vertices {
@@ -142,10 +157,13 @@ pub fn encode_compiled_mesh_payload(mesh: &MeshData) -> Result<Vec<u8>, Compiled
 pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAssetError> {
     let mut cursor = PayloadCursor::new(bytes);
     let version = cursor.read_u32()?;
-    if version != COMPILED_PAYLOAD_VERSION {
-        return Err(CompiledAssetError::UnsupportedVersion(version));
+    match version {
+        3 => decode_mesh_v3(&mut cursor),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version)),
     }
+}
 
+fn decode_mesh_v3(cursor: &mut PayloadCursor) -> Result<MeshData, CompiledAssetError> {
     let vertex_count = cursor.read_u32()? as usize;
     let index_count = cursor.read_u32()? as usize;
     // Guard both untrusted counts against the remaining buffer before
@@ -191,7 +209,7 @@ pub fn encode_compiled_texture_payload(texture: &Texture) -> Result<Vec<u8>, Com
     // 28-byte header (v3 header is 4 bigger than v2 for the colour-space tag)
     // plus pixel data.
     let mut out = Vec::with_capacity(texture.data.len() + 28);
-    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_u32(&mut out, TEXTURE_PAYLOAD_VERSION);
     write_u32(&mut out, texture.width);
     write_u32(&mut out, texture.height);
     write_u32(&mut out, encode_texture_format(texture.format));
@@ -207,10 +225,13 @@ pub fn encode_compiled_texture_payload(texture: &Texture) -> Result<Vec<u8>, Com
 pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, CompiledAssetRuntimeError> {
     let mut cursor = PayloadCursor::new(bytes);
     let version = cursor.read_u32()?;
-    if version != COMPILED_PAYLOAD_VERSION {
-        return Err(CompiledAssetError::UnsupportedVersion(version).into());
+    match version {
+        3 => decode_texture_v3(&mut cursor),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version).into()),
     }
+}
 
+fn decode_texture_v3(cursor: &mut PayloadCursor) -> Result<Texture, CompiledAssetRuntimeError> {
     let width = cursor.read_u32()?;
     let height = cursor.read_u32()?;
     let format = decode_texture_format(cursor.read_u32()?)?;
@@ -232,7 +253,7 @@ pub fn encode_compiled_material_payload(
     payload: &CompiledMaterialPayload,
 ) -> Result<Vec<u8>, CompiledAssetError> {
     let mut out = Vec::with_capacity(128);
-    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_u32(&mut out, MATERIAL_PAYLOAD_VERSION);
     write_string(&mut out, &payload.albedo_logical_name)?;
     write_option_string(&mut out, payload.normal_logical_name.as_deref())?;
     write_option_string(&mut out, payload.specular_gloss_logical_name.as_deref())?;
@@ -246,10 +267,15 @@ pub fn decode_compiled_material_payload(
 ) -> Result<CompiledMaterialPayload, CompiledAssetError> {
     let mut cursor = PayloadCursor::new(bytes);
     let version = cursor.read_u32()?;
-    if version != COMPILED_PAYLOAD_VERSION {
-        return Err(CompiledAssetError::UnsupportedVersion(version));
+    match version {
+        3 => decode_material_v3(&mut cursor),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version)),
     }
+}
 
+fn decode_material_v3(
+    cursor: &mut PayloadCursor,
+) -> Result<CompiledMaterialPayload, CompiledAssetError> {
     let payload = CompiledMaterialPayload {
         albedo_logical_name: cursor.read_string()?,
         normal_logical_name: cursor.read_option_string()?,
@@ -278,7 +304,7 @@ pub fn encode_compiled_shader_payload(
     let mut out = Vec::with_capacity(
         16 + payload.name.len() + payload.vertex_source.len() + payload.fragment_source.len(),
     );
-    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_u32(&mut out, SHADER_PAYLOAD_VERSION);
     write_string(&mut out, &payload.name)?;
     write_string(&mut out, &payload.vertex_source)?;
     write_string(&mut out, &payload.fragment_source)?;
@@ -290,10 +316,13 @@ pub fn decode_compiled_shader_payload(
 ) -> Result<CompiledShaderPayload, CompiledAssetError> {
     let mut cursor = PayloadCursor::new(bytes);
     let version = cursor.read_u32()?;
-    if version != COMPILED_PAYLOAD_VERSION {
-        return Err(CompiledAssetError::UnsupportedVersion(version));
+    match version {
+        3 => decode_shader_v3(&mut cursor),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version)),
     }
+}
 
+fn decode_shader_v3(cursor: &mut PayloadCursor) -> Result<CompiledShaderPayload, CompiledAssetError> {
     let payload = CompiledShaderPayload {
         name: cursor.read_string()?,
         vertex_source: cursor.read_string()?,
@@ -333,7 +362,7 @@ pub fn encode_compiled_scene_payload(
     payload: &CompiledScenePayload,
 ) -> Result<Vec<u8>, CompiledAssetError> {
     let mut out = Vec::with_capacity(16 + payload.name.len() + payload.hscene_text.len());
-    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_u32(&mut out, SCENE_PAYLOAD_VERSION);
     write_string(&mut out, &payload.name)?;
     write_string(&mut out, &payload.hscene_text)?;
     Ok(out)
@@ -344,10 +373,13 @@ pub fn decode_compiled_scene_payload(
 ) -> Result<CompiledScenePayload, CompiledAssetError> {
     let mut cursor = PayloadCursor::new(bytes);
     let version = cursor.read_u32()?;
-    if version != COMPILED_PAYLOAD_VERSION {
-        return Err(CompiledAssetError::UnsupportedVersion(version));
+    match version {
+        3 => decode_scene_v3(&mut cursor),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version)),
     }
+}
 
+fn decode_scene_v3(cursor: &mut PayloadCursor) -> Result<CompiledScenePayload, CompiledAssetError> {
     let payload = CompiledScenePayload {
         name: cursor.read_string()?,
         hscene_text: cursor.read_string()?,
@@ -884,12 +916,18 @@ mod tests {
 
     // ── M10 format-stability: frozen payload version ──────────────────────
 
-    /// The shared payload version is a wire contract across all five
-    /// kinds. Freeze it so a bump is a deliberate, reviewed change (and
-    /// so M10.2's split into per-kind versions is a visible edit here).
+    /// Each per-kind payload version is a wire contract. Freeze all
+    /// five so a bump is a deliberate, reviewed change. They start
+    /// equal (3) at the M10.2 split; later milestones move individual
+    /// kinds (M10.4 -> texture 4), and this test must be updated in the
+    /// same commit as the bump.
     #[test]
-    fn payload_version_is_frozen() {
-        assert_eq!(super::COMPILED_PAYLOAD_VERSION, 3);
+    fn payload_versions_are_frozen() {
+        assert_eq!(super::MESH_PAYLOAD_VERSION, 3);
+        assert_eq!(super::TEXTURE_PAYLOAD_VERSION, 3);
+        assert_eq!(super::MATERIAL_PAYLOAD_VERSION, 3);
+        assert_eq!(super::SHADER_PAYLOAD_VERSION, 3);
+        assert_eq!(super::SCENE_PAYLOAD_VERSION, 3);
     }
 
     // ── M10 format-stability: golden-byte fixtures per payload ────────────

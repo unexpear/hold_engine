@@ -151,11 +151,25 @@ pub fn decode_compiled_asset(bytes: &[u8]) -> Result<CompiledAssetBlob, Compiled
         return Err(CompiledAssetError::InvalidMagic);
     }
 
+    // Version-dispatch seam (M10.2). The encoder always writes
+    // COMPILED_ASSET_VERSION; the decoder supports an explicit set of
+    // versions, one body decoder per version, so an older on-disk
+    // envelope can be READ (and, once a v2 exists, migrated) rather
+    // than rejected. Today only v1 exists; M10.3 adds v2 as a second
+    // arm plus a v1->v2 migration. The catch-all keeps unknown/future
+    // versions a typed error, never a silent misparse.
     let version = cursor.read_u32()?;
-    if version != COMPILED_ASSET_VERSION {
-        return Err(CompiledAssetError::UnsupportedVersion(version));
+    match version {
+        1 => decode_envelope_v1(&mut cursor),
+        _ => Err(CompiledAssetError::UnsupportedVersion(version)),
     }
+}
 
+/// Decode the body of a version-1 envelope: everything after the magic
+/// and version fields. Split out of [`decode_compiled_asset`] so the
+/// version-dispatch seam (M10.2) has a per-version entry point; a v2
+/// body decoder lands beside it in M10.3.
+fn decode_envelope_v1(cursor: &mut Cursor) -> Result<CompiledAssetBlob, CompiledAssetError> {
     let kind = CompiledAssetKind::from_raw(cursor.read_u32()?)?;
     let logical_name = cursor.read_string()?;
     let source_path = cursor.read_string()?;
