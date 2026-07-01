@@ -162,10 +162,16 @@ pub fn decode_bmp(data: &[u8]) -> Result<Texture, TexError> {
         }
     }
 
+    // Default new textures to sRGB on import. Most authored content
+    // arriving via BMP/TGA is colour data; data-bearing maps
+    // (roughness, AO, height, masks) need to be re-tagged via
+    // `Texture { color_space: ColorSpace::Linear, .. }` after load. See
+    // ADR 0002 Q3.
     Ok(Texture {
         width,
         height,
         format: TextureFormat::Rgba8,
+        color_space: super::types::ColorSpace::Srgb,
         data: rgba,
     })
 }
@@ -258,10 +264,16 @@ pub fn decode_tga(data: &[u8]) -> Result<Texture, TexError> {
         }
     }
 
+    // Default new textures to sRGB on import. Most authored content
+    // arriving via BMP/TGA is colour data; data-bearing maps
+    // (roughness, AO, height, masks) need to be re-tagged via
+    // `Texture { color_space: ColorSpace::Linear, .. }` after load. See
+    // ADR 0002 Q3.
     Ok(Texture {
         width,
         height,
         format: TextureFormat::Rgba8,
+        color_space: super::types::ColorSpace::Srgb,
         data: rgba,
     })
 }

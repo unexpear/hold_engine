@@ -12,8 +12,8 @@ use super::{
 };
 use crate::assets::mesh::{MeshData, Vertex};
 use crate::assets::types::{
-    GpuMesh, GpuTexture, Material, MeshHandle, Shader, ShaderHandle, Texture, TextureFormat,
-    TextureHandle,
+    ColorSpace, GpuMesh, GpuTexture, Material, MeshHandle, NormalMap, Shader, ShaderHandle,
+    Texture, TextureFormat, TextureHandle,
 };
 use crate::assets::AssetStore;
 use crate::math::{Mat4, Vec3};
@@ -83,9 +83,19 @@ const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
 const GL_TEXTURE_2D: GLenum = 0x0DE1;
 #[allow(dead_code)]
 const GL_TEXTURE0: GLenum = 0x84C0;
+/// Second texture unit. Reserved for the normal-map sampler in shaders that
+/// use one (see `TEXTURED_NORMAL_FRAG`). The OpenGL convention is
+/// `GL_TEXTUREn = GL_TEXTURE0 + n`.
+const GL_TEXTURE1: GLenum = 0x84C1;
 const GL_RGBA: GLenum = 0x1908;
 #[allow(dead_code)]
 const GL_RGB: GLenum = 0x1907;
+/// Internal format that performs the sRGB→linear decode on the GPU at
+/// sample time. Used by the OpenGL upload path when a [`Texture`]'s
+/// `color_space` is [`ColorSpace::Srgb`]; values fed into the fragment
+/// shader by `texture()` calls are guaranteed linear without per-shader
+/// gamma fix-ups. See ADR 0002 Q3 and `OpenGLRenderer::upload_texture`.
+const GL_SRGB8_ALPHA8: GLint = 0x8C43;
 const GL_UNSIGNED_BYTE: GLenum = 0x1401;
 const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
 const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
@@ -104,6 +114,14 @@ const GL_LEQUAL: GLenum = 0x0203;
 const GL_BLEND: GLenum = 0x0BE2;
 const GL_SRC_ALPHA: GLenum = 0x0302;
 const GL_ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
+
+/// Framebuffer sRGB encoding. When enabled (via `glEnable`), the GPU
+/// converts every linear shader output to its sRGB-encoded byte
+/// representation before storing it in the colour buffer. Combined with
+/// sRGB-decoded input textures (see `GL_SRGB8_ALPHA8`), this gives a
+/// fully linear shading pipeline with display-correct output. See ADR
+/// 0002 Q3.
+const GL_FRAMEBUFFER_SRGB: GLenum = 0x8DB9;
 
 // ── Function pointer types ────────────────────────────────────────────────────
 
@@ -176,6 +194,18 @@ type GlTexParameteri = unsafe extern "system" fn(GLenum, GLenum, GLint);
 type GlActiveTexture = unsafe extern "system" fn(GLenum);
 type GlGenerateMipmap = unsafe extern "system" fn(GLenum);
 type GlPixelStorei = unsafe extern "system" fn(GLenum, GLint);
+/// `glReadPixels(x, y, width, height, format, type, dst)` — synchronous
+/// readback of the current colour-attachment / default framebuffer pixels.
+/// Used by the frame graph's per-pass thumbnail capture (ADR 0002 Q8).
+type GlReadPixels = unsafe extern "system" fn(
+    GLint,
+    GLint,
+    GLsizei,
+    GLsizei,
+    GLenum,
+    GLenum,
+    *mut c_void,
+);
 
 // State
 #[allow(dead_code)]
@@ -332,6 +362,11 @@ fn build_terrain_patch_mesh(patch: &TerrainPatchItem) -> MeshData {
             let tangent_z = Vec3::new(0.0, hz1 - hz0, 2.0 * step);
             let normal = tangent_z.cross(tangent_x).normalize();
 
+            // For the terrain grid, U increases along world +X, so the
+            // surface tangent is the +X-derivative of the heightmap surface
+            // (slope along x). Normalise to keep the TBN matrix orthonormal.
+            let tangent_world = tangent_x.normalize();
+
             vertices.push(Vertex {
                 pos: [world_x, world_y, world_z],
                 normal: [normal.x, normal.y, normal.z],
@@ -339,6 +374,7 @@ fn build_terrain_patch_mesh(patch: &TerrainPatchItem) -> MeshData {
                     local_x / patch.size.max(1.0),
                     1.0 - local_z / patch.size.max(1.0),
                 ],
+                tangent: [tangent_world.x, tangent_world.y, tangent_world.z, 1.0],
             });
         }
     }
@@ -442,6 +478,7 @@ struct GlFns {
     active_texture: GlActiveTexture,
     generate_mipmap: GlGenerateMipmap,
     pixel_storei: GlPixelStorei,
+    read_pixels: GlReadPixels,
 
     // State
     blend_func: GlBlendFunc,
@@ -515,6 +552,7 @@ impl GlFns {
         let active_texture = gl_fn!(opengl32, glActiveTexture, GlActiveTexture).unwrap();
         let generate_mipmap = gl_fn!(opengl32, glGenerateMipmap, GlGenerateMipmap).unwrap();
         let pixel_storei = gl_fn!(opengl32, glPixelStorei, GlPixelStorei).unwrap();
+        let read_pixels = gl_fn!(opengl32, glReadPixels, GlReadPixels).unwrap();
         let blend_func = gl_fn!(opengl32, glBlendFunc, GlBlendFunc).unwrap();
 
         Self {
@@ -560,6 +598,7 @@ impl GlFns {
             active_texture,
             generate_mipmap,
             pixel_storei,
+            read_pixels,
             blend_func,
         }
     }
@@ -584,6 +623,9 @@ struct CachedUniforms {
     view_pos: GLint,
     ambient: GLint,
     texture: GLint,
+    normal_map: GLint,
+    metallic: GLint,
+    roughness: GLint,
 }
 
 impl CachedUniforms {
@@ -602,6 +644,9 @@ impl CachedUniforms {
             view_pos: loc!(b"u_view_pos\0"),
             ambient: loc!(b"u_ambient\0"),
             texture: loc!(b"u_texture\0"),
+            normal_map: loc!(b"u_normal_map\0"),
+            metallic: loc!(b"u_metallic\0"),
+            roughness: loc!(b"u_roughness\0"),
         }
     }
 }
@@ -675,6 +720,16 @@ impl OpenGLRenderer {
             // Enable depth test by default.
             (gl.enable)(GL_DEPTH_TEST);
 
+            // Enable sRGB framebuffer encoding so the GPU writes the
+            // gamma-correct sRGB representation of every linear-space
+            // shader output to the colour buffer. Combined with
+            // GL_SRGB8_ALPHA8 input textures (`OpenGLRenderer::upload_texture`
+            // for `ColorSpace::Srgb`), this closes the linear-pipeline
+            // loop: linear sample → linear math → ACES tonemap → linear
+            // write → GPU-side linear→sRGB encode → display. See ADR
+            // 0002 Q3.
+            (gl.enable)(GL_FRAMEBUFFER_SRGB);
+
             // ── Compile line shader ────────────────────────────────────────────
             let line_program =
                 compile_gl_program(&gl, opengl_shaders::LINE_VERT, opengl_shaders::LINE_FRAG);
@@ -740,6 +795,77 @@ impl OpenGLRenderer {
         let gpu_mesh = self.upload_mesh(assets.get::<MeshData>(handle)?);
         self.frame_mesh_cache.insert(handle, gpu_mesh);
         Some(gpu_mesh)
+    }
+
+    /// Evict every frame-cache entry whose texture handle's index
+    /// matches `handle_index`. Used by the hot-reload dispatcher
+    /// (M7.3) when an `AssetInvalidated { kind: Texture, .. }`
+    /// event arrives — `AssetStore::replace` preserves the handle's
+    /// generation, but the GPU resource behind the cached entry is
+    /// the *previous* texture's bytes and must be re-uploaded.
+    ///
+    /// Returns the number of entries evicted (0 or 1 in practice;
+    /// the cache is keyed by full handle).
+    ///
+    /// The previous `GpuTexture::id` is freed via `delete_texture`
+    /// to avoid leaking GL texture objects across reloads. See
+    /// ADR 0004 Q11 for the per-cache invalidation strategy.
+    pub fn evict_texture_handle_by_index(&mut self, handle_index: u32) -> usize {
+        let mut to_remove: Vec<TextureHandle> = self
+            .frame_texture_cache
+            .keys()
+            .filter(|h| h.index == handle_index)
+            .copied()
+            .collect();
+        let count = to_remove.len();
+        for handle in to_remove.drain(..) {
+            if let Some(gpu) = self.frame_texture_cache.remove(&handle) {
+                self.delete_texture(gpu.id);
+            }
+        }
+        count
+    }
+
+    /// Evict mesh-cache entries by handle index. Frees the GL VAO,
+    /// VBO, and EBO so the next access re-uploads from the
+    /// updated `MeshData`. See ADR 0004 Q11.
+    pub fn evict_mesh_handle_by_index(&mut self, handle_index: u32) -> usize {
+        let mut to_remove: Vec<MeshHandle> = self
+            .frame_mesh_cache
+            .keys()
+            .filter(|h| h.index == handle_index)
+            .copied()
+            .collect();
+        let count = to_remove.len();
+        for handle in to_remove.drain(..) {
+            if let Some(gpu) = self.frame_mesh_cache.remove(&handle) {
+                self.delete_vao(gpu.vao, gpu.vbo, gpu.ebo);
+            }
+        }
+        count
+    }
+
+    /// Evict shader-program-cache entries by handle index. Frees
+    /// the GL program (which transitively invalidates the
+    /// associated `uniform_cache` entries via `delete_program`).
+    /// See ADR 0004 Q11.
+    pub fn evict_shader_handle_by_index(&mut self, handle_index: u32) -> usize {
+        let mut to_remove: Vec<ShaderHandle> = self
+            .frame_program_cache
+            .keys()
+            .filter(|h| h.index == handle_index)
+            .copied()
+            .collect();
+        let count = to_remove.len();
+        for handle in to_remove.drain(..) {
+            if let Some(program) = self.frame_program_cache.remove(&handle) {
+                // delete_program also evicts uniform_cache for that
+                // program ID — handle the cascade via the existing
+                // method.
+                self.delete_program(program);
+            }
+        }
+        count
     }
 
     fn cached_frame_texture(
@@ -990,6 +1116,8 @@ impl OpenGLRenderer {
         };
 
         let mvp = view.projection * view.view * *model;
+        // Internal frame-graph-driven draw path threads the material's
+        // PBR factors through to the PBR shader. See ADR 0002 Q3.
         self.draw_mesh_textured(
             &mesh,
             &texture,
@@ -1000,6 +1128,8 @@ impl OpenGLRenderer {
             light.direction,
             view.camera_position,
             light.ambient,
+            material.metallic,
+            material.roughness,
         );
     }
 
@@ -1040,7 +1170,7 @@ impl OpenGLRenderer {
                 GL_STATIC_DRAW,
             );
 
-            let stride = std::mem::size_of::<Vertex>() as GLsizei; // 32 bytes
+            let stride = std::mem::size_of::<Vertex>() as GLsizei; // 48 bytes
 
             // location 0 — position (vec3, byte offset 0)
             (gl.vertex_attrib_pointer)(0, 3, GL_FLOAT, GL_FALSE, stride, 0 as *const c_void);
@@ -1053,6 +1183,13 @@ impl OpenGLRenderer {
             // location 2 — uv (vec2, byte offset 24)
             (gl.vertex_attrib_pointer)(2, 2, GL_FLOAT, GL_FALSE, stride, 24 as *const c_void);
             (gl.enable_vertex_attrib_array)(2);
+
+            // location 3 — tangent (vec4: xyz tangent + w handedness sign,
+            // byte offset 32). Shaders that don't read this attribute can
+            // ignore it; binding it here keeps the VAO state consistent for
+            // future normal-mapped material shaders. See ADR 0002 Q4.
+            (gl.vertex_attrib_pointer)(3, 4, GL_FLOAT, GL_FALSE, stride, 32 as *const c_void);
+            (gl.enable_vertex_attrib_array)(3);
 
             // Unbind VAO so subsequent state changes don't corrupt it.
             (gl.bind_vertex_array)(0);
@@ -1136,10 +1273,42 @@ impl OpenGLRenderer {
 
     // ── Texture upload ────────────────────────────────────────────────────────
 
-    /// Upload RGBA8 pixel data to a new 2-D GL texture.  Returns the GL texture ID.
+    /// Upload RGBA8 pixel data to a new 2-D GL texture in linear colour
+    /// space. Returns the GL texture ID.
     ///
-    /// Mip-maps are generated automatically; linear filtering is set on all levels.
+    /// Mip-maps are generated automatically; linear filtering is set on all
+    /// levels. Use [`Self::upload_texture_rgba8_with_internal_format`] when
+    /// the source data is sRGB-encoded and the GPU should perform the
+    /// sRGB→linear decode at sample time.
     pub fn upload_texture_rgba8(&self, width: u32, height: u32, data: &[u8]) -> u32 {
+        self.upload_texture_rgba8_with_internal_format(
+            width,
+            height,
+            data,
+            GL_RGBA as GLint,
+        )
+    }
+
+    /// Upload RGBA8 pixel data to a new 2-D GL texture with an explicit
+    /// internal format.
+    ///
+    /// `internal_format` controls how the GPU stores and interprets the
+    /// pixels. Two values are common:
+    /// - `GL_RGBA` (linear; what [`Self::upload_texture_rgba8`] uses):
+    ///   bytes are stored as-is and sampled as-is.
+    /// - `GL_SRGB8_ALPHA8` (sRGB-encoded source): bytes are stored
+    ///   as-is but **the GPU applies the sRGB→linear decode every time
+    ///   the texture is sampled.** This is the correct way to handle
+    ///   authored colour textures (`base_color`, albedo) in a PBR
+    ///   pipeline; it eliminates an entire class of shader-side gamma
+    ///   bugs at zero runtime cost. See ADR 0002 Q3.
+    pub fn upload_texture_rgba8_with_internal_format(
+        &self,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        internal_format: GLint,
+    ) -> u32 {
         debug_assert_eq!(
             data.len(),
             (width * height * 4) as usize,
@@ -1157,12 +1326,12 @@ impl OpenGLRenderer {
 
             (gl.tex_image2d)(
                 GL_TEXTURE_2D,
-                0,                // mip level
-                GL_RGBA as GLint, // internal format
+                0,
+                internal_format,
                 width as GLsizei,
                 height as GLsizei,
                 0,       // border (must be 0)
-                GL_RGBA, // source format
+                GL_RGBA, // source format — we always upload RGBA byte-order
                 GL_UNSIGNED_BYTE,
                 data.as_ptr() as *const c_void,
             );
@@ -1298,9 +1467,21 @@ impl OpenGLRenderer {
 
     /// Upload a [`Texture`] to the GPU and return a [`GpuTexture`].
     ///
-    /// The texture is converted to RGBA8 if it is not already.
+    /// The texture is converted to RGBA8 byte-order if it is not already,
+    /// and the GPU's internal format is selected from
+    /// `tex.color_space`:
+    ///
+    /// - [`ColorSpace::Srgb`]  → `GL_SRGB8_ALPHA8`. The GPU applies the
+    ///   sRGB→linear decode at sample time. This is the correct behaviour
+    ///   for any base-colour / albedo / authored-visual texture.
+    /// - [`ColorSpace::Linear`] → `GL_RGBA`. Bytes pass through unmodified.
+    ///   Required for any data-bearing texture (roughness, metallic, AO,
+    ///   masks, height).
+    ///
+    /// See ADR 0002 Q3 for the discipline rationale.
     pub fn upload_texture(&self, tex: &Texture) -> GpuTexture {
-        // Convert to RGBA8 if needed.
+        // Convert to RGBA8 byte-order if needed. The colour-space tag
+        // applies regardless of source channel layout.
         let rgba: std::borrow::Cow<'_, [u8]> = match tex.format {
             TextureFormat::Rgba8 => std::borrow::Cow::Borrowed(&tex.data),
             TextureFormat::Rgb8 => {
@@ -1324,7 +1505,16 @@ impl OpenGLRenderer {
                 std::borrow::Cow::Owned(out)
             }
         };
-        let id = self.upload_texture_rgba8(tex.width, tex.height, &rgba);
+        let internal_format = match tex.color_space {
+            ColorSpace::Srgb => GL_SRGB8_ALPHA8,
+            ColorSpace::Linear => GL_RGBA as GLint,
+        };
+        let id = self.upload_texture_rgba8_with_internal_format(
+            tex.width,
+            tex.height,
+            &rgba,
+            internal_format,
+        );
         GpuTexture {
             id,
             width: tex.width,
@@ -1332,10 +1522,21 @@ impl OpenGLRenderer {
         }
     }
 
-    /// Draw a textured mesh with Blinn-Phong lighting.
+    /// Draw a textured mesh with Disney metallic-roughness PBR lighting.
     ///
-    /// Binds `texture` to unit 0, sets `u_texture`, then sets the same
-    /// uniforms as [`draw_vao`](Self::draw_vao).  Uniform locations are cached.
+    /// Binds `albedo` to unit 0, sets `u_texture`, threads matrices and
+    /// PBR factors through cached uniform locations, and issues the
+    /// indexed draw. The shader expected on `program` is the
+    /// `TEXTURED_VERT` / `TEXTURED_FRAG` pair from
+    /// [`crate::renderer::opengl_shaders`]; the BRDF math expects a
+    /// linear-space `albedo` sample (which a sRGB-tagged
+    /// [`crate::assets::Texture`] uploaded via [`Self::upload_texture`]
+    /// gives automatically).
+    ///
+    /// `metallic` and `roughness` are scalar PBR factors in `[0, 1]`;
+    /// see [`crate::assets::Material`] for the per-material defaults
+    /// and ADR 0002 Q3 for the shading-model rationale.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_mesh_textured(
         &mut self,
         mesh: &GpuMesh,
@@ -1347,6 +1548,8 @@ impl OpenGLRenderer {
         light_dir: Vec3,
         view_pos: Vec3,
         ambient: f32,
+        metallic: f32,
+        roughness: f32,
     ) {
         let uniforms = self.cached_uniforms(program);
         unsafe {
@@ -1396,14 +1599,21 @@ impl OpenGLRenderer {
                     [view_pos.x, view_pos.y, view_pos.z].as_ptr(),
                 );
             }
-            if uniforms.ambient >= 0 {
-                type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
-                let ptr = load_gl_fn("glUniform1f", self.opengl32);
-                if !ptr.is_null() {
-                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(ptr);
-                    f(uniforms.ambient, ambient);
+            // The `f32`-uniform GL function pointer is loaded lazily here
+            // because GlFns doesn't yet stash it; resolved once per call,
+            // shared across `ambient` / `metallic` / `roughness`. A future
+            // cleanup commit can promote it into GlFns.
+            type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
+            let uniform1f_ptr = load_gl_fn("glUniform1f", self.opengl32);
+            let set_f32 = |loc: GLint, value: f32| {
+                if loc >= 0 && !uniform1f_ptr.is_null() {
+                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(uniform1f_ptr);
+                    f(loc, value);
                 }
-            }
+            };
+            set_f32(uniforms.ambient, ambient);
+            set_f32(uniforms.metallic, metallic);
+            set_f32(uniforms.roughness, roughness);
 
             (gl.bind_vertex_array)(mesh.vao);
             (gl.draw_elements)(
@@ -1415,6 +1625,206 @@ impl OpenGLRenderer {
             (gl.bind_vertex_array)(0);
             (gl.bind_texture)(GL_TEXTURE_2D, 0);
         }
+    }
+
+    /// Upload a [`NormalMap`] to the GPU and return a [`GpuTexture`] handle.
+    ///
+    /// Normal maps are *unconditionally linear* at the type level
+    /// (ADR 0002 Q4). The GPU upload path uses `GL_RGBA` as the internal
+    /// format — explicitly NOT `GL_SRGB8_ALPHA8` — so the GPU does not
+    /// apply an sRGB→linear decode that would corrupt the encoded normal
+    /// vectors. This is the type-system pin discipline from ADR 0002 Q3
+    /// extended into the upload layer: the colour-space decision lives on
+    /// the asset type and cannot be accidentally inverted at the GL call
+    /// site.
+    ///
+    /// The on-disk bytes are already in the engine canonical OpenGL Y+
+    /// convention; the `NormalMap::from_directx` path flips the green
+    /// channel at construction time so the GPU only ever sees canonical
+    /// data.
+    pub fn upload_normal_map(&self, nm: &NormalMap) -> GpuTexture {
+        // Reuse the texture upload path. The format conversion logic for
+        // RGB8 / R8 → RGBA8 is identical to upload_texture and the on-disk
+        // bytes are already in the engine canonical convention.
+        let rgba: std::borrow::Cow<'_, [u8]> = match nm.format {
+            TextureFormat::Rgba8 => std::borrow::Cow::Borrowed(&nm.data),
+            TextureFormat::Rgb8 => {
+                let mut out = Vec::with_capacity((nm.width * nm.height * 4) as usize);
+                for chunk in nm.data.chunks_exact(3) {
+                    out.push(chunk[0]);
+                    out.push(chunk[1]);
+                    out.push(chunk[2]);
+                    out.push(255);
+                }
+                std::borrow::Cow::Owned(out)
+            }
+            TextureFormat::R8 => {
+                // R8 normal map: encode `(R, 128, 255, 255)` so the unpacked
+                // tangent-space normal points straight out of the surface
+                // when the input is mid-grey, matching the convention for
+                // single-channel height-derived normals before BC5
+                // reconstruction is implemented.
+                let mut out = Vec::with_capacity((nm.width * nm.height * 4) as usize);
+                for &b in &nm.data {
+                    out.push(b);
+                    out.push(128);
+                    out.push(255);
+                    out.push(255);
+                }
+                std::borrow::Cow::Owned(out)
+            }
+        };
+        let id = self.upload_texture_rgba8(nm.width, nm.height, &rgba);
+        GpuTexture {
+            id,
+            width: nm.width,
+            height: nm.height,
+        }
+    }
+
+    /// Draw a textured + normal-mapped mesh with Disney metallic-roughness
+    /// PBR lighting.
+    ///
+    /// Same as [`Self::draw_mesh_textured`] but additionally binds
+    /// `normal_map` to texture unit 1 and sets `u_normal_map`. Use with the
+    /// `TEXTURED_NORMAL_VERT` / `TEXTURED_NORMAL_FRAG` shader pair, which
+    /// reads the location-3 tangent attribute, reconstructs a per-pixel
+    /// TBN, samples the tangent-space normal, and runs the same Disney
+    /// BRDF + ACES tonemap as the non-normal-mapped path. See ADR 0002 Q3
+    /// + Q4.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_mesh_textured_normal_mapped(
+        &mut self,
+        mesh: &GpuMesh,
+        albedo: &GpuTexture,
+        normal_map: &GpuTexture,
+        program: u32,
+        mvp: &Mat4,
+        model: &Mat4,
+        color: Color,
+        light_dir: Vec3,
+        view_pos: Vec3,
+        ambient: f32,
+        metallic: f32,
+        roughness: f32,
+    ) {
+        let uniforms = self.cached_uniforms(program);
+        unsafe {
+            let gl = &self.gl;
+            (gl.use_program)(program);
+
+            (gl.active_texture)(GL_TEXTURE0);
+            (gl.bind_texture)(GL_TEXTURE_2D, albedo.id);
+            (gl.active_texture)(GL_TEXTURE1);
+            (gl.bind_texture)(GL_TEXTURE_2D, normal_map.id);
+
+            if uniforms.texture >= 0 {
+                (gl.uniform1i)(uniforms.texture, 0);
+            }
+            if uniforms.normal_map >= 0 {
+                (gl.uniform1i)(uniforms.normal_map, 1);
+            }
+            if uniforms.mvp >= 0 {
+                (gl.uniform_matrix4fv)(
+                    uniforms.mvp,
+                    1,
+                    GL_FALSE,
+                    mvp.cols.as_ptr() as *const GLfloat,
+                );
+            }
+            if uniforms.model >= 0 {
+                (gl.uniform_matrix4fv)(
+                    uniforms.model,
+                    1,
+                    GL_FALSE,
+                    model.cols.as_ptr() as *const GLfloat,
+                );
+            }
+            if uniforms.color >= 0 {
+                (gl.uniform4fv)(
+                    uniforms.color,
+                    1,
+                    [color.r, color.g, color.b, color.a].as_ptr(),
+                );
+            }
+            if uniforms.light_dir >= 0 {
+                (gl.uniform3fv)(
+                    uniforms.light_dir,
+                    1,
+                    [light_dir.x, light_dir.y, light_dir.z].as_ptr(),
+                );
+            }
+            if uniforms.view_pos >= 0 {
+                (gl.uniform3fv)(
+                    uniforms.view_pos,
+                    1,
+                    [view_pos.x, view_pos.y, view_pos.z].as_ptr(),
+                );
+            }
+            type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
+            let uniform1f_ptr = load_gl_fn("glUniform1f", self.opengl32);
+            let set_f32 = |loc: GLint, value: f32| {
+                if loc >= 0 && !uniform1f_ptr.is_null() {
+                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(uniform1f_ptr);
+                    f(loc, value);
+                }
+            };
+            set_f32(uniforms.ambient, ambient);
+            set_f32(uniforms.metallic, metallic);
+            set_f32(uniforms.roughness, roughness);
+
+            (gl.bind_vertex_array)(mesh.vao);
+            (gl.draw_elements)(
+                GL_TRIANGLES,
+                mesh.index_count as GLsizei,
+                GL_UNSIGNED_INT,
+                null_mut(),
+            );
+            (gl.bind_vertex_array)(0);
+
+            // Unbind both texture units in reverse order.
+            (gl.active_texture)(GL_TEXTURE1);
+            (gl.bind_texture)(GL_TEXTURE_2D, 0);
+            (gl.active_texture)(GL_TEXTURE0);
+            (gl.bind_texture)(GL_TEXTURE_2D, 0);
+        }
+    }
+
+    /// Synchronously read the current default-framebuffer's colour pixels
+    /// into a freshly allocated RGBA8 buffer (4 bytes per pixel, top-down
+    /// row order — OpenGL returns rows bottom-up, so the function flips
+    /// them on the way out for callers that expect top-down image data
+    /// like the editor frame inspector and screen captures).
+    ///
+    /// Used by the frame graph's per-pass thumbnail capture
+    /// (see `FrameGraph::execute_with_capture`, ADR 0002 Q8).
+    /// `glReadPixels` is synchronous and stalls the pipeline; this is
+    /// intended for editor / debug capture flows, not the steady-state
+    /// hot path.
+    pub fn read_framebuffer_rgba8(&self) -> Vec<u8> {
+        let w = self.width.max(1) as usize;
+        let h = self.height.max(1) as usize;
+        let mut bottom_up = vec![0u8; w * h * 4];
+        unsafe {
+            (self.gl.read_pixels)(
+                0,
+                0,
+                w as GLsizei,
+                h as GLsizei,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                bottom_up.as_mut_ptr() as *mut c_void,
+            );
+        }
+        // Flip rows so the result is top-down.
+        let row_bytes = w * 4;
+        let mut top_down = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let src = (h - 1 - y) * row_bytes;
+            let dst = y * row_bytes;
+            top_down[dst..dst + row_bytes].copy_from_slice(&bottom_up[src..src + row_bytes]);
+        }
+        top_down
     }
 
     /// Free a GPU texture previously created by [`Self::upload_texture`].

@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use super::{
     compiled_asset_path_for_logical_name, encode_compiled_asset, encode_compiled_material_payload,
-    encode_compiled_mesh_payload, encode_compiled_texture_payload, load_texture, CompiledAssetBlob,
-    CompiledAssetDependency, CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata,
-    CompiledMaterialPayload, MeshData, ObjError, TexError,
+    encode_compiled_mesh_payload, encode_compiled_scene_payload, encode_compiled_shader_payload,
+    encode_compiled_texture_payload, load_texture, CompiledAssetBlob, CompiledAssetDependency,
+    CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata, CompiledMaterialPayload,
+    CompiledScenePayload, CompiledShaderPayload, MeshData, ObjError, TexError,
 };
 
 const COMPILER_TAG: &str = "hold_assetc@runtime-slice-0.1";
@@ -21,6 +22,17 @@ pub enum AssetCompilerError {
     UnsupportedKind(CompiledAssetKind),
     InvalidMaterialLine { line: usize, message: String },
     MissingMaterialField(&'static str),
+    /// `.hshd` shader source failed to parse — missing section,
+    /// unknown directive, or empty body. The string carries enough
+    /// context for the editor pane to display alongside the
+    /// dispatcher's `CompileFailed` event.
+    InvalidShaderSource(String),
+    /// `.hsc` scene source failed to parse. Carries the line number
+    /// and message from `crate::scene::SceneError` so the editor's
+    /// hot-reload status panel can surface "scene line 42: unknown
+    /// directive" rather than a generic compile failure. See ADR
+    /// 0004 Q14 (M7.4.1 — scene hot-reload).
+    InvalidSceneSource { line: usize, message: String },
 }
 
 impl fmt::Display for AssetCompilerError {
@@ -36,6 +48,12 @@ impl fmt::Display for AssetCompilerError {
             }
             Self::MissingMaterialField(field) => {
                 write!(f, "material source missing required field `{field}`")
+            }
+            Self::InvalidShaderSource(message) => {
+                write!(f, "invalid shader source: {message}")
+            }
+            Self::InvalidSceneSource { line, message } => {
+                write!(f, "invalid scene source on line {line}: {message}")
             }
         }
     }
@@ -157,8 +175,193 @@ pub fn compile_asset_from_source(
         CompiledAssetKind::Mesh => compile_mesh_asset(source_path, logical_name),
         CompiledAssetKind::Material => compile_material_asset(source_path, logical_name),
         CompiledAssetKind::Texture => compile_texture_asset(source_path, logical_name),
+        CompiledAssetKind::Shader => compile_shader_asset(source_path, logical_name),
+        CompiledAssetKind::Scene => compile_scene_asset(source_path, logical_name),
         _ => Err(AssetCompilerError::UnsupportedKind(kind)),
     }
+}
+
+/// Compile a `.hsc` scene source file into a
+/// [`crate::assets::CompiledAssetBlob`] of kind
+/// [`CompiledAssetKind::Scene`].
+///
+/// ## Pipeline
+///
+/// 1. Read the `.hsc` text from disk.
+/// 2. Parse via `crate::scene::parse_scene` → `SceneData`.
+/// 3. Convert to `crate::editor::SceneDocument::from_scene_data`.
+/// 4. Re-serialize through `to_hscene_string` to produce the
+///    canonical text payload.
+///
+/// The compile step is therefore a *parse-validate-canonicalize*
+/// pass: it rejects malformed `.hsc` files at compile time so the
+/// dispatcher's runtime decode path can assume the payload is
+/// well-formed (no need for a second error surface there).
+///
+/// The hot-reload contract — runtime entity preservation across
+/// reloads — is enforced downstream in
+/// `EditorSceneSession::reload_scene_document`. This function only
+/// produces the validated payload; it does not touch the runtime
+/// `World`.
+///
+/// See ADR 0004 Q14 + Q14a (M7.4.1).
+pub fn compile_scene_asset(
+    source_path: &Path,
+    logical_name: &str,
+) -> Result<CompiledAssetBlob, AssetCompilerError> {
+    let source = fs::read_to_string(source_path)?;
+    // crate::scene::parse_scene returns SceneError on malformed
+    // input. We surface its line+message in InvalidSceneSource so
+    // the editor pane can route the failure to the same panel that
+    // shows compile errors for materials, shaders, etc.
+    let scene = crate::scene::parse_scene(&source).map_err(|err| {
+        AssetCompilerError::InvalidSceneSource {
+            line: err.line,
+            message: err.msg,
+        }
+    })?;
+    let document = crate::editor::SceneDocument::from_scene_data(&scene);
+    let hscene_text = document.to_hscene_string();
+    let payload = CompiledScenePayload {
+        name: logical_name.to_string(),
+        hscene_text,
+    };
+    let encoded = encode_compiled_scene_payload(&payload)?;
+    Ok(compose_blob(
+        CompiledAssetKind::Scene,
+        logical_name,
+        source_path,
+        encoded,
+        Vec::new(),
+    )?)
+}
+
+/// Compile a `.hshd` shader source file into a
+/// [`crate::assets::CompiledAssetBlob`] of kind
+/// [`CompiledAssetKind::Shader`].
+///
+/// ## Source format
+///
+/// A `.hshd` file contains both vertex and fragment GLSL in one
+/// document, delimited by lines starting with the marker
+/// `#shader vertex` or `#shader fragment`. Anything before the
+/// first marker is treated as a header comment and discarded.
+/// Markers are case-sensitive and must occupy their own line; the
+/// rest of the line is ignored so authors can leave a trailing
+/// comment.
+///
+/// Example:
+///
+/// ```text
+/// // textured-pbr.hshd
+/// #shader vertex
+/// #version 330 core
+/// layout(location = 0) in vec3 a_pos;
+/// // … vertex source …
+///
+/// #shader fragment
+/// #version 330 core
+/// out vec4 frag_color;
+/// // … fragment source …
+/// ```
+///
+/// Both sections must be present and non-empty; either missing
+/// produces [`AssetCompilerError::InvalidShaderSource`]. The
+/// per-section text is captured verbatim so `#version` directives,
+/// uniform declarations, and `#extension` pragmas pass through
+/// untouched.
+///
+/// See ADR 0004 Q9 (M7.4.1).
+pub fn compile_shader_asset(
+    source_path: &Path,
+    logical_name: &str,
+) -> Result<CompiledAssetBlob, AssetCompilerError> {
+    let source = fs::read_to_string(source_path)?;
+    let payload = parse_shader_source(&source, logical_name)?;
+    let encoded = encode_compiled_shader_payload(&payload)?;
+    Ok(compose_blob(
+        CompiledAssetKind::Shader,
+        logical_name,
+        source_path,
+        encoded,
+        Vec::new(),
+    )?)
+}
+
+/// Parse a `.hshd` source string into a [`CompiledShaderPayload`].
+/// Public for testing — the production path goes through
+/// [`compile_shader_asset`] which reads from disk first.
+pub fn parse_shader_source(
+    source: &str,
+    logical_name: &str,
+) -> Result<CompiledShaderPayload, AssetCompilerError> {
+    #[derive(PartialEq, Eq)]
+    enum Section {
+        None,
+        Vertex,
+        Fragment,
+    }
+    let mut current = Section::None;
+    let mut vertex = String::new();
+    let mut fragment = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("#shader") {
+            // Marker line. The first whitespace-separated token
+            // after `#shader` names the section. Rest of the
+            // line ignored so authors can leave a trailing
+            // comment.
+            let next = rest.split_whitespace().next();
+            current = match next {
+                Some("vertex") => Section::Vertex,
+                Some("fragment") => Section::Fragment,
+                Some(other) => {
+                    return Err(AssetCompilerError::InvalidShaderSource(format!(
+                        "unknown shader section {:?} (expected `vertex` or `fragment`)",
+                        other
+                    )));
+                }
+                None => {
+                    return Err(AssetCompilerError::InvalidShaderSource(
+                        "`#shader` directive missing section name".into(),
+                    ));
+                }
+            };
+            continue;
+        }
+        match current {
+            Section::Vertex => {
+                vertex.push_str(line);
+                vertex.push('\n');
+            }
+            Section::Fragment => {
+                fragment.push_str(line);
+                fragment.push('\n');
+            }
+            Section::None => {
+                // Pre-marker preamble — silently ignored. Lets
+                // authors put a license header or doc comment at
+                // the top of the file.
+            }
+        }
+    }
+
+    if vertex.trim().is_empty() {
+        return Err(AssetCompilerError::InvalidShaderSource(
+            "shader source missing vertex section".into(),
+        ));
+    }
+    if fragment.trim().is_empty() {
+        return Err(AssetCompilerError::InvalidShaderSource(
+            "shader source missing fragment section".into(),
+        ));
+    }
+
+    Ok(CompiledShaderPayload {
+        name: logical_name.to_string(),
+        vertex_source: vertex,
+        fragment_source: fragment,
+    })
 }
 
 pub fn source_asset_candidates(
@@ -171,6 +374,8 @@ pub fn source_asset_candidates(
         CompiledAssetKind::Mesh => vec![base.with_extension("obj")],
         CompiledAssetKind::Material => vec![base.with_extension("hmat")],
         CompiledAssetKind::Texture => vec![base.with_extension("bmp"), base.with_extension("tga")],
+        CompiledAssetKind::Shader => vec![base.with_extension("hshd")],
+        CompiledAssetKind::Scene => vec![base.with_extension("hsc")],
         _ => Vec::new(),
     }
 }
@@ -324,8 +529,9 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        parse_compiled_material_source, resolve_source_asset_path, source_asset_candidates,
-        source_asset_is_stale,
+        compile_shader_asset, parse_compiled_material_source, parse_shader_source,
+        resolve_source_asset_path, source_asset_candidates, source_asset_is_stale,
+        AssetCompilerError,
     };
     use crate::assets::{compiled_asset_path_for_logical_name, encode_compiled_asset};
     use crate::assets::{
@@ -433,6 +639,117 @@ alpha_cutout 1
         )
         .unwrap();
         assert!(source_asset_is_stale(&compiled_root, &source_path, "meshes/crate").unwrap());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    // ── parse_shader_source tests ─────────────────────────────────────────
+
+    /// Happy path: a `.hshd` file with both sections produces a
+    /// payload whose vertex_source and fragment_source are the
+    /// verbatim section bodies. The marker lines themselves do NOT
+    /// appear in the output.
+    #[test]
+    fn parse_shader_source_extracts_both_sections_verbatim() {
+        let src = "// preamble comment\n\
+                   #shader vertex\n\
+                   #version 330 core\n\
+                   layout(location = 0) in vec3 a_pos;\n\
+                   void main() { gl_Position = vec4(a_pos, 1.0); }\n\
+                   \n\
+                   #shader fragment\n\
+                   #version 330 core\n\
+                   out vec4 frag_color;\n\
+                   void main() { frag_color = vec4(1.0); }\n";
+        let payload = parse_shader_source(src, "shaders/test").unwrap();
+        assert_eq!(payload.name, "shaders/test");
+        assert!(payload.vertex_source.contains("#version 330"));
+        assert!(payload.vertex_source.contains("a_pos"));
+        assert!(!payload.vertex_source.contains("#shader"));
+        assert!(payload.fragment_source.contains("frag_color"));
+        assert!(!payload.fragment_source.contains("#shader"));
+        // Pre-marker preamble silently ignored.
+        assert!(!payload.vertex_source.contains("preamble comment"));
+        assert!(!payload.fragment_source.contains("preamble comment"));
+    }
+
+    /// Missing fragment section surfaces as a typed error so the
+    /// editor pane can display "shader source missing fragment
+    /// section" without the developer having to read GLSL output.
+    #[test]
+    fn parse_shader_source_rejects_missing_fragment() {
+        let src = "#shader vertex\n#version 330 core\nvoid main() {}\n";
+        match parse_shader_source(src, "shaders/test") {
+            Err(AssetCompilerError::InvalidShaderSource(msg)) => {
+                assert!(
+                    msg.contains("fragment"),
+                    "error names the missing section: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidShaderSource, got {:?}", other),
+        }
+    }
+
+    /// Empty vertex section is rejected the same way. Pillar 4
+    /// (debuggability): a developer who left the vertex body
+    /// empty by accident gets a typed error pointing at the right
+    /// section, not a confusing GLSL compile error from the GPU
+    /// driver three layers downstream.
+    #[test]
+    fn parse_shader_source_rejects_empty_vertex_section() {
+        let src = "#shader vertex\n\n#shader fragment\n#version 330 core\nvoid main() {}\n";
+        match parse_shader_source(src, "shaders/test") {
+            Err(AssetCompilerError::InvalidShaderSource(msg)) => {
+                assert!(msg.contains("vertex"));
+            }
+            other => panic!("expected InvalidShaderSource, got {:?}", other),
+        }
+    }
+
+    /// Unknown section name (e.g. typo `vertx` instead of
+    /// `vertex`) surfaces with the offending token in the error
+    /// message so the developer can fix the typo from the message
+    /// alone.
+    #[test]
+    fn parse_shader_source_rejects_unknown_section_name() {
+        let src = "#shader vertx\n#version 330 core\nvoid main() {}\n";
+        match parse_shader_source(src, "shaders/test") {
+            Err(AssetCompilerError::InvalidShaderSource(msg)) => {
+                assert!(
+                    msg.contains("vertx"),
+                    "error names the offending token: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidShaderSource, got {:?}", other),
+        }
+    }
+
+    /// `compile_shader_asset` reads the file from disk, parses,
+    /// and produces a `CompiledAssetBlob` of kind Shader with the
+    /// encoded payload. End-to-end happy path.
+    #[test]
+    fn compile_shader_asset_round_trips_through_disk() {
+        let root = unique_test_root("shader_compile");
+        let source_path = root.join("test.hshd");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &source_path,
+            "#shader vertex\n#version 330 core\nvoid main() {}\n\
+             #shader fragment\n#version 330 core\nvoid main() {}\n",
+        )
+        .unwrap();
+
+        let blob = compile_shader_asset(&source_path, "shaders/test").unwrap();
+        assert_eq!(blob.metadata.kind, CompiledAssetKind::Shader);
+        assert_eq!(blob.metadata.logical_name, "shaders/test");
+
+        // Decode the payload back and verify content.
+        let decoded = crate::assets::decode_compiled_shader_payload(&blob.payload).unwrap();
+        assert_eq!(decoded.name, "shaders/test");
+        assert!(decoded.vertex_source.contains("void main()"));
+        assert!(decoded.fragment_source.contains("void main()"));
 
         fs::remove_dir_all(root).ok();
     }

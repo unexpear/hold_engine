@@ -4,12 +4,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    decode_compiled_asset, AssetStore, CompiledAssetBlob, CompiledAssetError, CompiledAssetKind,
-    Material, MaterialHandle, MeshData, MeshHandle, ShaderHandle, Texture, TextureFormat,
-    TextureHandle, Vertex,
+    decode_compiled_asset, AssetStore, ColorSpace, CompiledAssetBlob, CompiledAssetError,
+    CompiledAssetKind, Material, MaterialHandle, MeshData, MeshHandle, NormalMap, NormalMapHandle,
+    ShaderHandle, Texture, TextureFormat, TextureHandle, Vertex,
 };
 
-const COMPILED_PAYLOAD_VERSION: u32 = 1;
+/// On-disk payload version for compiled assets. Bumped whenever any encoded
+/// payload (mesh / texture / material) changes shape. Old payloads are rejected
+/// rather than migrated; the asset compiler regenerates them.
+///
+/// Version history:
+/// - 1: initial format. Vertex = pos(3) + normal(3) + uv(2).
+/// - 2: vertex layout extended with tangent(4). See ADR 0002 Q4.
+/// - 3: texture payload tagged with `ColorSpace`. See ADR 0002 Q3.
+const COMPILED_PAYLOAD_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledMaterialPayload {
@@ -33,6 +41,7 @@ pub enum CompiledAssetRuntimeError {
         found_logical_name: String,
     },
     InvalidTextureFormat(u32),
+    InvalidColorSpace(u32),
 }
 
 impl fmt::Display for CompiledAssetRuntimeError {
@@ -56,6 +65,9 @@ impl fmt::Display for CompiledAssetRuntimeError {
             ),
             Self::InvalidTextureFormat(raw) => {
                 write!(f, "invalid compiled texture format {raw}")
+            }
+            Self::InvalidColorSpace(raw) => {
+                write!(f, "invalid compiled colour-space tag {raw}")
             }
         }
     }
@@ -98,8 +110,11 @@ pub fn encode_compiled_mesh_payload(mesh: &MeshData) -> Result<Vec<u8>, Compiled
     let index_count =
         u32::try_from(mesh.indices.len()).map_err(|_| CompiledAssetError::LengthOverflow)?;
 
+    // 12 bytes header (version + vertex_count + index_count) +
+    // 12 floats per vertex (pos3 + normal3 + uv2 + tangent4) +
+    // 4 bytes per index.
     let mut out = Vec::with_capacity(
-        12 + mesh.vertices.len() * (8 * std::mem::size_of::<f32>()) + mesh.indices.len() * 4,
+        12 + mesh.vertices.len() * (12 * std::mem::size_of::<f32>()) + mesh.indices.len() * 4,
     );
     write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
     write_u32(&mut out, vertex_count);
@@ -112,6 +127,9 @@ pub fn encode_compiled_mesh_payload(mesh: &MeshData) -> Result<Vec<u8>, Compiled
             write_f32(&mut out, value);
         }
         for value in vertex.uv {
+            write_f32(&mut out, value);
+        }
+        for value in vertex.tangent {
             write_f32(&mut out, value);
         }
     }
@@ -138,6 +156,12 @@ pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAs
             pos: [cursor.read_f32()?, cursor.read_f32()?, cursor.read_f32()?],
             normal: [cursor.read_f32()?, cursor.read_f32()?, cursor.read_f32()?],
             uv: [cursor.read_f32()?, cursor.read_f32()?],
+            tangent: [
+                cursor.read_f32()?,
+                cursor.read_f32()?,
+                cursor.read_f32()?,
+                cursor.read_f32()?,
+            ],
         });
     }
 
@@ -149,11 +173,14 @@ pub fn decode_compiled_mesh_payload(bytes: &[u8]) -> Result<MeshData, CompiledAs
 }
 
 pub fn encode_compiled_texture_payload(texture: &Texture) -> Result<Vec<u8>, CompiledAssetError> {
-    let mut out = Vec::with_capacity(texture.data.len() + 24);
+    // 28-byte header (v3 header is 4 bigger than v2 for the colour-space tag)
+    // plus pixel data.
+    let mut out = Vec::with_capacity(texture.data.len() + 28);
     write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
     write_u32(&mut out, texture.width);
     write_u32(&mut out, texture.height);
     write_u32(&mut out, encode_texture_format(texture.format));
+    write_u32(&mut out, encode_color_space(texture.color_space));
     write_u64(
         &mut out,
         u64::try_from(texture.data.len()).map_err(|_| CompiledAssetError::LengthOverflow)?,
@@ -172,6 +199,7 @@ pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, Compiled
     let width = cursor.read_u32()?;
     let height = cursor.read_u32()?;
     let format = decode_texture_format(cursor.read_u32()?)?;
+    let color_space = decode_color_space(cursor.read_u32()?)?;
     let data_len = cursor.read_u64()? as usize;
     let data = cursor.read_vec(data_len)?;
 
@@ -179,6 +207,7 @@ pub fn decode_compiled_texture_payload(bytes: &[u8]) -> Result<Texture, Compiled
         width,
         height,
         format,
+        color_space,
         data,
     })
 }
@@ -214,10 +243,109 @@ pub fn decode_compiled_material_payload(
     })
 }
 
+/// On-disk payload for a [`crate::assets::Shader`]. Two GLSL
+/// strings (vertex + fragment) plus the asset's user-facing name.
+/// See `compile_shader_asset` for the source-file format and
+/// ADR 0004 Q9 (M7.4.1) for the hot-reload rationale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledShaderPayload {
+    pub name: String,
+    pub vertex_source: String,
+    pub fragment_source: String,
+}
+
+pub fn encode_compiled_shader_payload(
+    payload: &CompiledShaderPayload,
+) -> Result<Vec<u8>, CompiledAssetError> {
+    let mut out = Vec::with_capacity(
+        16 + payload.name.len() + payload.vertex_source.len() + payload.fragment_source.len(),
+    );
+    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_string(&mut out, &payload.name)?;
+    write_string(&mut out, &payload.vertex_source)?;
+    write_string(&mut out, &payload.fragment_source)?;
+    Ok(out)
+}
+
+pub fn decode_compiled_shader_payload(
+    bytes: &[u8],
+) -> Result<CompiledShaderPayload, CompiledAssetError> {
+    let mut cursor = PayloadCursor::new(bytes);
+    let version = cursor.read_u32()?;
+    if version != COMPILED_PAYLOAD_VERSION {
+        return Err(CompiledAssetError::UnsupportedVersion(version));
+    }
+
+    Ok(CompiledShaderPayload {
+        name: cursor.read_string()?,
+        vertex_source: cursor.read_string()?,
+        fragment_source: cursor.read_string()?,
+    })
+}
+
+/// On-disk payload for a compiled scene asset. Carries the canonical
+/// `.hscene` text serialization of a [`crate::editor::SceneDocument`]
+/// so the dispatcher can decode → SceneDocument and hand it to the
+/// editor's runtime reload path.
+///
+/// Why a text payload instead of binary? The `.hscene` format is the
+/// only one that round-trips a `SceneDocument` exactly today (see
+/// `SceneDocument::to_hscene_string` / `from_hscene_str`). Going
+/// through the same serialization both authoring and runtime use
+/// avoids a separate binary scene format that could drift out of
+/// sync with the text path. The runtime cost is one parse on
+/// reload, which dominates anything else the diff path does — and
+/// the diff path itself runs on the editor's main thread at frame
+/// boundaries, not in the hot render loop.
+///
+/// See ADR 0004 Q14 + Q14a (M7.4.1 — scene hot-reload).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledScenePayload {
+    pub name: String,
+    /// Canonical `.hscene` text. UTF-8. Guaranteed parseable by
+    /// `SceneDocument::from_hscene_str` (the compile step would have
+    /// rejected the source `.hsc` if the resulting document couldn't
+    /// re-serialize).
+    pub hscene_text: String,
+}
+
+pub fn encode_compiled_scene_payload(
+    payload: &CompiledScenePayload,
+) -> Result<Vec<u8>, CompiledAssetError> {
+    let mut out = Vec::with_capacity(16 + payload.name.len() + payload.hscene_text.len());
+    write_u32(&mut out, COMPILED_PAYLOAD_VERSION);
+    write_string(&mut out, &payload.name)?;
+    write_string(&mut out, &payload.hscene_text)?;
+    Ok(out)
+}
+
+pub fn decode_compiled_scene_payload(
+    bytes: &[u8],
+) -> Result<CompiledScenePayload, CompiledAssetError> {
+    let mut cursor = PayloadCursor::new(bytes);
+    let version = cursor.read_u32()?;
+    if version != COMPILED_PAYLOAD_VERSION {
+        return Err(CompiledAssetError::UnsupportedVersion(version));
+    }
+
+    Ok(CompiledScenePayload {
+        name: cursor.read_string()?,
+        hscene_text: cursor.read_string()?,
+    })
+}
+
 pub struct CompiledAssetRuntimeLoader {
     compiled_root: PathBuf,
     mesh_handles: HashMap<String, MeshHandle>,
     texture_handles: HashMap<String, TextureHandle>,
+    /// Normal-map handles are cached separately from texture handles even
+    /// though both originate from the same compiled-texture payload type.
+    /// A logical name resolved as a normal map produces a [`NormalMap`] asset
+    /// (with convention metadata); the same logical name resolved as a colour
+    /// texture would produce a distinct [`Texture`] asset. This lets a single
+    /// source `.png` flow into either typed pin without the runtime forgetting
+    /// the distinction. See ADR 0002 Q4.
+    normal_map_handles: HashMap<String, NormalMapHandle>,
     material_handles: HashMap<String, MaterialHandle>,
 }
 
@@ -227,6 +355,7 @@ impl CompiledAssetRuntimeLoader {
             compiled_root: compiled_root.into(),
             mesh_handles: HashMap::new(),
             texture_handles: HashMap::new(),
+            normal_map_handles: HashMap::new(),
             material_handles: HashMap::new(),
         }
     }
@@ -268,6 +397,35 @@ impl CompiledAssetRuntimeLoader {
         Ok(handle)
     }
 
+    /// Resolve a logical name as a [`NormalMap`] asset. Reads the same
+    /// compiled-texture payload that [`Self::ensure_texture`] does, but inserts
+    /// the result as a typed [`NormalMap`] (defaulting to OpenGL Y+
+    /// convention) so it can be bound only to a [`Material`]'s normal slot.
+    /// See ADR 0002 Q4.
+    ///
+    /// **TODO (M5):** the compiled-asset envelope should grow a dedicated
+    /// `CompiledAssetKind::NormalMap` so the convention can travel through the
+    /// pipeline rather than being assumed at the resolution boundary. Until
+    /// then, source data is assumed to already be in the canonical convention.
+    pub fn ensure_normal_map(
+        &mut self,
+        assets: &mut AssetStore,
+        logical_name: &str,
+    ) -> Result<NormalMapHandle, CompiledAssetRuntimeError> {
+        if let Some(handle) = self.normal_map_handles.get(logical_name) {
+            return Ok(*handle);
+        }
+
+        let blob = self.load_blob(logical_name, CompiledAssetKind::Texture)?;
+        let texture = decode_compiled_texture_payload(&blob.payload)?;
+        let normal_map =
+            NormalMap::new_opengl(texture.width, texture.height, texture.format, texture.data);
+        let handle = assets.insert(normal_map);
+        self.normal_map_handles
+            .insert(logical_name.to_string(), handle);
+        Ok(handle)
+    }
+
     pub fn ensure_material(
         &mut self,
         assets: &mut AssetStore,
@@ -282,7 +440,7 @@ impl CompiledAssetRuntimeLoader {
         let payload = decode_compiled_material_payload(&blob.payload)?;
         let albedo = self.ensure_texture(assets, &payload.albedo_logical_name)?;
         let normal = match payload.normal_logical_name.as_deref() {
-            Some(name) => Some(self.ensure_texture(assets, name)?),
+            Some(name) => Some(self.ensure_normal_map(assets, name)?),
             None => None,
         };
         let specular_gloss = match payload.specular_gloss_logical_name.as_deref() {
@@ -294,7 +452,7 @@ impl CompiledAssetRuntimeLoader {
             .with_double_sided(payload.double_sided)
             .with_alpha_cutout(payload.alpha_cutout);
         if let Some(handle) = normal {
-            material = material.with_normal(handle);
+            material = material.with_normal_map(handle);
         }
         if let Some(handle) = specular_gloss {
             material = material.with_specular_gloss(handle);
@@ -344,6 +502,21 @@ fn decode_texture_format(raw: u32) -> Result<TextureFormat, CompiledAssetRuntime
         2 => Ok(TextureFormat::Rgb8),
         3 => Ok(TextureFormat::R8),
         _ => Err(CompiledAssetRuntimeError::InvalidTextureFormat(raw)),
+    }
+}
+
+fn encode_color_space(space: ColorSpace) -> u32 {
+    match space {
+        ColorSpace::Srgb => 1,
+        ColorSpace::Linear => 2,
+    }
+}
+
+fn decode_color_space(raw: u32) -> Result<ColorSpace, CompiledAssetRuntimeError> {
+    match raw {
+        1 => Ok(ColorSpace::Srgb),
+        2 => Ok(ColorSpace::Linear),
+        _ => Err(CompiledAssetRuntimeError::InvalidColorSpace(raw)),
     }
 }
 
@@ -456,11 +629,12 @@ mod tests {
         compiled_asset_path_for_logical_name, decode_compiled_material_payload,
         decode_compiled_mesh_payload, decode_compiled_texture_payload,
         encode_compiled_material_payload, encode_compiled_mesh_payload,
-        encode_compiled_texture_payload, CompiledAssetRuntimeLoader, CompiledMaterialPayload,
+        encode_compiled_texture_payload, CompiledAssetRuntimeError, CompiledAssetRuntimeLoader,
+        CompiledMaterialPayload,
     };
     use crate::assets::{
-        encode_compiled_asset, CompiledAssetBlob, CompiledAssetDependency, CompiledAssetKind,
-        CompiledAssetMetadata, MeshData, ShaderHandle, Texture, TextureFormat,
+        encode_compiled_asset, ColorSpace, CompiledAssetBlob, CompiledAssetDependency,
+        CompiledAssetKind, CompiledAssetMetadata, MeshData, ShaderHandle, Texture, TextureFormat,
     };
 
     fn unique_test_root(label: &str) -> PathBuf {
@@ -484,6 +658,56 @@ mod tests {
         fs::write(path, encode_compiled_asset(blob).unwrap()).unwrap();
     }
 
+    /// Linear-space textures must round-trip through the compiled-asset
+    /// envelope with their `ColorSpace` tag intact. Without this, sRGB
+    /// would be the silent default and every roughness / mask map would
+    /// get sRGB-decoded at sample time — a textbook PBR bug. See ADR
+    /// 0002 Q3.
+    #[test]
+    fn texture_payload_roundtrips_linear_color_space() {
+        let texture = Texture {
+            width: 2,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Linear,
+            data: vec![64, 64, 64, 255, 200, 200, 200, 255],
+        };
+        let roundtrip =
+            decode_compiled_texture_payload(&encode_compiled_texture_payload(&texture).unwrap())
+                .unwrap();
+        assert_eq!(roundtrip, texture);
+        assert_eq!(roundtrip.color_space, ColorSpace::Linear);
+    }
+
+    /// An invalid `ColorSpace` tag in the binary stream surfaces as a
+    /// typed `InvalidColorSpace` error rather than silently defaulting
+    /// to one of the variants. Production loaders rely on this to flag
+    /// corrupted or future-version assets loudly.
+    #[test]
+    fn texture_payload_rejects_unknown_color_space_tag() {
+        // Build a valid v3 texture, then tamper with the colour-space
+        // byte (it sits at offset 16: u32 version, u32 width, u32
+        // height, u32 format, u32 color_space).
+        let texture = Texture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Srgb,
+            data: vec![0, 0, 0, 255],
+        };
+        let mut bytes = encode_compiled_texture_payload(&texture).unwrap();
+        // Overwrite the color_space field (4 bytes at offset 16) with
+        // an invalid tag (99).
+        bytes[16] = 99;
+        bytes[17] = 0;
+        bytes[18] = 0;
+        bytes[19] = 0;
+        match decode_compiled_texture_payload(&bytes) {
+            Err(CompiledAssetRuntimeError::InvalidColorSpace(99)) => {}
+            other => panic!("expected InvalidColorSpace(99), got {:?}", other),
+        }
+    }
+
     #[test]
     fn payload_roundtrips_preserve_mesh_texture_and_material_content() {
         let mesh = MeshData::cube();
@@ -496,6 +720,7 @@ mod tests {
             width: 2,
             height: 2,
             format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Srgb,
             data: vec![
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ],
@@ -537,6 +762,7 @@ mod tests {
                     width: 1,
                     height: 1,
                     format: TextureFormat::Rgba8,
+                    color_space: ColorSpace::Srgb,
                     data: vec![255, 255, 255, 255],
                 })
                 .unwrap(),

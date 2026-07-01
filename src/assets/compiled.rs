@@ -14,6 +14,20 @@ pub enum CompiledAssetKind {
     Skeleton = 6,
     AnimationClip = 7,
     AudioClip = 8,
+    /// GLSL shader pair (vertex + fragment) compiled from a single
+    /// `.hshd` source file with `#shader vertex` / `#shader fragment`
+    /// section markers. See `compile_shader_asset` and ADR 0004 Q9
+    /// (M7.4.1 — shader hot-reload).
+    Shader = 9,
+    /// Scene document compiled from a `.hsc` source file. The
+    /// payload carries the canonical `.hscene` text serialization of
+    /// the scene's [`crate::editor::SceneDocument`] — round-tripping
+    /// through this textual form lets the dispatcher's hot-reload
+    /// pipeline ride the same compile-validate seam every other
+    /// asset kind uses, while keeping the on-disk authored format
+    /// human-editable. See ADR 0004 Q14 + Q14a (M7.4.1 — scene
+    /// hot-reload with entity-preserving diff).
+    Scene = 10,
 }
 
 impl CompiledAssetKind {
@@ -27,6 +41,8 @@ impl CompiledAssetKind {
             6 => Ok(Self::Skeleton),
             7 => Ok(Self::AnimationClip),
             8 => Ok(Self::AudioClip),
+            9 => Ok(Self::Shader),
+            10 => Ok(Self::Scene),
             _ => Err(CompiledAssetError::InvalidKind(raw)),
         }
     }

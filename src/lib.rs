@@ -27,9 +27,11 @@ pub use assets::{
     source_asset_is_stale, write_compiled_asset, AssetCompilerError, AssetStore, CompiledAssetBlob,
     CompiledAssetDependency, CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata,
     CompiledAssetRuntimeError, CompiledAssetRuntimeLoader, CompiledMaterialPayload, GpuMesh,
-    GpuTexture, Handle, Material, MaterialHandle, MeshData, MeshHandle, ObjError, Shader,
-    ShaderHandle, TexError, Texture, TextureFormat, TextureHandle, Vertex, COMPILED_ASSET_MAGIC,
-    COMPILED_ASSET_VERSION,
+    compute_ao_per_vertex, compute_curvature_per_vertex, ColorSpace,
+    GpuTexture, Handle, Material, MaterialHandle, MeshData, MeshHandle,
+    MeshMapAO, MeshMapAOHandle, MeshMapCurvature, MeshMapCurvatureHandle, MeshMapError, NormalMap,
+    NormalMapConvention, NormalMapHandle, ObjError, Shader, ShaderHandle, TexError,
+    Texture, TextureFormat, TextureHandle, Vertex, COMPILED_ASSET_MAGIC, COMPILED_ASSET_VERSION,
 };
 pub use ecs::{
     generate_particle_batch, generate_particle_debug_lines, ActiveCamera, ActiveDialogue,

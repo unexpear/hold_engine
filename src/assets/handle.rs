@@ -69,4 +69,27 @@ impl<T> Handle<T> {
     pub fn is_null(&self) -> bool {
         self.index == u32::MAX
     }
+
+    /// Index of the slot this handle points to in the owning
+    /// [`AssetPool<T>`]. Combined with [`Self::generation`] it
+    /// uniquely identifies a live asset.
+    ///
+    /// Public so external integrations (e.g. the hot-reload
+    /// dispatcher's downstream cache eviction in user code) can
+    /// match handles by index when generation is preserved across
+    /// `AssetStore::replace` (ADR 0004 Q6).
+    #[inline]
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Generation counter at the moment the handle was issued. A
+    /// handle with a stale generation no longer resolves through
+    /// the asset store; `AssetStore::replace` deliberately does
+    /// *not* bump the generation, so handles obtained before the
+    /// reload remain valid.
+    #[inline]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
 }

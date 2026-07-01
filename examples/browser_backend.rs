@@ -1088,10 +1088,12 @@ mod tests {
 
     #[test]
     fn bmp_preview_encoder_roundtrips_rgba_textures() {
+        use hold::ColorSpace;
         let encoded = encode_texture_as_bmp(&Texture {
             width: 2,
             height: 2,
             format: TextureFormat::Rgba8,
+            color_space: ColorSpace::Srgb,
             data: vec![
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 64,
             ],

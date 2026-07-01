@@ -1,15 +1,25 @@
 pub mod frame;
+pub mod frame_graph;
 pub mod opengl;
 pub mod opengl_shaders;
 pub mod software;
+pub mod tonemap;
 pub mod vulkan;
 
 pub use frame::{
     DrawItem, FogState, LightItem, ParticleBatch, ParticleBillboard, RenderFrame, RenderView,
     RenderViewport, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
 };
+pub use frame_graph::{
+    downsample_rgba8, AccessKind, BufferDesc, BufferUsage, ClearPass, ClosurePass,
+    DrawTexturedNormalMappedPass, DrawTexturedNormalMappedPassParams, DrawTexturedPass,
+    DrawTexturedPassParams, FrameGraph, FrameGraphBuilder, FrameGraphError, FunctionPass,
+    NoopPass, Pass, PassBuilder, PassContext, PassThumbnail, ResourceDesc, ResourceId,
+    ResourceKind, TextureDesc, TextureUsage, DEFAULT_THUMBNAIL_SIZE,
+};
 pub use opengl::OpenGLRenderer;
 pub use software::SoftwareRenderer;
+pub use tonemap::aces_tonemap_rgb;
 pub use vulkan::VulkanRenderer;
 
 use crate::assets::AssetStore;
