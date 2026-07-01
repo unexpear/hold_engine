@@ -185,6 +185,14 @@ pub struct EditorRuntimeHost {
     /// and [`Self::push_hot_reload_failure`]. See ADR 0004 Q9
     /// (M7.4.2) and Q13 for how this surface receives events.
     hot_reload_status: super::hot_reload_status::HotReloadStatus,
+
+    // ── Replay state machine (ADR 0005 — M8.0 live editor wire-up) ───────
+    /// Editor-side record/replay finite state machine. The editor
+    /// shell drives this via F-key handlers in `App::update`;
+    /// per-frame tick methods on [`super::EditorReplayState`]
+    /// capture or drive input depending on the active mode.
+    /// See `docs/adr/0005-determinism-architecture.md` Q5–Q7.
+    replay: super::EditorReplayState,
 }
 
 impl EditorRuntimeHost {
@@ -205,6 +213,7 @@ impl EditorRuntimeHost {
             redo_stack: Vec::new(),
             editor_camera: EditorCamera::new(),
             hot_reload_status: super::hot_reload_status::HotReloadStatus::default(),
+            replay: super::EditorReplayState::new(),
         };
         host.rebuild_world()?;
         // Auto-select the first entity after loading.
@@ -269,6 +278,26 @@ impl EditorRuntimeHost {
     /// opens.
     pub fn hot_reload_status_mut(&mut self) -> &mut super::hot_reload_status::HotReloadStatus {
         &mut self.hot_reload_status
+    }
+
+    // ── Replay state machine (ADR 0005 — M8.0 live editor wire-up) ───────
+
+    /// Read-only accessor for the editor's record/replay finite
+    /// state machine. The editor's status panel reads this to
+    /// render "REC" / "REPLAY" indicators alongside frame counts;
+    /// the protocol codec emits the mode for line-based bridges.
+    ///
+    /// See `docs/adr/0005-determinism-architecture.md` Q5–Q7.
+    pub fn replay(&self) -> &super::EditorReplayState {
+        &self.replay
+    }
+
+    /// Mutable accessor for the replay state machine. Called by
+    /// the editor shell's per-frame App::update to drive the
+    /// per-frame `tick_recording` / `tick_replay` methods, plus
+    /// state transitions on F-key presses.
+    pub fn replay_mut(&mut self) -> &mut super::EditorReplayState {
+        &mut self.replay
     }
 
     /// Drain a [`DispatchSummary`](crate::hot_reload::DispatchSummary)

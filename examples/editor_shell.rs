@@ -1831,6 +1831,24 @@ impl EditorShellApp {
             return;
         }
 
+        // F11 / F12: live record/replay (ADR 0005 — M8.0 wire-up).
+        // F11 toggles recording; F12 starts replay against the most
+        // recently completed recording (or surfaces a "no recording"
+        // message if none exists). The handlers consult the host's
+        // replay state machine for transitions and the action log
+        // for user-visible feedback. F-keys win even during replay
+        // (apply_recorded preserves the OS-captured F-key state for
+        // this frame because we read input *before* the per-frame
+        // replay tick overwrites it — see tick_replay below).
+        if input.key_pressed(vk::F11) {
+            self.toggle_recording();
+            return;
+        }
+        if input.key_pressed(vk::F12) {
+            self.toggle_replay();
+            return;
+        }
+
         if input.key_pressed(vk::F8) {
             match self.server.host().play_state() {
                 EditorPlayState::Editing => self.dispatch(EditorCommand::EnterPlayMode),
@@ -2056,6 +2074,195 @@ impl EditorShellApp {
     /// a project root) — the editor stays usable, the status panel
     /// just stays empty.
     ///
+    // ── Live record/replay (ADR 0005 — M8.0) ─────────────────────────────
+
+    /// F11 handler: toggle the replay state machine between
+    /// `Normal` and `Recording`. If currently replaying, stops
+    /// the replay first (replay → Normal → Recording in that
+    /// order). Surfaces the transition on the editor's action log
+    /// with the captured frame count so the developer can confirm
+    /// "I just recorded N frames."
+    fn toggle_recording(&mut self) {
+        // Reading via `replay()` keeps the pre-transition state
+        // mode visible for the log message; mutation goes through
+        // `replay_mut()` below.
+        let was_recording = self.server.host().replay().is_recording();
+        let was_replaying = self.server.host().replay().is_replaying();
+
+        if was_recording {
+            let frames = self.server.host_mut().replay_mut().stop_recording();
+            self.push_action_log(
+                EditorUiActionTone::Suggestion,
+                "Recording stopped",
+                format!("Captured {frames} frames; press F12 to replay."),
+            );
+        } else {
+            // Cancel any in-flight replay first (start_recording
+            // is the user's "fresh state" signal — replay isn't a
+            // valid sibling state).
+            if was_replaying {
+                self.server.host_mut().replay_mut().stop_replay();
+                // Restoring play_state to Editing happens implicitly:
+                // the next App::update tick observes the new replay
+                // mode and updates play_state accordingly via
+                // `sync_play_state_with_replay`.
+            }
+            // v1: seed always 0. A future "seeded RNG" milestone
+            // will pull this from the host's RNG state.
+            self.server.host_mut().replay_mut().start_recording(0);
+            self.push_action_log(
+                EditorUiActionTone::Suggestion,
+                "Recording started",
+                "F11 again to stop. Inputs are captured per-frame.",
+            );
+        }
+    }
+
+    /// F12 handler: toggle the replay state machine between
+    /// `Normal` and `Replaying`. If no recording exists, surfaces
+    /// a "no recording — press F11 first" message rather than
+    /// silently failing.
+    fn toggle_replay(&mut self) {
+        let was_replaying = self.server.host().replay().is_replaying();
+        if was_replaying {
+            self.server.host_mut().replay_mut().stop_replay();
+            self.push_action_log(
+                EditorUiActionTone::Suggestion,
+                "Replay cancelled",
+                "Press F12 again to replay from the start.",
+            );
+            return;
+        }
+
+        // Not currently replaying. Try to start.
+        let started = self.server.host_mut().replay_mut().start_replay();
+        if started {
+            // Surface the count for confirmation. last_recording
+            // is guaranteed Some(_) when start_replay returns true.
+            let count = self
+                .server
+                .host()
+                .replay()
+                .last_recording()
+                .map(|r| r.len())
+                .unwrap_or(0);
+            self.push_action_log(
+                EditorUiActionTone::Suggestion,
+                "Replay started",
+                format!("Replaying {count} frames; F12 to cancel."),
+            );
+        } else {
+            self.push_action_log(
+                EditorUiActionTone::Error,
+                "No recording available",
+                "Press F11 to start recording first; then F12 to replay.",
+            );
+        }
+    }
+
+    /// Bidirectional sync between the editor's play_state and
+    /// the replay state machine's mode. Called once per frame
+    /// from `App::update` after `tick_replay`.
+    ///
+    /// - When replay just started, set play_state to
+    ///   `ReplayingDeterministic` so the hot-reload dispatcher's
+    ///   existing replay-lock observes it (ADR 0004 Q7).
+    /// - When replay just ended (auto-finished or user-cancelled),
+    ///   restore play_state to `Editing` so reloads resume and
+    ///   the editor's "REC" / "REPLAY" indicator clears.
+    ///
+    /// Idempotent: setting the same state repeatedly is a no-op.
+    /// Recording does NOT touch play_state — recording is a
+    /// passive observer of live play, so the user's existing
+    /// Editing/Playing/Paused choice is preserved.
+    fn sync_play_state_with_replay(&mut self) {
+        let replaying = self.server.host().replay().is_replaying();
+        let play_state = self.server.host().play_state();
+        match (replaying, play_state) {
+            (true, EditorPlayState::ReplayingDeterministic) => {} // already synced
+            (true, _) => {
+                // Just entered replay: lock to ReplayingDeterministic.
+                let _previous = self
+                    .server
+                    .host_mut()
+                    .session_mut()
+                    .enter_replay_mode();
+            }
+            (false, EditorPlayState::ReplayingDeterministic) => {
+                // Just exited replay: restore to Editing.
+                self.server.host_mut().session_mut().exit_replay_mode();
+            }
+            (false, _) => {} // not replaying, not in replay state — nothing to do
+        }
+    }
+
+    /// Per-frame tick for the replay state machine. Called from
+    /// `App::update` after the F-key handlers and before the
+    /// gameplay update so the rest of the frame sees consistent
+    /// input state.
+    ///
+    /// Returns the effective input + dt the rest of the frame
+    /// should consume:
+    /// - In `Normal` mode: the live OS input + raw dt unchanged.
+    /// - In `Recording` mode: live OS input + raw dt, plus a
+    ///   side-effect of appending this frame to the recorder.
+    /// - In `Replaying` mode: a synthesized [`InputState`]
+    ///   reconstructed from the recorded frame, plus the
+    ///   recorded `dt`. When the recording exhausts, the state
+    ///   machine returns to `Normal` automatically and the
+    ///   action log gets a "replay finished" entry.
+    ///
+    /// The returned `InputState` is owned (cloned from OS input
+    /// or freshly constructed for replay) — the caller can pass
+    /// it to gameplay logic without disturbing the engine's
+    /// underlying `&InputState`.
+    fn tick_replay(&mut self, os_input: &InputState, raw_dt: f32) -> (InputState, f32) {
+        // Recording is a passive observer: capture and pass live
+        // input through unchanged.
+        if self.server.host().replay().is_recording() {
+            self.server
+                .host_mut()
+                .replay_mut()
+                .tick_recording(os_input, raw_dt);
+            return (os_input.clone(), raw_dt);
+        }
+
+        // Replay drives input + dt from the recording.
+        if self.server.host().replay().is_replaying() {
+            let mut replayed = InputState::new();
+            let outcome = self
+                .server
+                .host_mut()
+                .replay_mut()
+                .tick_replay(&mut replayed);
+            match outcome {
+                hold::ReplayTickOutcome::Replayed { dt } => {
+                    return (replayed, dt);
+                }
+                hold::ReplayTickOutcome::Finished => {
+                    // Recording exhausted on this tick. Surface
+                    // the transition; pass live OS input through
+                    // for this frame so the editor stays
+                    // responsive immediately rather than waiting
+                    // one frame.
+                    self.push_action_log(
+                        EditorUiActionTone::Suggestion,
+                        "Replay finished",
+                        "Reached end of recording; back to normal mode.",
+                    );
+                    return (os_input.clone(), raw_dt);
+                }
+                hold::ReplayTickOutcome::NotReplaying => {
+                    // Defensive: shouldn't happen given the
+                    // outer is_replaying check, but tolerate it.
+                    return (os_input.clone(), raw_dt);
+                }
+            }
+        }
+
+        (os_input.clone(), raw_dt)
+    }
+
     /// Called from `App::update` at the very top of every frame
     /// so reloads land before the editor camera tick, input
     /// processing, and the renderer; the rest of the frame sees
@@ -2114,14 +2321,38 @@ impl App for EditorShellApp {
     ) {
         // Hot-reload tick (ADR 0004 Q10). Runs before any other
         // per-frame work so reloads land at frame boundary and the
-        // rest of the update sees the post-reload state.
+        // rest of the update sees the post-reload state. Replay
+        // mode is gated inside dispatch_with_play_state — passing
+        // the host's current play_state lets the dispatcher buffer
+        // reloads while replay is recording, per Q7.
         self.tick_hot_reload();
 
-        self.server.host_mut().update_editor_camera(input, dt);
+        // Live record/replay tick (ADR 0005 — M8.0). Captures
+        // input when recording, synthesizes input from the
+        // recording when replaying. Returns the effective
+        // (input, dt) the simulation portion of the frame should
+        // see — `process_input` below still uses raw OS input
+        // for F-key handling so F12-to-cancel-replay always
+        // works regardless of what the recording captured.
+        let (effective_input, effective_dt) = self.tick_replay(input, dt);
+        // Sync the editor's play_state to ReplayingDeterministic
+        // when replay is active so the hot-reload dispatcher's
+        // existing replay-lock kicks in (ADR 0004 Q7 +
+        // ADR 0005 Q1 interaction).
+        self.sync_play_state_with_replay();
+        self.server
+            .host_mut()
+            .update_editor_camera(&effective_input, effective_dt);
 
         let height = renderer.height().max(1) as f32;
         let aspect = renderer.width() as f32 / height;
         let input_vp: Mat4 = self.server.host().active_view_proj(EDITOR_FOV_DEG, aspect);
+        // process_input deliberately reads RAW OS input — F-key
+        // shortcuts (F11/F12 record/replay, F8 play, etc.) must
+        // win over any captured F-key state in the recording.
+        // Without this carve-out, a recording that included an
+        // F12 press would re-trigger replay forever on every
+        // playback, and the user could never escape replay mode.
         self.process_input(input, renderer.width(), renderer.height(), &input_vp);
         let vp: Mat4 = self.server.host().active_view_proj(EDITOR_FOV_DEG, aspect);
 

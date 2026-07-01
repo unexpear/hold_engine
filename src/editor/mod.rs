@@ -10,6 +10,7 @@ mod host;
 pub mod hot_reload_status;
 pub mod native_ui;
 pub mod protocol;
+pub mod replay;
 mod session;
 pub mod viewport;
 
@@ -58,6 +59,7 @@ pub use protocol::{
     encode_command as encode_editor_command_protocol, encode_event as encode_editor_event_protocol,
     EditorProtocolError,
 };
+pub use replay::{EditorReplayState, ReplayMode, ReplayTickOutcome};
 pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError, SceneReloadOutcome};
 pub use viewport::{
     build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,

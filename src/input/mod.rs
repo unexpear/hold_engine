@@ -10,6 +10,13 @@ pub enum MouseButton {
 
 /// Snapshot of the complete input state for one frame.
 /// Updated by the engine before systems run.
+///
+/// `Clone` lets callers snapshot the live OS input for downstream
+/// consumers that want an owned copy (e.g. the determinism replay
+/// path in `examples/editor_shell.rs`, which needs to pass either
+/// the live input or a synthesised replayed input to gameplay code
+/// without disturbing the engine's underlying `&InputState`).
+#[derive(Debug, Clone)]
 pub struct InputState {
     keys_down: HashSet<u32>,
     keys_just_pressed: HashSet<u32>,
@@ -112,6 +119,122 @@ impl InputState {
     }
     pub fn mouse_released(&self, btn: MouseButton) -> bool {
         self.mouse_just_released.contains(&btn)
+    }
+
+    // ── Iteration accessors used by the determinism recorder ──────────────
+    //
+    // The HashSet-backed collections are encapsulated; the recorder
+    // (`crate::determinism::RecordedInput::capture`) needs to walk them
+    // to take a deterministic snapshot. Exposing iterators (rather
+    // than the HashSet itself) preserves the invariant that internal
+    // mutators stay `pub(crate)` while still letting the recorder
+    // sort the contents into a byte-stable vec at the boundary.
+    //
+    // See `docs/adr/0005-determinism-architecture.md` Q4 for the
+    // sorted-vec rationale.
+
+    /// Iterate the virtual-key codes currently held. Order is the
+    /// HashSet's hasher-randomised order; the recorder sorts on
+    /// capture for byte-stability.
+    pub fn keys_down_iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.keys_down.iter().copied()
+    }
+    /// Iterate virtual-key codes pressed this frame (leading edge).
+    pub fn keys_just_pressed_iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.keys_just_pressed.iter().copied()
+    }
+    /// Iterate virtual-key codes released this frame (trailing edge).
+    pub fn keys_just_released_iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.keys_just_released.iter().copied()
+    }
+    /// Iterate mouse buttons currently held.
+    pub fn mouse_buttons_iter(&self) -> impl Iterator<Item = MouseButton> + '_ {
+        self.mouse_buttons.iter().copied()
+    }
+    /// Iterate mouse buttons pressed this frame.
+    pub fn mouse_just_pressed_iter(&self) -> impl Iterator<Item = MouseButton> + '_ {
+        self.mouse_just_pressed.iter().copied()
+    }
+    /// Iterate mouse buttons released this frame.
+    pub fn mouse_just_released_iter(&self) -> impl Iterator<Item = MouseButton> + '_ {
+        self.mouse_just_released.iter().copied()
+    }
+
+    /// Overwrite this `InputState` with the contents of a recorded
+    /// snapshot. The replayer
+    /// (`crate::determinism::InputReplayer::tick_into`) calls this
+    /// once per replayed frame to mirror the recording's exact
+    /// per-frame state, so the simulation observes the same bytes
+    /// it observed during recording.
+    ///
+    /// Replaces every observable field; nothing carries over from
+    /// the previous frame — the recorded snapshot is the truth.
+    /// This is the load-bearing property for replay determinism
+    /// (ADR 0005 Q1: same recording → same simulation).
+    ///
+    /// `keys_down` / `keys_just_pressed` / `keys_just_released` vecs
+    /// in the snapshot may carry duplicates from a corrupt recording;
+    /// `HashSet::insert` is idempotent so duplicates fold into a
+    /// single entry. Unknown mouse-button bytes are silently
+    /// dropped so a stale recording made against an older format
+    /// version still applies partially rather than panicking.
+    pub fn apply_recorded(&mut self, input: &crate::determinism::RecordedInput) {
+        self.keys_down.clear();
+        self.keys_down.extend(input.keys_down.iter().copied());
+        self.keys_just_pressed.clear();
+        self.keys_just_pressed
+            .extend(input.keys_just_pressed.iter().copied());
+        self.keys_just_released.clear();
+        self.keys_just_released
+            .extend(input.keys_just_released.iter().copied());
+        self.mouse_pos = input.mouse_pos;
+        self.mouse_delta = input.mouse_delta;
+        self.mouse_buttons.clear();
+        self.mouse_buttons.extend(
+            input
+                .mouse_buttons
+                .iter()
+                .filter_map(|b| decode_mouse_byte(*b)),
+        );
+        self.mouse_just_pressed.clear();
+        self.mouse_just_pressed.extend(
+            input
+                .mouse_just_pressed
+                .iter()
+                .filter_map(|b| decode_mouse_byte(*b)),
+        );
+        self.mouse_just_released.clear();
+        self.mouse_just_released.extend(
+            input
+                .mouse_just_released
+                .iter()
+                .filter_map(|b| decode_mouse_byte(*b)),
+        );
+        self.mouse_wheel = input.mouse_wheel;
+    }
+}
+
+/// Decode a recorded mouse-button byte to a [`MouseButton`], mirroring
+/// the encoding in [`crate::determinism::encode_mouse_button`].
+/// Kept local to input so the `Rust` module tree stays a DAG (input
+/// depends on determinism only through `RecordedInput`, not the codec).
+fn decode_mouse_byte(byte: u8) -> Option<MouseButton> {
+    match byte {
+        0 => Some(MouseButton::Left),
+        1 => Some(MouseButton::Middle),
+        2 => Some(MouseButton::Right),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+impl InputState {
+    /// Testing helper: press a virtual-key code (moves it into
+    /// both `keys_down` and `keys_just_pressed`). Determinism-harness
+    /// fixtures use this to simulate input in
+    /// `#[cfg(test)]` code without going through the OS event pump.
+    pub fn test_press_key(&mut self, vk: u32) {
+        self.on_key_down(vk);
     }
 }
 

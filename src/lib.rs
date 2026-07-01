@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod determinism;
 pub mod ecs;
 pub mod editor;
 pub mod engine;
@@ -40,6 +41,12 @@ pub use hot_reload::{
     DispatchError, DispatchSummary, DroppedResult, ExtensionFilter, FileChange, FileChangeKind,
     FileWatcher, Generation, RawFileEvent, ReloadDispatcher, SceneReloadResult, WatcherConfig,
     WatcherError,
+};
+pub use determinism::{
+    decode_input_recording, encode_input_recording, frame_digest_from_components,
+    record_and_replay_frame_digests, DeterministicHasher, FrameDigest, InputRecorder,
+    InputRecording, InputRecordingError, InputReplayer, RecordedFrame, RecordedInput,
+    INPUT_RECORDING_FORMAT_VERSION, INPUT_RECORDING_MAGIC,
 };
 pub use ecs::{
     generate_particle_batch, generate_particle_debug_lines, ActiveCamera, ActiveDialogue,
@@ -86,10 +93,11 @@ pub use editor::{
     EditorAxis, EditorBridgeServer, EditorCamera, EditorCommand, EditorCommandError,
     EditorDrawList, EditorEntity, EditorEvent, EditorInspectorCursor, EditorIoError,
     EditorNativeUi, EditorNativeUiState, EditorPipelineError, EditorPlayState,
-    EditorProtocolError, EditorRuntimeHost, EditorSceneSession, EditorSessionError,
-    EditorUiActionLogEntry, EditorUiActionTone, EditorUiCommandPalette, EditorUiHitRegion,
-    EditorUiPaletteEntry, EditorUiPaletteEntrySource, EditorUiPanel, EditorUiPanelRegion,
-    EditorViewportGizmoHandle, EditorViewportGizmoHandleId, EditorViewportGizmoMode,
-    EditorViewportOverlay, InspectorComponent, InspectorField, InspectorValue, Project,
-    SceneBridgeError, SceneDocument, SceneReloadOutcome,
+    EditorProtocolError, EditorReplayState, EditorRuntimeHost, EditorSceneSession,
+    EditorSessionError, EditorUiActionLogEntry, EditorUiActionTone, EditorUiCommandPalette,
+    EditorUiHitRegion, EditorUiPaletteEntry, EditorUiPaletteEntrySource, EditorUiPanel,
+    EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
+    EditorViewportGizmoMode, EditorViewportOverlay, InspectorComponent, InspectorField,
+    InspectorValue, Project, ReplayMode, ReplayTickOutcome, SceneBridgeError, SceneDocument,
+    SceneReloadOutcome,
 };
