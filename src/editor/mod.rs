@@ -6,6 +6,7 @@ pub mod bridge;
 pub mod browser;
 pub mod command;
 pub mod drawlist;
+pub mod frame_inspector;
 mod host;
 pub mod hot_reload_status;
 pub mod native_ui;
@@ -45,6 +46,7 @@ pub use command::{
     EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
 };
 pub use drawlist::{generate_draw_list, EditorDrawList};
+pub use frame_inspector::{FrameInspectorPass, FrameInspectorState};
 pub use host::{DispatchApplyReport, EditorCamera, EditorRuntimeHost};
 pub use hot_reload_status::{
     HotReloadEntry, HotReloadOutcome, HotReloadStatus, DEFAULT_HOT_RELOAD_CAPACITY,

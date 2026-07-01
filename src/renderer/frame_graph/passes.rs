@@ -256,3 +256,186 @@ impl Pass for FunctionPass {
         (self.record_fn)(ctx);
     }
 }
+
+// ─── Real-scene passes (M9) ────────────────────────────────────────────────
+//
+// These four passes decompose the editor's per-frame render into stages
+// visible to the frame inspector. They pull view/batches from
+// `ctx.frame` and lean on narrower public methods on `OpenGLRenderer`
+// so each stage's output is a natural thumbnail: viewport cleared,
+// scene 3D drawn, debug overlays laid on, screen UI on top.
+//
+// A future decomposition can split `ScenePass` further (terrain vs
+// meshes vs particles) — each such split lands as an additional
+// `Pass` here without touching the shell's graph construction shape.
+//
+// See ADR 0002 Q8 (frame inspector) and ADR 0003 Pillar 4
+// (debuggability).
+
+/// Clears the framebuffer and sets the viewport rectangle from
+/// `ctx.frame.primary_view()`. If the frame has no primary view, the
+/// pass is a no-op — the editor renders "empty scene" without
+/// crashing.
+///
+/// Always the first scene pass; every downstream scene pass writes
+/// after it, so wiring a shared "backbuffer" `ResourceId` here gives
+/// the topological sort a stable production edge.
+pub struct ClearAndViewportPass {
+    pub name: String,
+    pub target: Option<ResourceId>,
+}
+
+impl ClearAndViewportPass {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            target: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: ResourceId) -> Self {
+        self.target = Some(target);
+        self
+    }
+}
+
+impl Pass for ClearAndViewportPass {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn declare(&self, builder: &mut PassBuilder) {
+        if let Some(id) = self.target {
+            builder.write(id);
+        }
+    }
+
+    fn record(&self, ctx: &mut PassContext) {
+        if let Some(view) = ctx.frame.primary_view() {
+            ctx.renderer.clear_and_setup_view(view);
+        }
+    }
+}
+
+/// Draws the 3D scene for the primary view: terrain, meshes,
+/// vegetation, water, and particle batches. Encapsulates the existing
+/// [`crate::renderer::opengl::OpenGLRenderer::draw_submitted_view`]
+/// call so the M9 inspector shows a single "3D scene" thumbnail
+/// after the clear — future work splits this into finer
+/// terrain/mesh/water/particle passes once each has its own
+/// resource-typed dependency story.
+pub struct ScenePass {
+    pub name: String,
+    pub target: Option<ResourceId>,
+}
+
+impl ScenePass {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            target: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: ResourceId) -> Self {
+        self.target = Some(target);
+        self
+    }
+}
+
+impl Pass for ScenePass {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn declare(&self, builder: &mut PassBuilder) {
+        if let Some(id) = self.target {
+            builder.read_write(id);
+        }
+    }
+
+    fn record(&self, ctx: &mut PassContext) {
+        if let Some(view) = ctx.frame.primary_view() {
+            ctx.renderer.draw_submitted_view(ctx.assets, view);
+        }
+    }
+}
+
+/// Draws the frame's debug lines against the primary view's VP.
+/// Runs after the scene so gizmos land on top; if the frame has no
+/// primary view, the pass is a no-op.
+pub struct DebugLinesPass {
+    pub name: String,
+    pub target: Option<ResourceId>,
+}
+
+impl DebugLinesPass {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            target: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: ResourceId) -> Self {
+        self.target = Some(target);
+        self
+    }
+}
+
+impl Pass for DebugLinesPass {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn declare(&self, builder: &mut PassBuilder) {
+        if let Some(id) = self.target {
+            builder.read_write(id);
+        }
+    }
+
+    fn record(&self, ctx: &mut PassContext) {
+        if let Some(view) = ctx.frame.primary_view() {
+            let vp = view.projection * view.view;
+            ctx.renderer.render_debug_lines(&ctx.frame.debug_lines, &vp);
+        }
+    }
+}
+
+/// Draws the frame's screen-space quads. Always runs last of the
+/// scene passes so editor chrome lands on top of both the 3D scene
+/// and any debug overlays.
+pub struct ScreenQuadsPass {
+    pub name: String,
+    pub target: Option<ResourceId>,
+}
+
+impl ScreenQuadsPass {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            target: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: ResourceId) -> Self {
+        self.target = Some(target);
+        self
+    }
+}
+
+impl Pass for ScreenQuadsPass {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn declare(&self, builder: &mut PassBuilder) {
+        if let Some(id) = self.target {
+            builder.read_write(id);
+        }
+    }
+
+    fn record(&self, ctx: &mut PassContext) {
+        ctx.renderer.render_screen_quads(&ctx.frame.screen_quads);
+    }
+}

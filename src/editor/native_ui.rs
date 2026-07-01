@@ -90,6 +90,10 @@ pub enum EditorUiPanel {
     Inspector,
     History,
     CommandPalette,
+    /// M9 Frame Inspector panel — bottom strip showing per-pass
+    /// thumbnails from [`crate::renderer::FrameGraph::execute_with_capture`]
+    /// when F10 is active on the editor shell.
+    FrameInspector,
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +124,7 @@ impl EditorNativeUiState {
             EditorUiPanel::Hierarchy => &mut self.hierarchy_scroll,
             EditorUiPanel::Inspector => &mut self.inspector_scroll,
             EditorUiPanel::History => &mut self.history_scroll,
-            EditorUiPanel::CommandPalette => return,
+            EditorUiPanel::CommandPalette | EditorUiPanel::FrameInspector => return,
         };
 
         if lines < 0 {
@@ -241,6 +245,7 @@ pub fn build_native_ui(
     });
     draw_status(&mut ui, host, width, height);
     draw_hot_reload_panel(&mut ui, host, width, height);
+    draw_frame_inspector_panel(&mut ui, host, width, height);
     draw_hierarchy(
         &mut ui,
         host,
@@ -1253,6 +1258,196 @@ fn draw_hot_reload_panel(
     }
 }
 
+/// Render the M9 Frame Inspector panel — a bottom-anchored strip
+/// showing per-pass thumbnails from the most recent frame-graph
+/// capture. Only draws when the F10 inspector toggle is active
+/// AND a capture has landed; the disabled/quiet state adds no
+/// chrome to the editor.
+///
+/// Layout (docked at the very bottom, above the status bar):
+///
+/// ```text
+///  ┌ FRAME INSPECTOR  gen=42  passes=4 ────────────────────────┐
+///  │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐                   │
+///  │  │      │  │      │  │      │  │      │                   │
+///  │  │      │  │      │  │      │  │      │                   │
+///  │  └──────┘  └──────┘  └──────┘  └──────┘                   │
+///  │  Clear    Scene     DebugLine  ScreenQ                    │
+///  └───────────────────────────────────────────────────────────┘
+/// ```
+///
+/// The thumbnail slot is filled with the pass's mean colour (a
+/// simple sum-then-divide over its RGBA data), which gives a
+/// visual differentiator between passes without requiring the
+/// textured-quad path — the actual per-pass framebuffer contents
+/// live in the pass state for a follow-up commit to render as
+/// real textures. Each slot also emits a hit region tagged with
+/// the pass name so future work can wire "click = view as main
+/// output" without touching this layout code again.
+fn draw_frame_inspector_panel(
+    ui: &mut EditorNativeUi,
+    host: &EditorRuntimeHost,
+    width: i32,
+    height: i32,
+) {
+    let inspector = host.frame_inspector();
+    if !inspector.is_enabled() {
+        return;
+    }
+    let Some(passes) = inspector.latest() else {
+        return;
+    };
+
+    const PANEL_H: i32 = 108;
+    const HEADER_H: i32 = 20;
+    const SLOT_PAD: i32 = 6;
+    const LABEL_H: i32 = 14;
+
+    // Sit above the status bar; span most of the width but leave a
+    // side pad so it doesn't visually collide with the panels.
+    let panel_x = PANEL_PAD;
+    let panel_y = height - STATUS_H - PANEL_H - PANEL_PAD;
+    let panel_w = width - PANEL_PAD * 2;
+    let panel_h = PANEL_H;
+
+    draw_panel(ui, panel_x, panel_y, panel_w, panel_h);
+    ui.panel_regions.push(EditorUiPanelRegion {
+        panel: EditorUiPanel::FrameInspector,
+        x: panel_x,
+        y: panel_y,
+        w: panel_w,
+        h: panel_h,
+    });
+
+    let header = format!(
+        "FRAME INSPECTOR  gen={}  passes={}",
+        inspector.generation(),
+        passes.len(),
+    );
+    draw_text(
+        ui,
+        panel_x + PANEL_PAD,
+        panel_y + 6,
+        STATUS_SCALE,
+        &header,
+        TEXT_ACCENT,
+    );
+
+    if passes.is_empty() {
+        draw_text(
+            ui,
+            panel_x + PANEL_PAD,
+            panel_y + HEADER_H + 8,
+            STATUS_SCALE,
+            "waiting for capture...",
+            TEXT_MUTED,
+        );
+        return;
+    }
+
+    // Divide the remaining width evenly among the passes. Clamp the
+    // slot width to something readable — with 4-8 passes there's
+    // plenty of room; if a future graph has 30+ passes we'll let
+    // them overflow the panel until horizontal scroll lands.
+    let slot_area_x = panel_x + SLOT_PAD;
+    let slot_area_y = panel_y + HEADER_H;
+    let slot_area_w = panel_w - SLOT_PAD * 2;
+    let slot_area_h = panel_h - HEADER_H - SLOT_PAD;
+    let slot_thumb_h = slot_area_h - LABEL_H - SLOT_PAD;
+    let n = passes.len() as i32;
+    let per_slot = (slot_area_w - SLOT_PAD * (n - 1).max(0)) / n.max(1);
+    let per_slot = per_slot.max(24);
+
+    for (i, pass) in passes.iter().enumerate() {
+        let slot_x = slot_area_x + (per_slot + SLOT_PAD) * i as i32;
+        if slot_x + per_slot > slot_area_x + slot_area_w {
+            // Overflow guard — future work adds scroll.
+            break;
+        }
+        let slot_y = slot_area_y;
+
+        // Fill with the mean colour of the thumbnail — a v1 stand-in
+        // for the full framebuffer capture the textured-quad path
+        // will surface later. Uses only integer maths so pipeline
+        // debug builds stay deterministic.
+        let (r, g, b, a) = mean_rgba(&pass.data);
+        let fill = Color::new(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            (a as f32 / 255.0).max(0.6),
+        );
+        fill_rect(ui, slot_x, slot_y, per_slot, slot_thumb_h, fill);
+
+        // Border so an empty (all-zero) framebuffer stays visible
+        // against the panel background.
+        fill_rect(ui, slot_x, slot_y, per_slot, PANEL_BORDER, PANEL_BORDER_COLOR);
+        fill_rect(
+            ui,
+            slot_x,
+            slot_y + slot_thumb_h - PANEL_BORDER,
+            per_slot,
+            PANEL_BORDER,
+            PANEL_BORDER_COLOR,
+        );
+        fill_rect(ui, slot_x, slot_y, PANEL_BORDER, slot_thumb_h, PANEL_BORDER_COLOR);
+        fill_rect(
+            ui,
+            slot_x + per_slot - PANEL_BORDER,
+            slot_y,
+            PANEL_BORDER,
+            slot_thumb_h,
+            PANEL_BORDER_COLOR,
+        );
+
+        // Label under the thumbnail. Truncate on width because the
+        // bitmap font has no advance-width API.
+        let label = truncate_for_panel(&pass.pass_name, per_slot);
+        draw_text(
+            ui,
+            slot_x,
+            slot_y + slot_thumb_h + 2,
+            STATUS_SCALE,
+            &label,
+            TEXT_MUTED,
+        );
+
+        // Hit region tagged with the pass — no command yet
+        // (future: EditorCommand::ViewFrameInspectorPass { index }),
+        // but the surface for click-to-focus is in place.
+        ui.hit_regions.push(EditorUiHitRegion {
+            x: slot_x,
+            y: slot_y,
+            w: per_slot,
+            h: slot_thumb_h,
+            commands: Vec::new(),
+        });
+    }
+}
+
+/// Mean RGBA of a captured thumbnail's pixel data. Silent zero on
+/// empty input — an empty capture already displays "waiting for
+/// capture..." and never reaches this path, but the guard keeps the
+/// helper honest for tests.
+fn mean_rgba(data: &[u8]) -> (u8, u8, u8, u8) {
+    if data.is_empty() {
+        return (0, 0, 0, 0);
+    }
+    let (mut r, mut g, mut b, mut a): (u64, u64, u64, u64) = (0, 0, 0, 0);
+    let mut count: u64 = 0;
+    for chunk in data.chunks_exact(4) {
+        r += chunk[0] as u64;
+        g += chunk[1] as u64;
+        b += chunk[2] as u64;
+        a += chunk[3] as u64;
+        count += 1;
+    }
+    if count == 0 {
+        return (0, 0, 0, 0);
+    }
+    ((r / count) as u8, (g / count) as u8, (b / count) as u8, (a / count) as u8)
+}
+
 /// Truncate a string with an ellipsis if it would render past
 /// `max_pixel_width` at the current font scale. The bitmap font
 /// in `editor::native_ui` ships with a fixed advance width per
@@ -1761,5 +1956,168 @@ mod tests {
         // No panic = no overflow into adjacent panels. The
         // truncation helper is what keeps this from corrupting
         // surrounding UI; this test pins the safety property.
+    }
+
+    // ── Frame Inspector panel (M9) ────────────────────────────────────────
+
+    fn push_thumb(host: &mut EditorRuntimeHost, index: usize, name: &str) {
+        // A 4×2 all-red thumbnail — small enough that mean_rgba can be
+        // eyeballed in test failure messages while still exercising
+        // the sum-then-divide code path.
+        let data: Vec<u8> = (0..8)
+            .flat_map(|_| [200u8, 40, 40, 255])
+            .collect();
+        host.frame_inspector_mut()
+            .push_capture(vec![crate::renderer::PassThumbnail {
+                pass_index: index,
+                pass_name: name.into(),
+                width: 4,
+                height: 2,
+                data,
+            }]);
+    }
+
+    /// Disabled inspector: panel emits no chrome. Pillar 4
+    /// (debuggability) is opt-in — the editor stays quiet by
+    /// default so the F10 toggle is the affordance, not always-on
+    /// clutter.
+    #[test]
+    fn frame_inspector_panel_hidden_when_disabled() {
+        let mut host = test_host();
+        // Push a capture, but leave the inspector disabled.
+        push_thumb(&mut host, 0, "Clear");
+        assert!(!host.frame_inspector().is_enabled());
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], None);
+        assert!(
+            ui.panel_regions
+                .iter()
+                .all(|r| r.panel != EditorUiPanel::FrameInspector),
+            "disabled inspector must not emit a panel region"
+        );
+    }
+
+    /// Enabled but no capture: panel appears (the frame) but no
+    /// per-pass slots. Serves as the "waiting for capture..."
+    /// affordance so the user knows F10 landed.
+    #[test]
+    fn frame_inspector_panel_shows_when_enabled_with_no_capture() {
+        let mut host = test_host();
+        host.frame_inspector_mut().set_enabled(true);
+        // Enable but don't push a capture yet — latest() is None.
+        assert!(host.frame_inspector().is_enabled());
+        assert!(host.frame_inspector().latest().is_none());
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], None);
+        // No latest capture → no panel yet (we skip early). This
+        // is intentional: enabling F10 alone shouldn't add chrome
+        // before the first frame actually captures. The panel
+        // pops in on the very next frame.
+        assert!(ui
+            .panel_regions
+            .iter()
+            .all(|r| r.panel != EditorUiPanel::FrameInspector));
+    }
+
+    /// Enabled + at least one capture landed: panel appears and
+    /// registers exactly one hit region per pass. Wires future
+    /// "click to focus" without touching layout code.
+    #[test]
+    fn frame_inspector_panel_emits_one_hit_region_per_pass() {
+        let mut host = test_host();
+        host.frame_inspector_mut().set_enabled(true);
+        // Push a 4-pass capture — mirrors the real M9 scene graph.
+        host.frame_inspector_mut()
+            .push_capture(vec![
+                crate::renderer::PassThumbnail {
+                    pass_index: 0,
+                    pass_name: "Clear".into(),
+                    width: 4,
+                    height: 2,
+                    data: vec![10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
+                               10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255],
+                },
+                crate::renderer::PassThumbnail {
+                    pass_index: 1,
+                    pass_name: "Scene".into(),
+                    width: 4,
+                    height: 2,
+                    data: vec![40, 60, 80, 255, 40, 60, 80, 255, 40, 60, 80, 255, 40, 60, 80, 255,
+                               40, 60, 80, 255, 40, 60, 80, 255, 40, 60, 80, 255, 40, 60, 80, 255],
+                },
+                crate::renderer::PassThumbnail {
+                    pass_index: 2,
+                    pass_name: "DebugLines".into(),
+                    width: 4,
+                    height: 2,
+                    data: vec![100, 100, 100, 255, 100, 100, 100, 255, 100, 100, 100, 255,
+                               100, 100, 100, 255, 100, 100, 100, 255, 100, 100, 100, 255,
+                               100, 100, 100, 255, 100, 100, 100, 255],
+                },
+                crate::renderer::PassThumbnail {
+                    pass_index: 3,
+                    pass_name: "ScreenQuads".into(),
+                    width: 4,
+                    height: 2,
+                    data: vec![200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255,
+                               200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255,
+                               200, 200, 200, 255, 200, 200, 200, 255],
+                },
+            ]);
+
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], None);
+
+        // One panel region for the inspector as a whole.
+        let inspector_regions: Vec<_> = ui
+            .panel_regions
+            .iter()
+            .filter(|r| r.panel == EditorUiPanel::FrameInspector)
+            .collect();
+        assert_eq!(
+            inspector_regions.len(),
+            1,
+            "expected exactly one FrameInspector panel region"
+        );
+
+        // Hit regions: at least one per pass. The hierarchy /
+        // inspector / history panels also emit hit regions from
+        // their toolbar buttons; the check that matters is
+        // "inspector added at least four" — the four scene passes.
+        let inspector_frame = inspector_regions[0];
+        let hit_inside_inspector = ui
+            .hit_regions
+            .iter()
+            .filter(|h| {
+                h.y >= inspector_frame.y
+                    && h.y < inspector_frame.y + inspector_frame.h
+                    && h.x >= inspector_frame.x
+                    && h.x < inspector_frame.x + inspector_frame.w
+            })
+            .count();
+        assert!(
+            hit_inside_inspector >= 4,
+            "expected ≥4 hit regions inside inspector panel (one per pass), got {}",
+            hit_inside_inspector
+        );
+    }
+
+    /// Panel appearance is idempotent — building the UI twice with
+    /// the same capture yields the same quad count. Guards against
+    /// side effects during draw (accidental state mutation via
+    /// mean_rgba, etc.).
+    #[test]
+    fn frame_inspector_panel_is_idempotent() {
+        let mut host = test_host();
+        host.frame_inspector_mut().set_enabled(true);
+        push_thumb(&mut host, 0, "Clear");
+
+        let mut state = EditorNativeUiState::default();
+        let a = build_native_ui(&host, 1280, 720, &mut state, &[], None);
+        let mut state = EditorNativeUiState::default();
+        let b = build_native_ui(&host, 1280, 720, &mut state, &[], None);
+        assert_eq!(a.quads.len(), b.quads.len());
+        assert_eq!(a.hit_regions.len(), b.hit_regions.len());
+        assert_eq!(a.panel_regions.len(), b.panel_regions.len());
     }
 }

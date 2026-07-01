@@ -292,6 +292,7 @@ pub mod vk {
     pub const F7: u32 = 0x76;
     pub const F8: u32 = 0x77;
     pub const F9: u32 = 0x78;
+    pub const F10: u32 = 0x79;
     pub const F11: u32 = 0x7A;
     pub const F12: u32 = 0x7B;
     // Letters: just cast b'A'..=b'Z' as u32 directly (Win32 uses ASCII).

@@ -383,6 +383,25 @@ pub fn encode_event(event: &EditorEvent) -> String {
         EditorEvent::RuntimeSliceUpdated { path } => {
             format!("evt|RuntimeSliceUpdated|{}", escape_token(path))
         }
+        EditorEvent::FrameCaptured { generation, passes } => {
+            // Serialize as generation|count|(index|name|w|h)*. Pixel
+            // data intentionally does not travel over the line
+            // protocol — bridge clients that want thumbnails fetch
+            // through a future dedicated channel (ADR 0002 Q8's frame
+            // inspector, M9 follow-up).
+            let mut out = format!("evt|FrameCaptured|{}|{}", generation, passes.len());
+            for p in passes {
+                out.push('|');
+                out.push_str(&p.index.to_string());
+                out.push('|');
+                out.push_str(&escape_token(&p.name));
+                out.push('|');
+                out.push_str(&p.width.to_string());
+                out.push('|');
+                out.push_str(&p.height.to_string());
+            }
+            out
+        }
     }
 }
 
@@ -459,6 +478,29 @@ pub fn decode_event(message: &str) -> Result<EditorEvent, EditorProtocolError> {
                 logical_name: tokens[3].clone(),
                 error: tokens[4].clone(),
             })
+        }
+        "FrameCaptured" => {
+            // evt|FrameCaptured|gen|count|(index|name|w|h)*
+            if tokens.len() < 4 {
+                return Err(invalid_message(
+                    "FrameCaptured requires at least gen and count",
+                ));
+            }
+            let generation = parse_u64(&tokens[2])?;
+            let count = parse_usize(&tokens[3])?;
+            let expected = 4 + count * 4;
+            expect_len(tokens.as_slice(), expected)?;
+            let mut passes = Vec::with_capacity(count);
+            for i in 0..count {
+                let base = 4 + i * 4;
+                passes.push(super::FrameInspectorPass {
+                    index: parse_u32(&tokens[base])?,
+                    name: tokens[base + 1].clone(),
+                    width: parse_u32(&tokens[base + 2])?,
+                    height: parse_u32(&tokens[base + 3])?,
+                });
+            }
+            Ok(EditorEvent::FrameCaptured { generation, passes })
         }
         _ => Err(invalid_token(kind, "unknown event kind")),
     }
@@ -641,6 +683,12 @@ fn parse_u32(token: &str) -> Result<u32, EditorProtocolError> {
     token
         .parse::<u32>()
         .map_err(|_| invalid_token(token, "expected unsigned integer"))
+}
+
+fn parse_usize(token: &str) -> Result<usize, EditorProtocolError> {
+    token
+        .parse::<usize>()
+        .map_err(|_| invalid_token(token, "expected non-negative count"))
 }
 
 fn parse_u8(token: &str) -> Result<u8, EditorProtocolError> {
@@ -1052,5 +1100,112 @@ mod tests {
         assert!(decode_event("evt|AssetInvalidated|Texture|7").is_err());
         // Non-numeric handle_index.
         assert!(decode_event("evt|AssetInvalidated|Texture|seven|name").is_err());
+    }
+
+    /// `FrameCaptured` round-trips a realistic 4-pass capture — the
+    /// exact shape the M9 scene graph produces. Preserves pass
+    /// ordering, generation counter, and dimensions.
+    #[test]
+    fn frame_captured_event_roundtrips() {
+        let original = EditorEvent::FrameCaptured {
+            generation: 42,
+            passes: vec![
+                super::super::FrameInspectorPass {
+                    index: 0,
+                    name: "Clear".into(),
+                    width: 128,
+                    height: 72,
+                },
+                super::super::FrameInspectorPass {
+                    index: 1,
+                    name: "Scene".into(),
+                    width: 128,
+                    height: 72,
+                },
+                super::super::FrameInspectorPass {
+                    index: 2,
+                    name: "DebugLines".into(),
+                    width: 128,
+                    height: 72,
+                },
+                super::super::FrameInspectorPass {
+                    index: 3,
+                    name: "ScreenQuads".into(),
+                    width: 128,
+                    height: 72,
+                },
+            ],
+        };
+        let encoded = encode_event(&original);
+        let decoded = decode_event(&encoded).unwrap();
+        match decoded {
+            EditorEvent::FrameCaptured { generation, passes } => {
+                assert_eq!(generation, 42);
+                assert_eq!(passes.len(), 4);
+                assert_eq!(passes[0].name, "Clear");
+                assert_eq!(passes[1].name, "Scene");
+                assert_eq!(passes[2].name, "DebugLines");
+                assert_eq!(passes[3].name, "ScreenQuads");
+                assert_eq!(passes[3].index, 3);
+                assert_eq!(passes[3].width, 128);
+                assert_eq!(passes[3].height, 72);
+            }
+            other => panic!("expected FrameCaptured, got {:?}", other),
+        }
+    }
+
+    /// `FrameCaptured` with zero passes is a legitimate wire value —
+    /// the graph compiled with no passes (edge case) still emits an
+    /// event so bridge clients can update their generation counter.
+    #[test]
+    fn frame_captured_zero_passes_roundtrips() {
+        let original = EditorEvent::FrameCaptured {
+            generation: 7,
+            passes: Vec::new(),
+        };
+        let encoded = encode_event(&original);
+        let decoded = decode_event(&encoded).unwrap();
+        match decoded {
+            EditorEvent::FrameCaptured { generation, passes } => {
+                assert_eq!(generation, 7);
+                assert!(passes.is_empty());
+            }
+            other => panic!("expected FrameCaptured, got {:?}", other),
+        }
+    }
+
+    /// Pass names may contain the pipe delimiter (highly unlikely for
+    /// pass names but the codec must handle it). Escape layer keeps
+    /// the boundary honest.
+    #[test]
+    fn frame_captured_pass_names_survive_escape_chars() {
+        let original = EditorEvent::FrameCaptured {
+            generation: 1,
+            passes: vec![super::super::FrameInspectorPass {
+                index: 0,
+                name: "Weird|Name\\With\nCharacters".into(),
+                width: 128,
+                height: 72,
+            }],
+        };
+        let encoded = encode_event(&original);
+        let decoded = decode_event(&encoded).unwrap();
+        match decoded {
+            EditorEvent::FrameCaptured { passes, .. } => {
+                assert_eq!(passes[0].name, "Weird|Name\\With\nCharacters");
+            }
+            other => panic!("expected FrameCaptured, got {:?}", other),
+        }
+    }
+
+    /// Decoder rejects a `FrameCaptured` where the count doesn't
+    /// match the number of pass records that follow — surfaces a
+    /// bug in the encoder rather than silently truncating the tail.
+    #[test]
+    fn frame_captured_decode_rejects_count_mismatch() {
+        // Claims 2 passes but only supplies one.
+        assert!(decode_event("evt|FrameCaptured|1|2|0|Clear|128|72").is_err());
+        // Claims 0 passes but supplies trailing tokens.
+        assert!(decode_event("evt|FrameCaptured|1|0|0|Clear|128|72").is_err());
     }
 }

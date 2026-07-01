@@ -683,10 +683,14 @@ impl TexturedScene {
             .compile()
             .expect("frame graph compile is infallible for this scene");
 
+        // The textured_scene example predates the M9 scene-passes; its
+        // passes carry all their draw data inline, so an empty
+        // RenderFrame is enough to satisfy the API contract.
+        let empty_frame = hold::RenderFrame::default();
         if self.capture_next_frame {
             self.capture_next_frame = false;
             let (tw, th) = DEFAULT_THUMBNAIL_SIZE;
-            let thumbs = graph.execute_with_capture(renderer, &self.assets, tw, th);
+            let thumbs = graph.execute_with_capture(renderer, &self.assets, &empty_frame, tw, th);
             println!(
                 "[textured] captured {} per-pass thumbnails ({}×{}):",
                 thumbs.len(),
@@ -718,7 +722,7 @@ impl TexturedScene {
                 );
             }
         } else {
-            graph.execute(renderer, &self.assets);
+            graph.execute(renderer, &self.assets, &empty_frame);
         }
     }
 }

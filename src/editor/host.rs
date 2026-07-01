@@ -186,6 +186,14 @@ pub struct EditorRuntimeHost {
     /// (M7.4.2) and Q13 for how this surface receives events.
     hot_reload_status: super::hot_reload_status::HotReloadStatus,
 
+    // ── Frame inspector (ADR 0002 Q8 / ADR 0003 Pillar 4 — M9) ───────────
+    /// Latest per-pass thumbnail capture from the frame graph, plus
+    /// the F10-driven enable flag and a monotonic generation counter.
+    /// The native UI reads this to render the Frame Inspector panel;
+    /// the editor bridge codec drops the pixels and ships the
+    /// metadata as [`super::EditorEvent::FrameCaptured`].
+    frame_inspector: super::FrameInspectorState,
+
     // ── Replay state machine (ADR 0005 — M8.0 live editor wire-up) ───────
     /// Editor-side record/replay finite state machine. The editor
     /// shell drives this via F-key handlers in `App::update`;
@@ -213,6 +221,7 @@ impl EditorRuntimeHost {
             redo_stack: Vec::new(),
             editor_camera: EditorCamera::new(),
             hot_reload_status: super::hot_reload_status::HotReloadStatus::default(),
+            frame_inspector: super::FrameInspectorState::new(),
             replay: super::EditorReplayState::new(),
         };
         host.rebuild_world()?;
@@ -278,6 +287,25 @@ impl EditorRuntimeHost {
     /// opens.
     pub fn hot_reload_status_mut(&mut self) -> &mut super::hot_reload_status::HotReloadStatus {
         &mut self.hot_reload_status
+    }
+
+    // ── Frame inspector (M9) ──────────────────────────────────────────────
+
+    /// Read-only accessor for the frame inspector state. Read by the
+    /// native UI's `draw_frame_inspector_panel` and by the editor
+    /// bridge codec that emits [`super::EditorEvent::FrameCaptured`]
+    /// when a capture lands.
+    pub fn frame_inspector(&self) -> &super::FrameInspectorState {
+        &self.frame_inspector
+    }
+
+    /// Mutable accessor for the frame inspector state. The editor
+    /// shell reads/writes this every frame: F10 flips
+    /// [`super::FrameInspectorState::toggle_enabled`], and when
+    /// enabled the shell pushes each capture via
+    /// [`super::FrameInspectorState::push_capture`].
+    pub fn frame_inspector_mut(&mut self) -> &mut super::FrameInspectorState {
+        &mut self.frame_inspector
     }
 
     // ── Replay state machine (ADR 0005 — M8.0 live editor wire-up) ───────

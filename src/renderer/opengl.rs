@@ -7,8 +7,9 @@
 //! uploading RGBA8 textures, and issuing indexed draw calls.
 
 use super::{
-    opengl_shaders, Color, DebugLine, DrawItem, LightItem, ParticleBatch, RenderFrame, RenderView,
-    Renderer, ScreenQuad, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
+    opengl_shaders, Color, DebugLine, DrawItem, LightItem, ParticleBatch, PassThumbnail,
+    RenderFrame, RenderView, Renderer, ScreenQuad, TerrainBatch, TerrainPatchItem, VegetationBatch,
+    WaterBatch,
 };
 use crate::assets::mesh::{MeshData, Vertex};
 use crate::assets::types::{
@@ -674,6 +675,15 @@ pub struct OpenGLRenderer {
     frame_program_cache: HashMap<ShaderHandle, GLuint>,
     terrain_patch_mesh_cache: HashMap<TerrainPatchMeshKey, GpuMesh>,
     unit_plane_mesh: Option<GpuMesh>,
+    /// Compiled scene frame graph (M9 — ADR 0002 Q8). Built once at
+    /// construction and reused every frame; `Option` because
+    /// [`Renderer::submit_frame`] takes the graph out via
+    /// `Option::take`, executes it, then puts it back — Rust's borrow
+    /// checker would reject `graph.execute(&mut self, ...)` on a plain
+    /// field otherwise. If graph compile ever failed at construction,
+    /// this is `None` and `submit_frame` falls back to direct
+    /// method calls.
+    scene_frame_graph: Option<super::FrameGraph>,
 }
 
 impl OpenGLRenderer {
@@ -771,6 +781,7 @@ impl OpenGLRenderer {
                 frame_program_cache: HashMap::new(),
                 terrain_patch_mesh_cache: HashMap::new(),
                 unit_plane_mesh: None,
+                scene_frame_graph: build_scene_frame_graph().compile().ok(),
             }
         }
     }
@@ -924,7 +935,34 @@ impl OpenGLRenderer {
         mesh
     }
 
-    fn draw_submitted_view(&mut self, assets: &AssetStore, view: &RenderView) {
+    /// Direct-call fallback for [`<Self as Renderer>::submit_frame`] when
+    /// the scene frame graph failed to build at construction. Mirrors the
+    /// pre-M9 render path so a compile failure never breaks the editor.
+    fn submit_frame_direct(&mut self, assets: &AssetStore, frame: &RenderFrame) {
+        if let Some(view) = frame.primary_view() {
+            self.clear_and_setup_view(view);
+            self.draw_submitted_view(assets, view);
+            let vp = view.projection * view.view;
+            self.render_debug_lines(&frame.debug_lines, &vp);
+        } else {
+            unsafe {
+                (self.gl.viewport)(0, 0, self.width as GLsizei, self.height as GLsizei);
+            }
+            self.clear(Color::BLACK);
+        }
+        unsafe {
+            (self.gl.viewport)(0, 0, self.width as GLsizei, self.height as GLsizei);
+        }
+        self.render_screen_quads(&frame.screen_quads);
+    }
+
+    /// Configure the OpenGL viewport rectangle from a [`RenderView`] and
+    /// clear the framebuffer with its clear colour. Split out of
+    /// [`Self::draw_submitted_view`] so the frame graph's
+    /// `ClearAndViewportPass` (M9) can run this stage independently and
+    /// the frame inspector captures a "cleared but empty" thumbnail
+    /// before the scene draw layers on top.
+    pub fn clear_and_setup_view(&mut self, view: &RenderView) {
         unsafe {
             (self.gl.viewport)(
                 view.viewport.x as GLint,
@@ -933,9 +971,18 @@ impl OpenGLRenderer {
                 view.viewport.height as GLsizei,
             );
         }
-
         self.clear(view.clear_color);
+    }
 
+    /// Draw the 3D scene content for a [`RenderView`]: terrain, meshes,
+    /// vegetation, water, and particle batches. Assumes the caller has
+    /// already cleared and set the viewport via
+    /// [`Self::clear_and_setup_view`]; the frame graph's
+    /// `ClearAndViewportPass` fulfils that precondition when the scene
+    /// is driven through `execute` / `execute_with_capture`, and
+    /// [`<Self as Renderer>::submit_frame`] does it inline for callers
+    /// that haven't migrated yet.
+    pub fn draw_submitted_view(&mut self, assets: &AssetStore, view: &RenderView) {
         let light = view
             .lights
             .first()
@@ -1938,21 +1985,42 @@ impl Renderer for OpenGLRenderer {
     }
 
     fn submit_frame(&mut self, assets: &AssetStore, frame: &RenderFrame) {
-        if let Some(view) = frame.primary_view() {
-            self.draw_submitted_view(assets, view);
-            let vp = view.projection * view.view;
-            self.render_debug_lines(&frame.debug_lines, &vp);
+        // Route through the M9 scene frame graph so every editor frame
+        // exercises the same pass topology the inspector captures.
+        // See ADR 0002 Q8 (frame graph as a typed node graph) and ADR
+        // 0003 Pillar 4 (built-in frame inspector) for the direction.
+        //
+        // The take/execute/put-back dance sidesteps a self borrow
+        // conflict: `graph.execute(self, ...)` needs `&mut self`, but
+        // `self.scene_frame_graph.execute(...)` also borrows `self`
+        // via the field access. Taking the Option out gives the graph
+        // an owned handle for the duration of the call.
+        if let Some(graph) = self.scene_frame_graph.take() {
+            graph.execute(self, assets, frame);
+            self.scene_frame_graph = Some(graph);
         } else {
-            unsafe {
-                (self.gl.viewport)(0, 0, self.width as GLsizei, self.height as GLsizei);
-            }
-            self.clear(Color::BLACK);
+            self.submit_frame_direct(assets, frame);
         }
+    }
 
-        unsafe {
-            (self.gl.viewport)(0, 0, self.width as GLsizei, self.height as GLsizei);
+    fn submit_frame_capturing(
+        &mut self,
+        assets: &AssetStore,
+        frame: &RenderFrame,
+        thumb_w: u32,
+        thumb_h: u32,
+    ) -> Vec<PassThumbnail> {
+        // Inspector path: reuse the same graph, but ask for per-pass
+        // thumbnails. glReadPixels stalls the GPU on every pass — see
+        // `frame_graph::capture` for the performance posture.
+        if let Some(graph) = self.scene_frame_graph.take() {
+            let thumbs = graph.execute_with_capture(self, assets, frame, thumb_w, thumb_h);
+            self.scene_frame_graph = Some(graph);
+            thumbs
+        } else {
+            self.submit_frame_direct(assets, frame);
+            Vec::new()
         }
-        self.render_screen_quads(&frame.screen_quads);
     }
 
     fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
@@ -2136,6 +2204,28 @@ impl Drop for OpenGLRenderer {
             }
         }
     }
+}
+
+/// Build the M9 scene frame graph: the ordered pass sequence the
+/// editor's real render + the inspector both go through. Kept as a
+/// free function so it can be called from
+/// [`OpenGLRenderer::new`] without touching partially-initialised
+/// fields.
+///
+/// Pass order — matches the pre-M9 flat submit_frame:
+/// 1. `ClearAndViewport`: viewport rectangle + clear color from the
+///    primary view.
+/// 2. `Scene`: 3D content (terrain, meshes, vegetation, water,
+///    particles). Runs against the primary view.
+/// 3. `DebugLines`: gizmos + editor overlays, in world space.
+/// 4. `ScreenQuads`: native UI + inspector chrome, in pixel space.
+fn build_scene_frame_graph() -> super::FrameGraphBuilder {
+    let mut b = super::FrameGraphBuilder::new();
+    b.add_pass(Box::new(super::ClearAndViewportPass::new("Clear")));
+    b.add_pass(Box::new(super::ScenePass::new("Scene")));
+    b.add_pass(Box::new(super::DebugLinesPass::new("DebugLines")));
+    b.add_pass(Box::new(super::ScreenQuadsPass::new("ScreenQuads")));
+    b
 }
 
 #[cfg(test)]

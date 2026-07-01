@@ -68,8 +68,9 @@ pub use math::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use player::PlayerController;
 pub use renderer::{
     BackendCapabilities, BackendKind, BackendMaturity, Color, DebugLine, DrawItem, FogState,
-    LightItem, ParticleBatch, ParticleBillboard, RenderFrame, RenderView, RenderViewport, Renderer,
-    ScreenQuad, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
+    LightItem, ParticleBatch, ParticleBillboard, PassThumbnail, RenderFrame, RenderView,
+    RenderViewport, Renderer, ScreenQuad, TerrainBatch, TerrainPatchItem, VegetationBatch,
+    WaterBatch, DEFAULT_THUMBNAIL_SIZE,
 };
 pub use runtime_frame::{build_runtime_slice_frame, RuntimeSliceBindings, RuntimeSliceViewConfig};
 pub use runtime_slice::{
@@ -97,7 +98,7 @@ pub use editor::{
     EditorSessionError, EditorUiActionLogEntry, EditorUiActionTone, EditorUiCommandPalette,
     EditorUiHitRegion, EditorUiPaletteEntry, EditorUiPaletteEntrySource, EditorUiPanel,
     EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
-    EditorViewportGizmoMode, EditorViewportOverlay, InspectorComponent, InspectorField,
-    InspectorValue, Project, ReplayMode, ReplayTickOutcome, SceneBridgeError, SceneDocument,
-    SceneReloadOutcome,
+    EditorViewportGizmoMode, EditorViewportOverlay, FrameInspectorPass, FrameInspectorState,
+    InspectorComponent, InspectorField, InspectorValue, Project, ReplayMode, ReplayTickOutcome,
+    SceneBridgeError, SceneDocument, SceneReloadOutcome,
 };

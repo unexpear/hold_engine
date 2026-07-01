@@ -1670,6 +1670,14 @@ impl EditorShellApp {
                 format!("{} {}: {}", kind, logical_name, error),
                 EditorUiActionTone::Error,
             ),
+            EditorEvent::FrameCaptured {
+                generation,
+                passes,
+            } => (
+                "Event Frame Captured".into(),
+                format!("gen={} passes={}", generation, passes.len()),
+                EditorUiActionTone::Event,
+            ),
         }
     }
 
@@ -1828,6 +1836,18 @@ impl EditorShellApp {
 
         if input.key_pressed(vk::F7) {
             self.dispatch(EditorCommand::ReloadSource);
+            return;
+        }
+
+        // F10: toggle the M9 frame inspector (ADR 0002 Q8, ADR 0003
+        // Pillar 4). When on, per-frame render uses
+        // `submit_frame_capturing` and pushes thumbnails to the host's
+        // FrameInspectorState so the native UI panel renders them.
+        // When off, capture stops and the panel disappears; the last
+        // capture stays in state so the user can compare across
+        // toggles by disabling capture mid-inspection.
+        if input.key_pressed(vk::F10) {
+            self.toggle_frame_inspector();
             return;
         }
 
@@ -2039,6 +2059,16 @@ impl EditorShellApp {
                         println!(
                             "[editor] compile failed for {} {}: {}",
                             kind, logical_name, error
+                        );
+                    }
+                    EditorEvent::FrameCaptured {
+                        generation,
+                        passes,
+                    } => {
+                        println!(
+                            "[editor] frame captured gen={} passes={}",
+                            generation,
+                            passes.len()
                         );
                     }
                 }
@@ -2263,6 +2293,35 @@ impl EditorShellApp {
         (os_input.clone(), raw_dt)
     }
 
+    /// F10 handler: flip the M9 frame-inspector enable flag on the
+    /// host, log the transition to the editor's action log so the
+    /// developer sees the toggle land. When enabled, the next frame's
+    /// render goes through `submit_frame_capturing`; when disabled,
+    /// the panel disappears (the last capture stays in state — an
+    /// on-purpose "compare against previous" affordance).
+    ///
+    /// See ADR 0002 Q8 (frame inspector) and ADR 0003 Pillar 4
+    /// (debuggability).
+    fn toggle_frame_inspector(&mut self) {
+        let now_enabled = self
+            .server
+            .host_mut()
+            .frame_inspector_mut()
+            .toggle_enabled();
+        let (label, detail) = if now_enabled {
+            (
+                "Frame inspector on",
+                "Per-pass thumbnails will land at the bottom each frame; press F10 to disable.",
+            )
+        } else {
+            (
+                "Frame inspector off",
+                "Capture paused; the last capture stays in state until F10 re-enables.",
+            )
+        };
+        self.push_action_log(EditorUiActionTone::Suggestion, label, detail);
+    }
+
     /// Called from `App::update` at the very top of every frame
     /// so reloads land before the editor camera tick, input
     /// processing, and the renderer; the rest of the frame sees
@@ -2431,7 +2490,35 @@ impl App for EditorShellApp {
             .extend(viewport.debug_lines.iter().copied());
         frame.screen_quads.extend(viewport.quads.iter().copied());
         frame.screen_quads.extend(ui.quads.iter().copied());
-        renderer.submit_frame(&self.runtime_assets, &frame);
+        // M9: when the inspector is armed, route rendering through
+        // `submit_frame_capturing` so per-pass thumbnails come back
+        // and land in the host's FrameInspectorState. Otherwise take
+        // the cheap path. See ADR 0002 Q8 + ADR 0003 Pillar 4.
+        if self.server.host().frame_inspector().is_enabled() {
+            let thumbs = renderer.submit_frame_capturing(
+                &self.runtime_assets,
+                &frame,
+                hold::DEFAULT_THUMBNAIL_SIZE.0,
+                hold::DEFAULT_THUMBNAIL_SIZE.1,
+            );
+            if !thumbs.is_empty() {
+                let _generation = self
+                    .server
+                    .host_mut()
+                    .frame_inspector_mut()
+                    .push_capture(thumbs);
+                // NB: `EditorEvent::FrameCaptured` is defined and
+                // codec-tested for the bridge, but there is no
+                // out-of-band emit path on `EditorBridgeServer` yet —
+                // events flow as return values from `execute`. When
+                // the async emit lands, generation + FrameInspectorPass
+                // metadata should ship through it. Tracked as an M9
+                // follow-up alongside the textured-quad thumbnail
+                // rendering.
+            }
+        } else {
+            renderer.submit_frame(&self.runtime_assets, &frame);
+        }
 
         if let Some(remaining) = &mut self.self_test_remaining {
             *remaining -= dt;

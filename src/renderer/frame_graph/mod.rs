@@ -28,8 +28,9 @@ mod resource;
 pub use capture::{downsample_rgba8, PassThumbnail, DEFAULT_THUMBNAIL_SIZE};
 pub use pass::{ClosurePass, FrameGraphError, NoopPass, Pass, PassBuilder, PassContext};
 pub use passes::{
-    ClearPass, DrawTexturedNormalMappedPass, DrawTexturedNormalMappedPassParams, DrawTexturedPass,
-    DrawTexturedPassParams, FunctionPass,
+    ClearAndViewportPass, ClearPass, DebugLinesPass, DrawTexturedNormalMappedPass,
+    DrawTexturedNormalMappedPassParams, DrawTexturedPass, DrawTexturedPassParams, FunctionPass,
+    ScenePass, ScreenQuadsPass,
 };
 pub use resource::{
     AccessKind, BufferDesc, BufferUsage, ResourceDesc, ResourceId, ResourceKind, TextureDesc,
@@ -180,22 +181,28 @@ impl FrameGraph {
     }
 
     /// Run the graph: invoke each pass's [`Pass::record`] in execution
-    /// order, threading the OpenGL renderer and asset store through the
-    /// per-pass [`PassContext`].
+    /// order, threading the OpenGL renderer, asset store, and the
+    /// current [`RenderFrame`] through the per-pass [`PassContext`].
     ///
-    /// Borrows the renderer and asset store for the duration of the call.
-    /// Passes that need to retain references beyond `record` should clone
-    /// the relevant handles into their own struct fields rather than
-    /// stashing the borrows.
+    /// Borrows all three for the duration of the call. Passes that need
+    /// to retain references beyond `record` should clone the relevant
+    /// handles into their own struct fields rather than stashing the
+    /// borrows.
+    ///
+    /// The `frame` is the M9 wire-up: the graph is built once at editor
+    /// startup and driven by whatever frame the shell hands it each
+    /// tick, so scene passes read views/batches from `ctx.frame`
+    /// rather than caching per-frame state inside pass structs.
     pub fn execute(
         &self,
         renderer: &mut crate::renderer::opengl::OpenGLRenderer,
         assets: &crate::assets::AssetStore,
+        frame: &crate::renderer::RenderFrame,
     ) {
         for &pass_idx in &self.execution_order {
             let p = &self.passes[pass_idx];
             let name: String = p.name().to_string();
-            let mut ctx = PassContext::new(&name, pass_idx, renderer, assets);
+            let mut ctx = PassContext::new(&name, pass_idx, renderer, assets, frame);
             p.record(&mut ctx);
         }
     }
@@ -218,6 +225,7 @@ impl FrameGraph {
         &self,
         renderer: &mut crate::renderer::opengl::OpenGLRenderer,
         assets: &crate::assets::AssetStore,
+        frame: &crate::renderer::RenderFrame,
         thumb_w: u32,
         thumb_h: u32,
     ) -> Vec<PassThumbnail> {
@@ -228,7 +236,7 @@ impl FrameGraph {
 
             // Run the pass.
             {
-                let mut ctx = PassContext::new(&name, pass_idx, renderer, assets);
+                let mut ctx = PassContext::new(&name, pass_idx, renderer, assets, frame);
                 p.record(&mut ctx);
             }
 

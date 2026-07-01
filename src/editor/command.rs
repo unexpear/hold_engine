@@ -159,6 +159,16 @@ pub enum EditorEvent {
         logical_name: String,
         error: String,
     },
+    /// The frame graph produced a new per-pass thumbnail capture
+    /// (M9 — ADR 0002 Q8, ADR 0003 Pillar 4). Carries pass metadata
+    /// only; the RGBA pixel data stays on the native side. Bridge
+    /// clients treat `generation` as a monotonic cache key so a
+    /// browser-side coalescer can skip stale captures when it falls
+    /// behind.
+    FrameCaptured {
+        generation: u64,
+        passes: Vec<super::FrameInspectorPass>,
+    },
 }
 
 /// Errors that [`EditorRuntimeHost::execute`] can return.

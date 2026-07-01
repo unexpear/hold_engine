@@ -10,6 +10,7 @@
 use super::resource::{AccessKind, ResourceId, ResourceKind};
 use crate::assets::AssetStore;
 use crate::renderer::opengl::OpenGLRenderer;
+use crate::renderer::RenderFrame;
 
 /// Errors a pass can raise from [`Pass::declare`] (via the builder) or that
 /// the frame graph can raise during compile.
@@ -196,9 +197,10 @@ impl PassBuilder {
 
 /// Per-pass execution context.
 ///
-/// Carries the OpenGL renderer reference and the asset store the pass
-/// needs to record GPU work, plus metadata (pass name and index) for
-/// debugging and the editor frame inspector.
+/// Carries the OpenGL renderer reference, the asset store, and the
+/// current [`RenderFrame`] the pass needs to record GPU work, plus
+/// metadata (pass name and index) for debugging and the editor frame
+/// inspector.
 ///
 /// The frame graph is bound to the OpenGL backend at this layer
 /// deliberately. Per the M4 phasing in ADR 0002 Q8, OpenGL is the only
@@ -206,11 +208,19 @@ impl PassBuilder {
 /// designed against a single concrete user. When the Vulkan backend lands
 /// it will get its own parallel `frame_graph_vulkan` module with the same
 /// topology core but a Vulkan-specific `PassContext`.
+///
+/// The `frame` field is the scene description the editor and runtime
+/// build once per frame (M9: real scene render through the frame
+/// graph). Passes read views and draw batches from it rather than
+/// caching per-frame data inside themselves — the graph is
+/// constructed once at editor startup and drives whatever `frame`
+/// the shell hands to `execute` / `execute_with_capture`.
 pub struct PassContext<'a> {
     pub pass_name: &'a str,
     pub pass_index: usize,
     pub renderer: &'a mut OpenGLRenderer,
     pub assets: &'a AssetStore,
+    pub frame: &'a RenderFrame,
 }
 
 impl<'a> PassContext<'a> {
@@ -219,12 +229,14 @@ impl<'a> PassContext<'a> {
         pass_index: usize,
         renderer: &'a mut OpenGLRenderer,
         assets: &'a AssetStore,
+        frame: &'a RenderFrame,
     ) -> Self {
         Self {
             pass_name,
             pass_index,
             renderer,
             assets,
+            frame,
         }
     }
 }

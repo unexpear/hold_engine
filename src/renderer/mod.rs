@@ -11,11 +11,12 @@ pub use frame::{
     RenderViewport, TerrainBatch, TerrainPatchItem, VegetationBatch, WaterBatch,
 };
 pub use frame_graph::{
-    downsample_rgba8, AccessKind, BufferDesc, BufferUsage, ClearPass, ClosurePass,
-    DrawTexturedNormalMappedPass, DrawTexturedNormalMappedPassParams, DrawTexturedPass,
-    DrawTexturedPassParams, FrameGraph, FrameGraphBuilder, FrameGraphError, FunctionPass,
-    NoopPass, Pass, PassBuilder, PassContext, PassThumbnail, ResourceDesc, ResourceId,
-    ResourceKind, TextureDesc, TextureUsage, DEFAULT_THUMBNAIL_SIZE,
+    downsample_rgba8, AccessKind, BufferDesc, BufferUsage, ClearAndViewportPass, ClearPass,
+    ClosurePass, DebugLinesPass, DrawTexturedNormalMappedPass, DrawTexturedNormalMappedPassParams,
+    DrawTexturedPass, DrawTexturedPassParams, FrameGraph, FrameGraphBuilder, FrameGraphError,
+    FunctionPass, NoopPass, Pass, PassBuilder, PassContext, PassThumbnail, ResourceDesc,
+    ResourceId, ResourceKind, ScenePass, ScreenQuadsPass, TextureDesc, TextureUsage,
+    DEFAULT_THUMBNAIL_SIZE,
 };
 pub use opengl::OpenGLRenderer;
 pub use software::SoftwareRenderer;
@@ -132,6 +133,28 @@ pub trait Renderer {
             self.render_debug_lines(&frame.debug_lines, &vp);
         }
         self.render_screen_quads(&frame.screen_quads);
+    }
+
+    /// Render a frame through the M9 frame graph and capture a
+    /// [`PassThumbnail`] per pass for the editor's frame inspector
+    /// (ADR 0002 Q8, ADR 0003 Pillar 4).
+    ///
+    /// Backends that don't implement the frame graph inherit this
+    /// default, which just falls back to [`Self::submit_frame`] and
+    /// returns an empty capture. Callers can distinguish "capture not
+    /// available" from "capture produced zero passes" by inspecting
+    /// the returned vector's length against the graph's expected pass
+    /// count (four, currently — clear/scene/debug-lines/screen-quads).
+    fn submit_frame_capturing(
+        &mut self,
+        assets: &AssetStore,
+        frame: &RenderFrame,
+        thumb_w: u32,
+        thumb_h: u32,
+    ) -> Vec<PassThumbnail> {
+        let _ = (thumb_w, thumb_h);
+        self.submit_frame(assets, frame);
+        Vec::new()
     }
 }
 
