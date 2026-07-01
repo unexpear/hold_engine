@@ -360,6 +360,26 @@ pub fn encode_event(event: &EditorEvent) -> String {
         EditorEvent::UndoApplied => "evt|UndoApplied".into(),
         EditorEvent::RedoApplied => "evt|RedoApplied".into(),
         EditorEvent::Reloaded => "evt|Reloaded".into(),
+        EditorEvent::AssetInvalidated {
+            kind,
+            handle_index,
+            logical_name,
+        } => format!(
+            "evt|AssetInvalidated|{}|{}|{}",
+            escape_token(kind),
+            handle_index,
+            escape_token(logical_name),
+        ),
+        EditorEvent::CompileFailed {
+            kind,
+            logical_name,
+            error,
+        } => format!(
+            "evt|CompileFailed|{}|{}|{}",
+            escape_token(kind),
+            escape_token(logical_name),
+            escape_token(error),
+        ),
         EditorEvent::RuntimeSliceUpdated { path } => {
             format!("evt|RuntimeSliceUpdated|{}", escape_token(path))
         }
@@ -422,6 +442,22 @@ pub fn decode_event(message: &str) -> Result<EditorEvent, EditorProtocolError> {
             expect_len(tokens.as_slice(), 3)?;
             Ok(EditorEvent::RuntimeSliceUpdated {
                 path: tokens[2].clone(),
+            })
+        }
+        "AssetInvalidated" => {
+            expect_len(tokens.as_slice(), 5)?;
+            Ok(EditorEvent::AssetInvalidated {
+                kind: tokens[2].clone(),
+                handle_index: parse_u32(&tokens[3])?,
+                logical_name: tokens[4].clone(),
+            })
+        }
+        "CompileFailed" => {
+            expect_len(tokens.as_slice(), 5)?;
+            Ok(EditorEvent::CompileFailed {
+                kind: tokens[2].clone(),
+                logical_name: tokens[3].clone(),
+                error: tokens[4].clone(),
             })
         }
         _ => Err(invalid_token(kind, "unknown event kind")),
@@ -567,6 +603,10 @@ fn encode_play_state(state: EditorPlayState) -> String {
         EditorPlayState::Editing => "Editing".into(),
         EditorPlayState::Playing => "Playing".into(),
         EditorPlayState::Paused => "Paused".into(),
+        // Deterministic replay surfaces over the editor protocol so
+        // remote clients (browser editor, IDE plugin) can show the
+        // mode lock visually. See ADR 0004 Q7.
+        EditorPlayState::ReplayingDeterministic => "ReplayingDeterministic".into(),
     }
 }
 
@@ -583,7 +623,11 @@ fn parse_play_state(token: &str) -> Result<EditorPlayState, EditorProtocolError>
         "Editing" => Ok(EditorPlayState::Editing),
         "Playing" => Ok(EditorPlayState::Playing),
         "Paused" => Ok(EditorPlayState::Paused),
-        _ => Err(invalid_token(token, "expected Editing, Playing, or Paused")),
+        "ReplayingDeterministic" => Ok(EditorPlayState::ReplayingDeterministic),
+        _ => Err(invalid_token(
+            token,
+            "expected Editing, Playing, Paused, or ReplayingDeterministic",
+        )),
     }
 }
 
@@ -939,5 +983,74 @@ mod tests {
 
         let event = decode_event("\u{feff}evt|WorldRebuilt").unwrap();
         assert!(matches!(event, EditorEvent::WorldRebuilt));
+    }
+
+    /// `AssetInvalidated` round-trips through the codec with an
+    /// awkward logical name (containing `|`, backslash, newline)
+    /// that exercises the escape path. ADR 0004 Q13 is the
+    /// load-bearing reference: remote clients consume this codec
+    /// to refresh their previews on hot-reload.
+    #[test]
+    fn asset_invalidated_event_roundtrips() {
+        let original = EditorEvent::AssetInvalidated {
+            kind: "Texture".into(),
+            handle_index: 42,
+            logical_name: "textures/awkward | name\\with\nweirdness".into(),
+        };
+        let encoded = encode_event(&original);
+        let decoded = decode_event(&encoded).unwrap();
+        match decoded {
+            EditorEvent::AssetInvalidated {
+                kind,
+                handle_index,
+                logical_name,
+            } => {
+                assert_eq!(kind, "Texture");
+                assert_eq!(handle_index, 42);
+                assert_eq!(logical_name, "textures/awkward | name\\with\nweirdness");
+            }
+            other => panic!("expected AssetInvalidated, got {:?}", other),
+        }
+    }
+
+    /// `CompileFailed` round-trips with an error message that
+    /// includes protocol-reserved characters. The message comes
+    /// straight from the underlying `AssetCompilerError` Display
+    /// impl and can contain anything; the codec's escape layer
+    /// must keep it intact.
+    #[test]
+    fn compile_failed_event_roundtrips() {
+        let original = EditorEvent::CompileFailed {
+            kind: "Material".into(),
+            logical_name: "materials/wall".into(),
+            error: "missing field `albedo` | line 12".into(),
+        };
+        let encoded = encode_event(&original);
+        let decoded = decode_event(&encoded).unwrap();
+        match decoded {
+            EditorEvent::CompileFailed {
+                kind,
+                logical_name,
+                error,
+            } => {
+                assert_eq!(kind, "Material");
+                assert_eq!(logical_name, "materials/wall");
+                assert_eq!(error, "missing field `albedo` | line 12");
+            }
+            other => panic!("expected CompileFailed, got {:?}", other),
+        }
+    }
+
+    /// Decoder rejects malformed AssetInvalidated messages
+    /// loudly: missing tokens, non-numeric handle_index, etc.
+    /// Pillar 4 (debuggability): a remote client that ships an
+    /// out-of-version protocol message gets a typed error, not
+    /// silent acceptance of garbage.
+    #[test]
+    fn asset_invalidated_decode_rejects_malformed_input() {
+        // Missing logical_name token.
+        assert!(decode_event("evt|AssetInvalidated|Texture|7").is_err());
+        // Non-numeric handle_index.
+        assert!(decode_event("evt|AssetInvalidated|Texture|seven|name").is_err());
     }
 }

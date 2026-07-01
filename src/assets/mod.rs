@@ -1,6 +1,7 @@
 pub mod compiled;
 pub mod compiler;
 pub mod handle;
+pub mod invalidation;
 pub mod mesh;
 pub mod mesh_map;
 pub mod pool;
@@ -22,6 +23,7 @@ pub use compiler::{
     write_compiled_asset, AssetCompilerError,
 };
 pub use handle::Handle;
+pub use invalidation::{AssetInvalidated, AssetKind, InvalidationBus, SubscriberId};
 pub use mesh::{MeshData, ObjError, Vertex};
 pub use mesh_map::{compute_ao_per_vertex, compute_curvature_per_vertex};
 pub use pool::AssetPool;

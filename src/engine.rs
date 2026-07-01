@@ -8,6 +8,69 @@ use crate::platform::Window;
 use crate::renderer::Renderer;
 use std::time::Instant;
 
+// ---------------------------------------------------------------------------
+// ReloadDispatcherHook — hot-reload integration point (ADR 0004 Q10)
+// ---------------------------------------------------------------------------
+
+/// Holds an optional callback invoked once per iteration of the engine
+/// run loop, after input events are cleared and before the system
+/// schedule runs.
+///
+/// The callback is the integration seam for the hot-reload pipeline
+/// (M7.3+): it drains the `ReloadDispatcher`'s compile-result channel,
+/// applies queued asset reloads to `AssetStore`, and emits invalidation
+/// events. Game and editor code that wants to participate in reload
+/// dispatch register their callback via [`Engine::on_reload_dispatch`].
+///
+/// See ADR 0004 Q10 for the rationale; ADR 0003 Pillar 2 for why
+/// frame-boundary reload application is load-bearing.
+pub struct ReloadDispatcherHook {
+    callback: Option<Box<dyn FnMut()>>,
+}
+
+impl Default for ReloadDispatcherHook {
+    fn default() -> Self {
+        Self { callback: None }
+    }
+}
+
+impl ReloadDispatcherHook {
+    /// An empty hook with no callback registered.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a callback. Replaces any previously registered one.
+    /// The callback is `'static` because it is held inside `Engine`
+    /// across frames; closures that need to mutate caller-side state
+    /// typically capture an `Rc<RefCell<...>>` or a channel sender.
+    pub fn set<F>(&mut self, f: F)
+    where
+        F: FnMut() + 'static,
+    {
+        self.callback = Some(Box::new(f));
+    }
+
+    /// Remove any previously registered callback.
+    pub fn clear(&mut self) {
+        self.callback = None;
+    }
+
+    /// Whether a callback is currently registered.
+    pub fn is_armed(&self) -> bool {
+        self.callback.is_some()
+    }
+
+    /// Invoke the registered callback, if any. Called once per
+    /// iteration of the engine run loop. No-op when no callback is
+    /// registered.
+    pub fn tick(&mut self) {
+        if let Some(cb) = self.callback.as_mut() {
+            cb();
+        }
+    }
+}
+
 /// Trait for structured game applications.
 ///
 /// Implement this instead of using a raw closure with `Engine::run`.
@@ -50,6 +113,7 @@ pub struct Engine {
     pub window: Window,
     input: InputState,
     fps_timer: f32, // seconds since last title update
+    reload_dispatch: ReloadDispatcherHook,
 }
 
 impl Engine {
@@ -61,7 +125,26 @@ impl Engine {
             window,
             input: InputState::new(),
             fps_timer: 0.0,
+            reload_dispatch: ReloadDispatcherHook::new(),
         }
+    }
+
+    /// Register the hot-reload dispatch callback. Fires once per
+    /// iteration of the run loop, between input-event clearing and the
+    /// system schedule. The callback drains the M7.3 reload pipeline's
+    /// compile-result channel and applies queued reloads to the live
+    /// asset store.
+    ///
+    /// The callback is `'static`; share state with the caller via
+    /// `Rc<RefCell<...>>` or channel handles. Calling this method again
+    /// replaces any previously registered callback.
+    ///
+    /// See ADR 0004 Q10. Safe to call before or after `run`.
+    pub fn on_reload_dispatch<F>(&mut self, f: F)
+    where
+        F: FnMut() + 'static,
+    {
+        self.reload_dispatch.set(f);
     }
 
     fn run_with_title<R, F>(mut self, mut renderer: R, mut frame_fn: F)
@@ -85,6 +168,10 @@ impl Engine {
             // Clear events from the previous frame so systems and the frame
             // callback start each iteration with a clean slate.
             self.world.events.clear_all();
+
+            // Drain any queued hot-reload results before the schedule
+            // observes this frame's world. ADR 0004 Q10.
+            self.reload_dispatch.tick();
 
             self.schedule.run(&mut self.world, dt);
 

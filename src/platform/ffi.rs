@@ -261,6 +261,74 @@ extern "system" {
     pub fn AdjustWindowRect(lpRect: *mut RECT, dwStyle: DWORD, bMenu: BOOL) -> BOOL;
 }
 
+// ── File-watching constants and structs ──────────────────────────────────────
+//
+// Used by the hot-reload FileWatcher (ADR 0004 Q4) to subscribe to
+// directory-change notifications via `ReadDirectoryChangesW`.
+
+pub const FILE_LIST_DIRECTORY: DWORD = 0x0001;
+
+pub const FILE_SHARE_READ: DWORD = 0x0000_0001;
+pub const FILE_SHARE_WRITE: DWORD = 0x0000_0002;
+pub const FILE_SHARE_DELETE: DWORD = 0x0000_0004;
+
+pub const OPEN_EXISTING: DWORD = 3;
+
+pub const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
+pub const FILE_FLAG_OVERLAPPED: DWORD = 0x4000_0000;
+
+pub const FILE_NOTIFY_CHANGE_FILE_NAME: DWORD = 0x0000_0001;
+pub const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 0x0000_0002;
+pub const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x0000_0010;
+pub const FILE_NOTIFY_CHANGE_SIZE: DWORD = 0x0000_0008;
+pub const FILE_NOTIFY_CHANGE_CREATION: DWORD = 0x0000_0040;
+
+pub const FILE_ACTION_ADDED: DWORD = 0x0000_0001;
+pub const FILE_ACTION_REMOVED: DWORD = 0x0000_0002;
+pub const FILE_ACTION_MODIFIED: DWORD = 0x0000_0003;
+pub const FILE_ACTION_RENAMED_OLD_NAME: DWORD = 0x0000_0004;
+pub const FILE_ACTION_RENAMED_NEW_NAME: DWORD = 0x0000_0005;
+
+pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as *mut c_void;
+
+pub const WAIT_OBJECT_0: DWORD = 0x0000_0000;
+pub const WAIT_TIMEOUT: DWORD = 0x0000_0102;
+pub const WAIT_FAILED: DWORD = 0xFFFF_FFFF;
+
+pub const INFINITE: DWORD = 0xFFFF_FFFF;
+
+#[repr(C)]
+pub struct OVERLAPPED {
+    pub Internal: ULONG_PTR,
+    pub InternalHigh: ULONG_PTR,
+    pub Pointer: *mut c_void,
+    pub hEvent: HANDLE,
+}
+
+impl Default for OVERLAPPED {
+    fn default() -> Self {
+        Self {
+            Internal: 0,
+            InternalHigh: 0,
+            Pointer: std::ptr::null_mut(),
+            hEvent: std::ptr::null_mut(),
+        }
+    }
+}
+
+/// Variable-length record returned by `ReadDirectoryChangesW`. The
+/// `FileName` field is declared as a single `u16` but actually extends
+/// for `FileNameLength` bytes. The hot-reload watcher walks the buffer
+/// using `NextEntryOffset` rather than treating these as fixed-size
+/// structs.
+#[repr(C)]
+pub struct FILE_NOTIFY_INFORMATION {
+    pub NextEntryOffset: DWORD,
+    pub Action: DWORD,
+    pub FileNameLength: DWORD,
+    pub FileName: [u16; 1],
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     pub fn GetModuleHandleW(lpModuleName: LPCWSTR) -> HINSTANCE;
@@ -270,6 +338,49 @@ extern "system" {
     pub fn GetProcAddress(hModule: HMODULE, lpProcName: LPCSTR) -> *const c_void;
     pub fn FreeLibrary(hLibModule: HMODULE) -> BOOL;
     pub fn GetLastError() -> DWORD;
+
+    // ── File-watching entry points (ADR 0004 Q4) ─────────────────────────
+    pub fn CreateFileW(
+        lpFileName: LPCWSTR,
+        dwDesiredAccess: DWORD,
+        dwShareMode: DWORD,
+        lpSecurityAttributes: *mut c_void,
+        dwCreationDisposition: DWORD,
+        dwFlagsAndAttributes: DWORD,
+        hTemplateFile: HANDLE,
+    ) -> HANDLE;
+    pub fn CreateEventW(
+        lpEventAttributes: *mut c_void,
+        bManualReset: BOOL,
+        bInitialState: BOOL,
+        lpName: LPCWSTR,
+    ) -> HANDLE;
+    pub fn ResetEvent(hEvent: HANDLE) -> BOOL;
+    pub fn SetEvent(hEvent: HANDLE) -> BOOL;
+    pub fn WaitForMultipleObjects(
+        nCount: DWORD,
+        lpHandles: *const HANDLE,
+        bWaitAll: BOOL,
+        dwMilliseconds: DWORD,
+    ) -> DWORD;
+    pub fn ReadDirectoryChangesW(
+        hDirectory: HANDLE,
+        lpBuffer: *mut c_void,
+        nBufferLength: DWORD,
+        bWatchSubtree: BOOL,
+        dwNotifyFilter: DWORD,
+        lpBytesReturned: *mut DWORD,
+        lpOverlapped: *mut OVERLAPPED,
+        lpCompletionRoutine: *mut c_void,
+    ) -> BOOL;
+    pub fn GetOverlappedResult(
+        hFile: HANDLE,
+        lpOverlapped: *mut OVERLAPPED,
+        lpNumberOfBytesTransferred: *mut DWORD,
+        bWait: BOOL,
+    ) -> BOOL;
+    pub fn CancelIoEx(hFile: HANDLE, lpOverlapped: *mut OVERLAPPED) -> BOOL;
+    pub fn CloseHandle(hObject: HANDLE) -> BOOL;
 }
 
 #[link(name = "gdi32")]

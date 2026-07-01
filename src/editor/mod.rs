@@ -7,6 +7,7 @@ pub mod browser;
 pub mod command;
 pub mod drawlist;
 mod host;
+pub mod hot_reload_status;
 pub mod native_ui;
 pub mod protocol;
 mod session;
@@ -43,7 +44,10 @@ pub use command::{
     EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor,
 };
 pub use drawlist::{generate_draw_list, EditorDrawList};
-pub use host::{EditorCamera, EditorRuntimeHost};
+pub use host::{DispatchApplyReport, EditorCamera, EditorRuntimeHost};
+pub use hot_reload_status::{
+    HotReloadEntry, HotReloadOutcome, HotReloadStatus, DEFAULT_HOT_RELOAD_CAPACITY,
+};
 pub use native_ui::{
     build_native_ui, EditorNativeUi, EditorNativeUiState, EditorUiActionLogEntry,
     EditorUiActionTone, EditorUiCommandPalette, EditorUiHitRegion, EditorUiPaletteEntry,
@@ -54,7 +58,7 @@ pub use protocol::{
     encode_command as encode_editor_command_protocol, encode_event as encode_editor_event_protocol,
     EditorProtocolError,
 };
-pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError};
+pub use session::{EditorPlayState, EditorSceneSession, EditorSessionError, SceneReloadOutcome};
 pub use viewport::{
     build_viewport_overlay, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
     EditorViewportGizmoMode, EditorViewportOverlay,

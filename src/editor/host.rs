@@ -177,6 +177,14 @@ pub struct EditorRuntimeHost {
 
     // ── Editor camera ─────────────────────────────────────────────────────
     pub editor_camera: EditorCamera,
+
+    // ── Hot-reload status (M7.4.2) ────────────────────────────────────────
+    /// Ring buffer of recent hot-reload outcomes the native UI
+    /// renders in the Hot-Reload Status pane. Populated by the
+    /// game/editor reload pipeline via [`Self::push_hot_reload_event`]
+    /// and [`Self::push_hot_reload_failure`]. See ADR 0004 Q9
+    /// (M7.4.2) and Q13 for how this surface receives events.
+    hot_reload_status: super::hot_reload_status::HotReloadStatus,
 }
 
 impl EditorRuntimeHost {
@@ -196,11 +204,205 @@ impl EditorRuntimeHost {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             editor_camera: EditorCamera::new(),
+            hot_reload_status: super::hot_reload_status::HotReloadStatus::default(),
         };
         host.rebuild_world()?;
         // Auto-select the first entity after loading.
         host.init_cursor_to_first();
         Ok(host)
+    }
+
+    // ── Hot-reload status (M7.4.2) ──────────────────────────────────────
+
+    /// Push a successful hot-reload event onto the editor's
+    /// status ring. Called by the game's per-frame reload code
+    /// after each `AssetInvalidated` event. The native UI panel
+    /// renders the most recent entries.
+    ///
+    /// `kind` is the asset-kind label (`"Texture"`,
+    /// `"Material"`, `"Shader"`, ...) — matched against the
+    /// `AssetKind::as_str()` representation that the editor
+    /// protocol uses (ADR 0004 Q13). Stored as a string for
+    /// forward-compatibility with future asset kinds the editor
+    /// doesn't statically know about.
+    pub fn push_hot_reload_event(
+        &mut self,
+        kind: impl Into<String>,
+        handle_index: u32,
+        logical_name: impl Into<String>,
+    ) {
+        self.hot_reload_status
+            .push(super::hot_reload_status::HotReloadOutcome::Applied {
+                kind: kind.into(),
+                handle_index,
+                logical_name: logical_name.into(),
+            });
+    }
+
+    /// Push a hot-reload failure (compile error) onto the
+    /// editor's status ring. The previous asset stays live in
+    /// the AssetStore; this surface only records the error so
+    /// the developer sees it in the panel.
+    pub fn push_hot_reload_failure(
+        &mut self,
+        kind: impl Into<String>,
+        logical_name: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        self.hot_reload_status
+            .push(super::hot_reload_status::HotReloadOutcome::Failed {
+                kind: kind.into(),
+                logical_name: logical_name.into(),
+                error: error.into(),
+            });
+    }
+
+    /// Read-only accessor for the hot-reload status ring. The
+    /// native UI's `draw_status` function uses this to populate
+    /// the Hot-Reload Status panel.
+    pub fn hot_reload_status(&self) -> &super::hot_reload_status::HotReloadStatus {
+        &self.hot_reload_status
+    }
+
+    /// Mutable accessor — useful for tests and for the editor
+    /// command path that clears the status when a new project
+    /// opens.
+    pub fn hot_reload_status_mut(&mut self) -> &mut super::hot_reload_status::HotReloadStatus {
+        &mut self.hot_reload_status
+    }
+
+    /// Drain a [`DispatchSummary`](crate::hot_reload::DispatchSummary)
+    /// from the M7.3 reload pipeline into this host: routes
+    /// asset reloads to the status panel, runs scene reloads
+    /// against the host's live World via the entity-preserving
+    /// diff path, and reports per-category counts so callers can
+    /// log telemetry or surface aggregate metrics.
+    ///
+    /// This is the single integration seam between the dispatcher
+    /// and the editor's user-visible state. The intended call site
+    /// is the engine's reload-dispatch hook
+    /// ([`crate::engine::Engine::on_reload_dispatch`]):
+    ///
+    /// ```ignore
+    /// engine.on_reload_dispatch(move || {
+    ///     let summary = dispatcher.dispatch(&mut assets);
+    ///     host.apply_dispatch_summary(summary);
+    /// });
+    /// ```
+    ///
+    /// ## Why this lives on the host (not the dispatcher)
+    ///
+    /// The dispatcher is asset-pipeline-only by design — it owns
+    /// the compile queue receiver and the bindings map, nothing
+    /// else. Scene reloads need access to a live `World` and an
+    /// `EditorSceneSession`; both live on the host. Putting the
+    /// routing here keeps the dispatcher single-responsibility
+    /// and avoids forcing a `World` reference into the
+    /// hot-reload module.
+    ///
+    /// ## Failure surfaces
+    ///
+    /// Compile errors land in the status panel as `Failed` rows.
+    /// Scene reloads that fall back to a full rebuild
+    /// ([`crate::editor::SceneReloadOutcome::FullRebuild`]) are
+    /// recorded as a successful event with a "rebuilt" label —
+    /// the rebuild succeeded, just not the diff path. A scene
+    /// reload that errors entirely (rare; only on world-rebuild
+    /// failure) lands as a `Failed` row with the error message.
+    ///
+    /// Returns a [`DispatchApplyReport`] with per-category
+    /// counts for telemetry.
+    ///
+    /// See ADR 0004 Q9 (M7.4.2 status panel) + Q14 (scene reload).
+    pub fn apply_dispatch_summary(
+        &mut self,
+        summary: crate::hot_reload::DispatchSummary,
+    ) -> DispatchApplyReport {
+        let mut report = DispatchApplyReport::default();
+
+        // 1. Asset reloads → status panel as Applied rows. The
+        //    handle_index lets the status panel disambiguate
+        //    multiple reloads of the same logical name across a
+        //    long session.
+        for event in &summary.applied {
+            self.push_hot_reload_event(
+                event.kind.as_str(),
+                event.handle_index,
+                event.logical_name.clone(),
+            );
+            report.assets_applied += 1;
+        }
+
+        // 2. Scene reloads → drive the entity-preserving diff
+        //    against the live World, then route the outcome to
+        //    the status panel. Each result moves into
+        //    reload_scene_document so we drain by value.
+        for scene in summary.scenes_reloaded {
+            let logical_name = scene.logical_name.clone();
+            match self
+                .session
+                .reload_scene_document(scene.document, &mut self.world)
+            {
+                Ok(outcome) => {
+                    let label = match &outcome {
+                        crate::editor::SceneReloadOutcome::NoChange => "Scene (no-change)",
+                        crate::editor::SceneReloadOutcome::Diffed { .. } => "Scene",
+                        crate::editor::SceneReloadOutcome::FullRebuild { .. } => "Scene (rebuilt)",
+                    };
+                    // Scenes have no AssetStore handle; use 0 as
+                    // the slot. The logical_name carries the real
+                    // identity in the status panel.
+                    self.push_hot_reload_event(label, 0, logical_name.clone());
+                    match outcome {
+                        crate::editor::SceneReloadOutcome::NoChange => {
+                            report.scenes_no_change += 1;
+                        }
+                        crate::editor::SceneReloadOutcome::Diffed {
+                            added,
+                            removed,
+                            patched,
+                        } => {
+                            report.scenes_diffed += 1;
+                            report.scene_entities_added += added;
+                            report.scene_entities_removed += removed;
+                            report.scene_entities_patched += patched;
+                        }
+                        crate::editor::SceneReloadOutcome::FullRebuild { .. } => {
+                            report.scenes_rebuilt += 1;
+                        }
+                    }
+                }
+                Err(err) => {
+                    // Reload failed before producing an outcome
+                    // (e.g. the rebuild fallback's apply step
+                    // returned an error). Record as a Failed row
+                    // with the error message; the previous World
+                    // state stays as-is on the safety-net path.
+                    self.push_hot_reload_failure("Scene", logical_name, err.to_string());
+                    report.scenes_failed += 1;
+                }
+            }
+        }
+
+        // 3. Compile errors → status panel as Failed rows. The
+        //    previous asset stays live in `AssetStore`; this
+        //    surface only records the diagnostic.
+        for err in &summary.errors {
+            self.push_hot_reload_failure(
+                compiled_asset_kind_label(err.kind),
+                err.logical_name.clone(),
+                err.error.clone(),
+            );
+            report.errors_recorded += 1;
+        }
+
+        // `summary.stale` is telemetry only — no status-panel
+        // surface (stale results are a normal consequence of
+        // the last-wins discipline; the editor user shouldn't
+        // see them as separate events).
+        report.stale_dropped = summary.stale.len();
+
+        report
     }
 
     pub fn from_scene(scene: SceneDocument) -> Result<Self, EditorSessionError> {
@@ -407,7 +609,13 @@ impl EditorRuntimeHost {
     /// Falls back to `Mat4::IDENTITY` if no camera is available.
     pub fn active_view_proj(&self, fov_deg: f32, aspect: f32) -> Mat4 {
         match self.play_state() {
-            EditorPlayState::Editing | EditorPlayState::Paused => {
+            // Authoring view (editor camera): used while editing, paused,
+            // and during deterministic replay — replay drives gameplay
+            // state from the recorded stream but the *camera framing* is
+            // the editor's job, not the recorded simulation's.
+            EditorPlayState::Editing
+            | EditorPlayState::Paused
+            | EditorPlayState::ReplayingDeterministic => {
                 self.editor_camera.view_proj(fov_deg, aspect, 0.1, 1000.0)
             }
             EditorPlayState::Playing => {
@@ -1310,6 +1518,90 @@ impl EditorRuntimeHost {
     }
 }
 
+/// Per-category counts produced by
+/// [`EditorRuntimeHost::apply_dispatch_summary`]. Useful for
+/// telemetry, post-frame logging, and tests that need to assert
+/// what shape the dispatcher delivered without re-walking the
+/// summary themselves.
+///
+/// Every field is monotonically incremented across a single
+/// `apply_dispatch_summary` call — i.e. counts a single dispatch's
+/// outcomes, not a session-wide aggregate. Callers that want
+/// session totals fold these into their own counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchApplyReport {
+    /// Number of asset reloads (Texture / NormalMap / Mesh /
+    /// Material / Shader) that landed in `AssetStore`.
+    pub assets_applied: usize,
+    /// Number of scenes where the new authored content equaled
+    /// the previous snapshot — the diff path's zero-cost branch.
+    pub scenes_no_change: usize,
+    /// Number of scenes that took the diff path (entity set
+    /// stable, components patched in place).
+    pub scenes_diffed: usize,
+    /// Number of scenes that fell back to a full rebuild (the
+    /// safety-net path; runtime-only state is lost).
+    pub scenes_rebuilt: usize,
+    /// Number of scenes whose reload errored entirely. Counts
+    /// failures from the rebuild fallback's apply step; ordinary
+    /// diff failures fall back to rebuild rather than error out.
+    pub scenes_failed: usize,
+    /// Aggregate of authored entities added across all `Diffed`
+    /// scene reloads in this dispatch.
+    pub scene_entities_added: usize,
+    /// Aggregate of authored entities removed across all
+    /// `Diffed` scene reloads.
+    pub scene_entities_removed: usize,
+    /// Aggregate of authored entities patched in place across
+    /// all `Diffed` scene reloads.
+    pub scene_entities_patched: usize,
+    /// Number of compile-error rows pushed onto the status panel.
+    pub errors_recorded: usize,
+    /// Stale results filtered out by the last-wins discipline
+    /// (telemetry only — these don't reach the status panel).
+    pub stale_dropped: usize,
+}
+
+impl DispatchApplyReport {
+    /// Whether this dispatch produced any user-visible activity
+    /// at all. Convenient for skipping per-frame logging when
+    /// nothing happened.
+    pub fn has_activity(&self) -> bool {
+        self.assets_applied > 0
+            || self.scenes_no_change > 0
+            || self.scenes_diffed > 0
+            || self.scenes_rebuilt > 0
+            || self.scenes_failed > 0
+            || self.errors_recorded > 0
+    }
+
+    /// Total scene reloads observed (any outcome). Sum of the
+    /// four scene_* outcome counters.
+    pub fn total_scenes(&self) -> usize {
+        self.scenes_no_change + self.scenes_diffed + self.scenes_rebuilt + self.scenes_failed
+    }
+}
+
+/// Map a [`crate::assets::CompiledAssetKind`] to a stable string
+/// label for the editor's status panel. Mirrors
+/// [`crate::assets::AssetKind::as_str`] so labels stay consistent
+/// between the two enums (they describe overlapping but distinct
+/// concepts: compile-time vs. runtime asset kinds).
+fn compiled_asset_kind_label(kind: crate::assets::CompiledAssetKind) -> &'static str {
+    match kind {
+        crate::assets::CompiledAssetKind::Mesh => "Mesh",
+        crate::assets::CompiledAssetKind::Material => "Material",
+        crate::assets::CompiledAssetKind::Texture => "Texture",
+        crate::assets::CompiledAssetKind::TerrainLayerSet => "TerrainLayerSet",
+        crate::assets::CompiledAssetKind::VegetationPrototype => "VegetationPrototype",
+        crate::assets::CompiledAssetKind::Skeleton => "Skeleton",
+        crate::assets::CompiledAssetKind::AnimationClip => "AnimationClip",
+        crate::assets::CompiledAssetKind::AudioClip => "AudioClip",
+        crate::assets::CompiledAssetKind::Shader => "Shader",
+        crate::assets::CompiledAssetKind::Scene => "Scene",
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2158,5 +2450,237 @@ entity "cam" {
                 .get_value(camera_id, "Camera", "fov_deg"),
             Some(&InspectorValue::Number(60.0))
         );
+    }
+
+    // ── apply_dispatch_summary tests (M7.4.2 wire-up) ──────────────────────
+
+    /// Empty summary is a no-op: nothing pushed to the status
+    /// panel, report is all zeros, `has_activity` returns false.
+    /// Pillar 2 (iteration speed): per-frame dispatch with no
+    /// pending reloads must pay zero cost on the editor side.
+    #[test]
+    fn apply_dispatch_summary_empty_is_no_op() {
+        let path = write_two_entity_scene("apply_empty");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let entries_before = host.hot_reload_status().len();
+
+        let report = host.apply_dispatch_summary(crate::hot_reload::DispatchSummary::default());
+
+        assert_eq!(host.hot_reload_status().len(), entries_before);
+        assert_eq!(report, DispatchApplyReport::default());
+        assert!(!report.has_activity());
+    }
+
+    /// Asset reloads (Texture, Mesh, etc.) route to the status
+    /// panel as Applied rows. The kind label uses
+    /// `AssetKind::as_str()` so the panel matches the editor
+    /// protocol's wire-format labels (ADR 0004 Q13).
+    #[test]
+    fn apply_dispatch_summary_routes_asset_reloads_to_status_panel() {
+        let path = write_two_entity_scene("apply_assets");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let entries_before = host.hot_reload_status().len();
+
+        let mut summary = crate::hot_reload::DispatchSummary::default();
+        summary.applied.push(crate::assets::AssetInvalidated {
+            kind: crate::assets::AssetKind::Texture,
+            handle_index: 7,
+            logical_name: "textures/crate".to_string(),
+        });
+        summary.applied.push(crate::assets::AssetInvalidated {
+            kind: crate::assets::AssetKind::Shader,
+            handle_index: 2,
+            logical_name: "shaders/lit".to_string(),
+        });
+
+        let report = host.apply_dispatch_summary(summary);
+
+        assert_eq!(report.assets_applied, 2);
+        assert!(report.has_activity());
+        assert_eq!(host.hot_reload_status().len(), entries_before + 2);
+    }
+
+    /// Compile errors surface as Failed rows. The previous asset
+    /// stays live (the dispatcher already preserved it); this
+    /// surface only records the diagnostic for the panel.
+    #[test]
+    fn apply_dispatch_summary_routes_compile_errors_as_failed_rows() {
+        let path = write_two_entity_scene("apply_errors");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        assert!(host.hot_reload_status().last_failure().is_none());
+
+        let mut summary = crate::hot_reload::DispatchSummary::default();
+        summary.errors.push(crate::hot_reload::CompileErr {
+            logical_name: "shaders/broken".to_string(),
+            kind: crate::assets::CompiledAssetKind::Shader,
+            error: "shader source missing fragment section".to_string(),
+            generation: crate::hot_reload::Generation(3),
+        });
+
+        let report = host.apply_dispatch_summary(summary);
+
+        assert_eq!(report.errors_recorded, 1);
+        assert_eq!(report.assets_applied, 0);
+        // The status panel surfaced the failure: the most recent
+        // failure entry carries the logical name + error message
+        // of the failed reload.
+        let last = host
+            .hot_reload_status()
+            .last_failure()
+            .expect("failure recorded");
+        assert_eq!(last.outcome.logical_name(), "shaders/broken");
+        assert_eq!(last.outcome.kind(), "Shader");
+        assert!(last.outcome.is_failure());
+    }
+
+    /// Scene reloads route to `EditorSceneSession::reload_scene_document`
+    /// against the host's owned World. The diff path runs;
+    /// runtime entity identity is preserved across the reload.
+    /// The status panel records a single "Scene" event.
+    #[test]
+    fn apply_dispatch_summary_drives_scene_diff_against_host_world() {
+        let path = write_two_entity_scene("apply_scene_diff");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let camera_id = host.select_first_with_component("Camera").unwrap();
+        let runtime_camera_before = host.applied_entity(camera_id).unwrap();
+        let entries_before = host.hot_reload_status().len();
+
+        // Build a new SceneDocument with a tweaked camera fov.
+        // Apply via the dispatcher-summary path; the host should
+        // run reload_scene_document and update the live World.
+        let mut new_doc = host.session().scene().clone();
+        new_doc.set_value(
+            camera_id,
+            "Camera",
+            "fov_deg",
+            InspectorValue::Number(85.0),
+        );
+
+        let mut summary = crate::hot_reload::DispatchSummary::default();
+        summary
+            .scenes_reloaded
+            .push(crate::hot_reload::SceneReloadResult {
+                logical_name: "levels/test".to_string(),
+                source_path: std::path::PathBuf::from(&path),
+                document: new_doc,
+            });
+
+        let report = host.apply_dispatch_summary(summary);
+
+        assert_eq!(report.scenes_diffed, 1);
+        assert_eq!(report.scenes_no_change, 0);
+        assert_eq!(report.scenes_rebuilt, 0);
+        assert_eq!(report.scenes_failed, 0);
+        // `patched` counts retained-and-re-patched entities; the
+        // two-entity test scene has no adds/removes so both
+        // entities count as patched.
+        assert!(report.scene_entities_patched >= 1);
+        assert_eq!(report.scene_entities_added, 0);
+        assert_eq!(report.scene_entities_removed, 0);
+
+        // Runtime Entity identity preserved across the reload.
+        let runtime_camera_after = host.applied_entity(camera_id).unwrap();
+        assert_eq!(runtime_camera_before, runtime_camera_after);
+
+        // The new fov landed in the live World.
+        let camera = host.world().get::<Camera>(runtime_camera_after).unwrap();
+        assert!((camera.fov.to_degrees() - 85.0).abs() < 0.001);
+
+        // Status panel got exactly one new entry.
+        assert_eq!(host.hot_reload_status().len(), entries_before + 1);
+    }
+
+    /// Scene reload where the new document equals the previous
+    /// authored snapshot reports `scenes_no_change` (the
+    /// zero-cost fast path) and still emits a status-panel
+    /// event so developers see "save fired but content was
+    /// already current."
+    #[test]
+    fn apply_dispatch_summary_records_scene_no_change_outcome() {
+        let path = write_two_entity_scene("apply_scene_no_change");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let entries_before = host.hot_reload_status().len();
+
+        let unchanged_doc = host.session().scene().clone();
+        let mut summary = crate::hot_reload::DispatchSummary::default();
+        summary
+            .scenes_reloaded
+            .push(crate::hot_reload::SceneReloadResult {
+                logical_name: "levels/test".to_string(),
+                source_path: std::path::PathBuf::from(&path),
+                document: unchanged_doc,
+            });
+
+        let report = host.apply_dispatch_summary(summary);
+
+        assert_eq!(report.scenes_no_change, 1);
+        assert_eq!(report.scenes_diffed, 0);
+        assert_eq!(report.total_scenes(), 1);
+        // Status panel records the no-change with the
+        // disambiguating label.
+        assert_eq!(host.hot_reload_status().len(), entries_before + 1);
+    }
+
+    /// Mixed summary: assets + scenes + errors + stale results
+    /// in the same dispatch all route to their respective
+    /// destinations and the report aggregates counts correctly.
+    /// This is the realistic shape of a frame-boundary dispatch
+    /// after a developer's burst-save sweep.
+    #[test]
+    fn apply_dispatch_summary_aggregates_mixed_outcomes() {
+        let path = write_two_entity_scene("apply_mixed");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        let mut summary = crate::hot_reload::DispatchSummary::default();
+        summary.applied.push(crate::assets::AssetInvalidated {
+            kind: crate::assets::AssetKind::Mesh,
+            handle_index: 1,
+            logical_name: "meshes/crate".to_string(),
+        });
+        summary.errors.push(crate::hot_reload::CompileErr {
+            logical_name: "materials/grass".to_string(),
+            kind: crate::assets::CompiledAssetKind::Material,
+            error: "missing albedo dependency".to_string(),
+            generation: crate::hot_reload::Generation(1),
+        });
+        summary
+            .stale
+            .push(crate::hot_reload::DroppedResult {
+                logical_name: "textures/dirt".to_string(),
+                generation: crate::hot_reload::Generation(2),
+                kind: crate::assets::CompiledAssetKind::Texture,
+            });
+
+        let report = host.apply_dispatch_summary(summary);
+
+        assert_eq!(report.assets_applied, 1);
+        assert_eq!(report.errors_recorded, 1);
+        assert_eq!(report.stale_dropped, 1);
+        assert_eq!(report.scenes_diffed, 0);
+        assert!(report.has_activity());
+    }
+
+    /// `DispatchApplyReport::has_activity` returns false only
+    /// when every counter is zero; any non-zero category flips
+    /// it to true. Pin the contract because per-frame logging
+    /// often gates on this predicate to avoid log spam on
+    /// idle frames.
+    #[test]
+    fn dispatch_apply_report_has_activity_predicate_is_correct() {
+        let mut report = DispatchApplyReport::default();
+        assert!(!report.has_activity());
+        report.assets_applied = 1;
+        assert!(report.has_activity());
+
+        let mut report = DispatchApplyReport::default();
+        report.scenes_diffed = 1;
+        assert!(report.has_activity());
+
+        let mut report = DispatchApplyReport::default();
+        // stale_dropped is telemetry only — does NOT count as
+        // user-visible activity. The panel never surfaces stale
+        // results.
+        report.stale_dropped = 5;
+        assert!(!report.has_activity());
     }
 }

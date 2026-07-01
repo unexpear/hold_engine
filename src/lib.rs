@@ -3,6 +3,7 @@ pub mod ecs;
 pub mod editor;
 pub mod engine;
 pub mod events;
+pub mod hot_reload;
 pub mod input;
 pub mod lod;
 pub mod math;
@@ -27,11 +28,18 @@ pub use assets::{
     source_asset_is_stale, write_compiled_asset, AssetCompilerError, AssetStore, CompiledAssetBlob,
     CompiledAssetDependency, CompiledAssetError, CompiledAssetKind, CompiledAssetMetadata,
     CompiledAssetRuntimeError, CompiledAssetRuntimeLoader, CompiledMaterialPayload, GpuMesh,
-    compute_ao_per_vertex, compute_curvature_per_vertex, ColorSpace,
-    GpuTexture, Handle, Material, MaterialHandle, MeshData, MeshHandle,
+    compute_ao_per_vertex, compute_curvature_per_vertex, AssetInvalidated, AssetKind, ColorSpace,
+    GpuTexture, Handle, InvalidationBus, Material, MaterialHandle, MeshData, MeshHandle,
     MeshMapAO, MeshMapAOHandle, MeshMapCurvature, MeshMapCurvatureHandle, MeshMapError, NormalMap,
-    NormalMapConvention, NormalMapHandle, ObjError, Shader, ShaderHandle, TexError,
+    NormalMapConvention, NormalMapHandle, ObjError, Shader, ShaderHandle, SubscriberId, TexError,
     Texture, TextureFormat, TextureHandle, Vertex, COMPILED_ASSET_MAGIC, COMPILED_ASSET_VERSION,
+};
+pub use hot_reload::{
+    canonicalise_for_index, default_compile_fn, Coalescer, CompileErr, CompileFn, CompileOk,
+    CompileQueue, CompileQueueConfig, CompileQueueError, CompileResult, CompileTarget,
+    DispatchError, DispatchSummary, DroppedResult, ExtensionFilter, FileChange, FileChangeKind,
+    FileWatcher, Generation, RawFileEvent, ReloadDispatcher, SceneReloadResult, WatcherConfig,
+    WatcherError,
 };
 pub use ecs::{
     generate_particle_batch, generate_particle_debug_lines, ActiveCamera, ActiveDialogue,
@@ -74,13 +82,14 @@ pub use editor::{
     decode_editor_command_protocol, decode_editor_event_protocol, encode_editor_command_protocol,
     encode_editor_event_protocol, generate_draw_list, load_and_apply_scene_from_hsc,
     load_and_apply_scene_from_project, load_project, load_scene_doc, load_scene_doc_from_hsc,
-    save_project, save_scene_doc, save_scene_doc_to_hsc, EditorApplyError, EditorAxis,
-    EditorBridgeServer, EditorCamera, EditorCommand, EditorCommandError, EditorDrawList,
-    EditorEntity, EditorEvent, EditorInspectorCursor, EditorIoError, EditorNativeUi,
-    EditorNativeUiState, EditorPipelineError, EditorPlayState, EditorProtocolError,
-    EditorRuntimeHost, EditorSceneSession, EditorSessionError, EditorUiActionLogEntry,
-    EditorUiActionTone, EditorUiCommandPalette, EditorUiHitRegion, EditorUiPaletteEntry,
-    EditorUiPaletteEntrySource, EditorUiPanel, EditorUiPanelRegion, EditorViewportGizmoHandle,
-    EditorViewportGizmoHandleId, EditorViewportGizmoMode, EditorViewportOverlay,
-    InspectorComponent, InspectorField, InspectorValue, Project, SceneBridgeError, SceneDocument,
+    save_project, save_scene_doc, save_scene_doc_to_hsc, DispatchApplyReport, EditorApplyError,
+    EditorAxis, EditorBridgeServer, EditorCamera, EditorCommand, EditorCommandError,
+    EditorDrawList, EditorEntity, EditorEvent, EditorInspectorCursor, EditorIoError,
+    EditorNativeUi, EditorNativeUiState, EditorPipelineError, EditorPlayState,
+    EditorProtocolError, EditorRuntimeHost, EditorSceneSession, EditorSessionError,
+    EditorUiActionLogEntry, EditorUiActionTone, EditorUiCommandPalette, EditorUiHitRegion,
+    EditorUiPaletteEntry, EditorUiPaletteEntrySource, EditorUiPanel, EditorUiPanelRegion,
+    EditorViewportGizmoHandle, EditorViewportGizmoHandleId, EditorViewportGizmoMode,
+    EditorViewportOverlay, InspectorComponent, InspectorField, InspectorValue, Project,
+    SceneBridgeError, SceneDocument, SceneReloadOutcome,
 };

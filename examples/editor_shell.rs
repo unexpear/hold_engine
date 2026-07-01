@@ -18,6 +18,10 @@ use hold::{
     build_native_ui, build_runtime_slice_frame, build_viewport_overlay,
     decode_editor_event_protocol, encode_editor_command_protocol,
     engine::App,
+    hot_reload::{
+        default_compile_fn, CompileQueue, CompileQueueConfig, CompileTarget, ExtensionFilter,
+        FileWatcher, ReloadDispatcher, WatcherConfig,
+    },
     input::{vk, InputState, MouseButton},
     math::Mat4,
     renderer::{
@@ -30,6 +34,39 @@ use hold::{
     EditorViewportGizmoHandleId, EditorViewportGizmoMode, Engine, GlobalTransform, RenderFrame,
     RuntimeSliceBindings, RuntimeSliceViewConfig, SceneData, Shader, Transform,
 };
+
+/// Owns the hot-reload pipeline for the editor shell. The four
+/// pieces — file watcher, compile queue, reload dispatcher, plus
+/// the source-root path for diagnostic messages — are bundled here
+/// so they share a single Drop-order ledger and so the editor's
+/// per-frame tick has one place to drain.
+///
+/// The ordering on construction is load-bearing:
+/// `FileWatcher` → `CompileQueue` → `ReloadDispatcher` chained via
+/// two mpsc channels (file changes and compile results). On Drop,
+/// the dispatcher's receiver disappears first, the queue's worker
+/// notices the closed channel and exits, then the watcher's worker
+/// gets its stop signal and exits. Threads join in their owning
+/// types' Drop impls; nothing leaks.
+///
+/// See `docs/adr/0004-hot-reload-architecture.md` Q3 + Q10.
+struct HotReloadPipeline {
+    /// Kept alive for its Drop impl — the watcher thread runs until
+    /// the FileWatcher is dropped. Field is read on shutdown only.
+    _watcher: FileWatcher,
+    /// Kept alive for its Drop impl — see _watcher.
+    _queue: CompileQueue,
+    /// The dispatcher is the only piece the per-frame tick touches.
+    dispatcher: ReloadDispatcher,
+    /// Source root the watcher is observing. Surfaced in startup
+    /// diagnostics so developers can see "hot-reload watching
+    /// C:\\projects\\foo\\source" in the launch log.
+    source_root: PathBuf,
+    /// Logical names the dispatcher is registered for. Telemetry +
+    /// diagnostic display only; the dispatcher is the source of
+    /// truth for actual reload routing.
+    registered_logical_names: Vec<String>,
+}
 
 const DEFAULT_SCENE: &str = "examples/demo.hsc";
 const EDITOR_FOV_DEG: f32 = 60.0;
@@ -64,6 +101,127 @@ fn source_root_for_host(host: &hold::EditorRuntimeHost) -> PathBuf {
 
 fn compiled_asset_exists(compiled_root: &Path, logical_name: &str) -> bool {
     compiled_asset_path_for_logical_name(compiled_root, logical_name).exists()
+}
+
+/// Stand up the hot-reload pipeline for an `EditorRuntimeHost`.
+/// Returns `None` when the source root the scene was opened from
+/// doesn't resolve to a real on-disk directory — typical for
+/// synthetic test scenes that ship from inside the repo's
+/// `examples/` tree without a project. The shell still runs in
+/// that case; the hot-reload panel just stays empty.
+///
+/// The pipeline is `FileWatcher` → `CompileQueue` → `ReloadDispatcher`
+/// chained via two mpsc channels. Drop order on shutdown:
+/// dispatcher's receiver disappears first → queue worker exits →
+/// watcher worker exits. All threads join in their owning types'
+/// Drop impls.
+///
+/// **What gets registered for reload?** v1 registers the scene
+/// source itself for hot-reload. Mesh / texture / material /
+/// shader registration is a follow-up — those need scene
+/// introspection to discover which compiled assets the scene
+/// actually references, plus existing handles to bind them to.
+/// Scene reload is the headline Pillar 2 feature so it lands
+/// first; expanding the target set is mechanical once a scene
+/// → handle map is plumbed.
+///
+/// See `docs/adr/0004-hot-reload-architecture.md` Q3, Q10, Q14.
+fn build_hot_reload_pipeline(host: &hold::EditorRuntimeHost) -> Option<HotReloadPipeline> {
+    // Discover the source root the watcher should observe. Mirrors
+    // `source_root_for_host` for consistency with the rest of the
+    // shell's path resolution, but resolves to None when the path
+    // doesn't exist — the watcher's CreateFileW would fail anyway.
+    let source_root = source_root_for_host(host);
+    if !source_root.exists() {
+        return None;
+    }
+
+    // The scene's .hsc source path is the only target we register
+    // in v1. If the host has no source path (in-memory-only scene)
+    // we fall back to None — there's nothing to watch yet.
+    let scene_source_path = host.session().source_path()?.to_path_buf();
+    let scene_logical_name = scene_logical_name_for_host(host, &scene_source_path);
+    let target = CompileTarget::new(
+        scene_logical_name.clone(),
+        CompiledAssetKind::Scene,
+        scene_source_path.clone(),
+    );
+
+    // Wire the channels: watcher → queue → dispatcher.
+    let (tx_changes, rx_changes) = std::sync::mpsc::channel();
+    let (tx_results, rx_results) = std::sync::mpsc::channel();
+
+    let watcher_config = WatcherConfig {
+        root: source_root.clone(),
+        extensions: ExtensionFilter::default_engine_extensions(),
+        coalesce_window: std::time::Duration::from_millis(50),
+    };
+
+    // The watcher gets started first because its constructor opens
+    // the watch root synchronously (CreateFileW). If the directory
+    // is unreadable we catch the error here rather than silently
+    // failing later — Pillar 4 (debuggability): never silently
+    // disable a feature.
+    let watcher = match FileWatcher::start_with_sender(watcher_config, tx_changes) {
+        Ok(w) => w,
+        Err(err) => {
+            eprintln!("[editor] hot-reload disabled: watcher start failed: {err}");
+            return None;
+        }
+    };
+
+    let queue = match CompileQueue::start_with_sender(
+        CompileQueueConfig {
+            file_changes: rx_changes,
+            targets: vec![target],
+            compile_fn: default_compile_fn(),
+        },
+        tx_results,
+    ) {
+        Ok(q) => q,
+        Err(err) => {
+            eprintln!("[editor] hot-reload disabled: compile queue start failed: {err}");
+            // Watcher will be dropped here; thread exits cleanly.
+            return None;
+        }
+    };
+
+    let mut dispatcher = ReloadDispatcher::new(rx_results);
+    dispatcher.register_scene(scene_logical_name.clone(), scene_source_path);
+
+    Some(HotReloadPipeline {
+        _watcher: watcher,
+        _queue: queue,
+        dispatcher,
+        source_root,
+        registered_logical_names: vec![scene_logical_name],
+    })
+}
+
+/// Best-effort logical-name derivation for the active scene.
+/// Strips the project-relative source-root prefix when possible so
+/// the dispatcher's logical name matches the convention used by
+/// other compiled assets (`levels/level01` rather than an absolute
+/// path). Falls back to the file stem if no project relativization
+/// is available.
+fn scene_logical_name_for_host(host: &hold::EditorRuntimeHost, scene_path: &Path) -> String {
+    let source_root = source_root_for_host(host);
+    if let Ok(rel) = scene_path.strip_prefix(&source_root) {
+        // Drop the extension to match the "logical name = path
+        // without extension" convention used elsewhere in the
+        // pipeline.
+        let mut rel_pb = PathBuf::from(rel);
+        rel_pb.set_extension("");
+        return rel_pb
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_string();
+    }
+    scene_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "scene".to_string())
 }
 
 fn axis_slot(axis: EditorAxis) -> usize {
@@ -172,6 +330,12 @@ struct EditorShellApp {
     action_log: Vec<EditorUiActionLogEntry>,
     assistant_suggestions: Vec<EditorAssistantSuggestion>,
     self_test_remaining: Option<f32>,
+    /// Hot-reload pipeline. `None` when the source root the
+    /// scene was opened from doesn't exist on disk (e.g.
+    /// running from a synthetic test scene under `examples/`
+    /// without a project root). The shell still runs without
+    /// hot-reload — the panel just stays empty.
+    hot_reload: Option<HotReloadPipeline>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +371,11 @@ impl EditorShellApp {
             fragment_source: opengl_shaders::TEXTURED_FRAG.into(),
         });
         let compiled_root = compiled_root_for_host(server.host());
+        // Build the hot-reload pipeline before moving `server` into
+        // the struct literal — the pipeline build inspects the
+        // host to discover the source root + scene path, but
+        // doesn't keep a reference past construction.
+        let hot_reload = build_hot_reload_pipeline(server.host());
         let mut app = Self {
             server,
             backend,
@@ -226,6 +395,7 @@ impl EditorShellApp {
             action_log: Vec::new(),
             assistant_suggestions: Vec::new(),
             self_test_remaining: self_test_seconds,
+            hot_reload,
         };
         app.push_action_log(
             EditorUiActionTone::Suggestion,
@@ -238,6 +408,35 @@ impl EditorShellApp {
                 "Self-test armed",
                 format!("Automatic shutdown after {:.2}s", seconds),
             );
+        }
+        // Surface hot-reload status as a startup log entry so
+        // developers see "hot-reload watching <path>" or "hot-reload
+        // not started: <reason>" in the action log on launch — same
+        // surface the panel renders so there's one place to look.
+        match &app.hot_reload {
+            Some(pipeline) => {
+                let names = if pipeline.registered_logical_names.is_empty() {
+                    "(no targets)".to_string()
+                } else {
+                    pipeline.registered_logical_names.join(", ")
+                };
+                app.push_action_log(
+                    EditorUiActionTone::Suggestion,
+                    "Hot-reload watching",
+                    format!(
+                        "{} | targets: {}",
+                        pipeline.source_root.display(),
+                        names
+                    ),
+                );
+            }
+            None => {
+                app.push_action_log(
+                    EditorUiActionTone::Suggestion,
+                    "Hot-reload disabled",
+                    "Source root unavailable for this scene; reload pipeline not started",
+                );
+            }
         }
         app.refresh_status();
         app
@@ -254,6 +453,7 @@ impl EditorShellApp {
             EditorPlayState::Editing => "EDIT",
             EditorPlayState::Playing => "PLAY",
             EditorPlayState::Paused => "PAUSED",
+            EditorPlayState::ReplayingDeterministic => "REPLAY",
         };
         let dirty = if self.server.host().is_dirty() {
             "*"
@@ -753,7 +953,11 @@ impl EditorShellApp {
 
     fn active_render_state(&self, aspect: f32) -> (Mat4, Mat4, hold::Vec3) {
         match self.server.host().play_state() {
-            EditorPlayState::Editing | EditorPlayState::Paused => {
+            // Replay uses the editor camera too (recorded simulation
+            // drives gameplay state, the editor frames the view).
+            EditorPlayState::Editing
+            | EditorPlayState::Paused
+            | EditorPlayState::ReplayingDeterministic => {
                 let camera = &self.server.host().editor_camera;
                 (
                     camera.view_matrix(),
@@ -1448,6 +1652,24 @@ impl EditorShellApp {
                 path.clone(),
                 EditorUiActionTone::Event,
             ),
+            EditorEvent::AssetInvalidated {
+                kind,
+                handle_index,
+                logical_name,
+            } => (
+                "Event Asset Hot-Reloaded".into(),
+                format!("{} #{} -> {}", kind, handle_index, logical_name),
+                EditorUiActionTone::Event,
+            ),
+            EditorEvent::CompileFailed {
+                kind,
+                logical_name,
+                error,
+            } => (
+                "Event Compile Failed".into(),
+                format!("{} {}: {}", kind, logical_name, error),
+                EditorUiActionTone::Error,
+            ),
         }
     }
 
@@ -1615,6 +1837,10 @@ impl EditorShellApp {
                 EditorPlayState::Playing | EditorPlayState::Paused => {
                     self.dispatch(EditorCommand::StopPlayMode)
                 }
+                // Replay mode: F8 is a no-op. Replay control comes from
+                // the determinism harness UI (M8), not the play-mode
+                // shortcuts.
+                EditorPlayState::ReplayingDeterministic => {}
             }
             return;
         }
@@ -1624,6 +1850,7 @@ impl EditorShellApp {
                 EditorPlayState::Playing => self.dispatch(EditorCommand::PausePlayMode),
                 EditorPlayState::Paused => self.dispatch(EditorCommand::ResumePlayMode),
                 EditorPlayState::Editing => {}
+                EditorPlayState::ReplayingDeterministic => {}
             }
             return;
         }
@@ -1776,6 +2003,26 @@ impl EditorShellApp {
                     EditorEvent::RuntimeSliceUpdated { path } => {
                         println!("[editor] runtime slice updated: {path}");
                     }
+                    EditorEvent::AssetInvalidated {
+                        kind,
+                        handle_index,
+                        logical_name,
+                    } => {
+                        println!(
+                            "[editor] hot-reload applied: {} #{} -> {}",
+                            kind, handle_index, logical_name
+                        );
+                    }
+                    EditorEvent::CompileFailed {
+                        kind,
+                        logical_name,
+                        error,
+                    } => {
+                        println!(
+                            "[editor] compile failed for {} {}: {}",
+                            kind, logical_name, error
+                        );
+                    }
                 }
             }
         }
@@ -1796,6 +2043,65 @@ impl EditorShellApp {
         }
         eprintln!("[editor] {err}");
     }
+
+    /// Per-frame hot-reload tick. Drains the dispatcher's compile
+    /// results (which were produced asynchronously on the worker
+    /// thread since the last frame), routes them through the
+    /// host's `apply_dispatch_summary` — which updates the
+    /// AssetStore for asset reloads, drives
+    /// `EditorSceneSession::reload_scene_document` for scenes, and
+    /// records each outcome on the Hot-Reload Status panel.
+    ///
+    /// Skips silently when no pipeline is wired (test scene without
+    /// a project root) — the editor stays usable, the status panel
+    /// just stays empty.
+    ///
+    /// Called from `App::update` at the very top of every frame
+    /// so reloads land before the editor camera tick, input
+    /// processing, and the renderer; the rest of the frame sees
+    /// post-reload state.
+    fn tick_hot_reload(&mut self) {
+        let Some(pipeline) = self.hot_reload.as_mut() else {
+            return;
+        };
+        let play_state = self.server.host().play_state();
+        let summary = pipeline
+            .dispatcher
+            .dispatch_with_play_state(&mut self.runtime_assets, play_state);
+        // Skip the work if the dispatch was a no-op. Avoids
+        // pushing a "no activity" log line every idle frame.
+        let has_work = !summary.applied.is_empty()
+            || !summary.scenes_reloaded.is_empty()
+            || !summary.errors.is_empty();
+        if !has_work {
+            return;
+        }
+
+        let report = self.server.host_mut().apply_dispatch_summary(summary);
+
+        // Surface the summary on the action log too so developers
+        // see "hot-reload: 1 scene diffed, 0 assets, 0 errors"
+        // without having to look at the corner panel. The status
+        // panel always carries the per-asset detail; the action
+        // log is the chronological narrative of what happened.
+        if report.has_activity() {
+            let detail = format!(
+                "{} assets | scenes: {} diffed / {} no-change / {} rebuilt / {} failed | {} errors",
+                report.assets_applied,
+                report.scenes_diffed,
+                report.scenes_no_change,
+                report.scenes_rebuilt,
+                report.scenes_failed,
+                report.errors_recorded,
+            );
+            let tone = if report.scenes_failed > 0 || report.errors_recorded > 0 {
+                EditorUiActionTone::Error
+            } else {
+                EditorUiActionTone::Suggestion
+            };
+            self.push_action_log(tone, "Hot-reload tick", detail);
+        }
+    }
 }
 
 impl App for EditorShellApp {
@@ -1806,6 +2112,11 @@ impl App for EditorShellApp {
         input: &InputState,
         dt: f32,
     ) {
+        // Hot-reload tick (ADR 0004 Q10). Runs before any other
+        // per-frame work so reloads land at frame boundary and the
+        // rest of the update sees the post-reload state.
+        self.tick_hot_reload();
+
         self.server.host_mut().update_editor_camera(input, dt);
 
         let height = renderer.height().max(1) as f32;
@@ -1963,7 +2274,7 @@ fn main() {
         );
     }
     println!(
-        "[editor] Tab/S+Tab=entity  [/]=component  ;/'=field  1/2/3=axis  -/==delta  F1/F2/F3=move/rotate/scale  F7=reload  F8=play  F9=pause  Ctrl+K=palette  Ctrl+S/Z/Y/P/R=save/undo/redo/patch/rebuild  Esc=quit"
+        "[editor] Tab/S+Tab=entity  [/]=component  ;/'=field  1/2/3=axis  -/==delta  F1/F2/F3=move/rotate/scale  F7=reload  F8=play  F9=pause  F11=record  F12=replay  Ctrl+K=palette  Ctrl+S/Z/Y/P/R=save/undo/redo/patch/rebuild  Esc=quit"
     );
     println!("[editor] Left-click viewport=select  drag gizmo handle=edit selected Transform  history panel tracks explicit commands and events");
 

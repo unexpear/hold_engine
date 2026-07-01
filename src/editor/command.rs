@@ -139,6 +139,26 @@ pub enum EditorEvent {
     RuntimeSliceUpdated {
         path: String,
     },
+    /// An asset was hot-reloaded into the live AssetStore. Carries
+    /// the asset kind label, the slot index of the underlying
+    /// handle, and the logical name. Lets a remote editor client
+    /// (browser or IDE plugin) refresh the asset preview and
+    /// invalidate any client-side caches without needing access to
+    /// the runtime AssetStore. See ADR 0004 Q12 + Q13.
+    AssetInvalidated {
+        kind: String,
+        handle_index: u32,
+        logical_name: String,
+    },
+    /// A compile attempt failed during hot-reload. The dispatcher
+    /// keeps the previous asset live; the editor displays this in
+    /// the Hot-Reload Status pane (M7.4.1+) so the developer can
+    /// see compile errors without alt-tabbing to a terminal.
+    CompileFailed {
+        kind: String,
+        logical_name: String,
+        error: String,
+    },
 }
 
 /// Errors that [`EditorRuntimeHost::execute`] can return.
