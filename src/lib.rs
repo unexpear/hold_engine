@@ -100,5 +100,6 @@ pub use editor::{
     EditorUiPanelRegion, EditorViewportGizmoHandle, EditorViewportGizmoHandleId,
     EditorViewportGizmoMode, EditorViewportOverlay, FrameInspectorPass, FrameInspectorState,
     InspectorComponent, InspectorField, InspectorValue, Project, ReplayMode, ReplayTickOutcome,
-    SceneBridgeError, SceneDocument, SceneReloadOutcome,
+    SceneBridgeError, SceneDocument, SceneReloadOutcome, AutosaveScheduler,
+    recovery_path_for_scene, AUTOSAVE_IDLE_DEBOUNCE_SECS, AUTOSAVE_MAX_INTERVAL_SECS,
 };

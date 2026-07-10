@@ -10,7 +10,7 @@
 //! The public command surface is [`EditorRuntimeHost::execute`].  All other
 //! methods remain available for headless tests and direct API consumers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ecs::components::{ActiveCamera, Camera};
 use crate::ecs::{Entity, World};
@@ -23,7 +23,7 @@ use crate::runtime_slice::{
 use super::{
     command::{EditorAxis, EditorCommand, EditorCommandError, EditorEvent, EditorInspectorCursor},
     protocol::{decode_command, encode_event, EditorProtocolError},
-    EditorPlayState, EditorSceneSession, EditorSessionError, InspectorValue, Project,
+    EditorIoError, EditorPlayState, EditorSceneSession, EditorSessionError, InspectorValue, Project,
     SceneDocument,
 };
 
@@ -164,6 +164,12 @@ pub struct EditorRuntimeHost {
     // ── Dirty tracking ────────────────────────────────────────────────────
     /// `true` when the scene document has unsaved changes (Editing only).
     persistent_dirty: bool,
+    /// Monotonic counter bumped on every authored edit. The autosave
+    /// scheduler compares it frame to frame to tell "still typing" (restart
+    /// the idle debounce) from "paused" (fire the autosave). A bool dirty
+    /// flag cannot express that difference — it is already `true` in both
+    /// cases. See [`super::AutosaveScheduler`] (M11).
+    edit_revision: u64,
     /// Snapshot of `persistent_dirty` taken on `EnterPlayMode`; restored by
     /// `StopPlayMode` so a play cycle does not clear an unsaved modification.
     pre_play_persistent_dirty: bool,
@@ -215,6 +221,7 @@ impl EditorRuntimeHost {
             cursor_field_idx: 0,
             cursor_axis: None,
             persistent_dirty: false,
+            edit_revision: 0,
             pre_play_persistent_dirty: false,
             world_requires_rebuild: false,
             undo_stack: Vec::new(),
@@ -520,6 +527,70 @@ impl EditorRuntimeHost {
     /// persistent).
     pub fn is_dirty(&self) -> bool {
         self.persistent_dirty && self.play_state() == EditorPlayState::Editing
+    }
+
+    /// Record an authored edit: mark the document dirty and bump the revision
+    /// the autosave scheduler watches.
+    fn mark_edited(&mut self) {
+        self.persistent_dirty = true;
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+    }
+
+    /// Monotonic edit counter. Read by [`super::AutosaveScheduler::tick`] to
+    /// restart the idle debounce whenever the document changes.
+    pub fn edit_revision(&self) -> u64 {
+        self.edit_revision
+    }
+
+    // ── Autosave + crash recovery (M11) ───────────────────────────────────
+
+    /// Where this scene's recovery file lives, or `None` for an untitled
+    /// scene (no source path ⇒ no stable identity to recover into).
+    pub fn recovery_path(&self) -> Option<PathBuf> {
+        let source = self.session.source_path()?;
+        super::recovery_path_for_scene(source)
+    }
+
+    /// Write the current scene document to its recovery file, atomically.
+    ///
+    /// This is a **safety net, not a save**. Three properties are load-bearing:
+    ///
+    /// 1. It never writes the author's source file — only the recovery
+    ///    sidecar. Overwriting the source with in-progress state would destroy
+    ///    the last clean save.
+    /// 2. It never clears `persistent_dirty`. The work is still unsaved
+    ///    relative to the source; the user must still press Save.
+    /// 3. It only runs while `Editing`. During play/replay `session.scene()`
+    ///    is the live *mutated* copy, and checkpointing that would capture
+    ///    transient simulation state as if it were authored work.
+    ///
+    /// Uses the full-fidelity `.hscene` format rather than the `.hsc` bridge,
+    /// which drops editor-only components — recovery must not lose more than
+    /// the crash did.
+    ///
+    /// Returns `Ok(None)` when there is nothing to do (untitled, or not
+    /// Editing).
+    pub fn autosave_to_recovery(&self) -> Result<Option<PathBuf>, EditorIoError> {
+        if self.play_state() != EditorPlayState::Editing {
+            return Ok(None);
+        }
+        let Some(path) = self.recovery_path() else {
+            return Ok(None);
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(EditorIoError::Io)?;
+        }
+        super::save_scene_doc(&path, self.session.scene())?;
+        Ok(Some(path))
+    }
+
+    /// Delete the recovery file. Called after an explicit save durably lands:
+    /// disk now matches memory, so a leftover sidecar would falsely look like
+    /// evidence of a crash on next startup.
+    pub fn clear_recovery(&self) {
+        if let Some(path) = self.recovery_path() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Whether the live world is stale and needs a rebuild to match the scene.
@@ -1022,7 +1093,7 @@ impl EditorRuntimeHost {
     ) -> Result<Vec<EditorEvent>, EditorCommandError> {
         if let Some(snapshot) = history_snapshot {
             self.push_undo_snapshot(snapshot);
-            self.persistent_dirty = true;
+            self.mark_edited();
         }
         let mut events = vec![EditorEvent::RuntimeSliceUpdated { path: path.into() }];
         events.extend(self.auto_patch_events()?);
@@ -1221,7 +1292,7 @@ impl EditorRuntimeHost {
         // Persistent dirty — only in Editing; Paused edits are transient PIE overrides.
         if let Some(snapshot) = history_snapshot {
             self.push_undo_snapshot(snapshot);
-            self.persistent_dirty = true;
+            self.mark_edited();
         }
 
         let field_event = EditorEvent::FieldEdited {
@@ -1480,7 +1551,11 @@ impl EditorRuntimeHost {
         self.session
             .save_source_hsc()
             .map_err(EditorCommandError::Session)?;
+        // Only past this point has the write durably landed (atomic_write
+        // returned Ok). A failed save leaves persistent_dirty set AND the
+        // recovery file in place, so the unsaved work survives either way.
         self.persistent_dirty = false;
+        self.clear_recovery();
         Ok(vec![EditorEvent::Saved])
     }
 
@@ -2739,5 +2814,119 @@ entity "cam" {
         // results.
         report.stale_dropped = 5;
         assert!(!report.has_activity());
+    }
+
+    // ── M11: autosave contract ───────────────────────────────────────────
+    //
+    // Autosave is a safety net, not a save. Three properties are load-bearing
+    // and each has a test: it never writes the source, it never clears the
+    // dirty flag, and it never runs outside Editing.
+
+    /// Make an authored edit so the host is dirty and the revision advances.
+    fn dirty_the_host(host: &mut EditorRuntimeHost) {
+        let before = host.edit_revision();
+        host.execute(EditorCommand::SetTerrainSettings {
+            size_meters: Vec3::new(2048.0, 384.0, 2048.0),
+            chunk_size_meters: 128,
+            height_scale_meters: 96.0,
+        })
+        .unwrap();
+        assert!(
+            host.is_dirty(),
+            "test setup: host should be dirty after an edit"
+        );
+        assert_ne!(
+            host.edit_revision(),
+            before,
+            "an authored edit must bump edit_revision"
+        );
+    }
+
+    /// Autosave writes the recovery sidecar and leaves the author's source
+    /// file byte-for-byte untouched. Overwriting the source with in-progress
+    /// state would destroy the user's last clean save.
+    #[test]
+    fn autosave_writes_recovery_sidecar_and_never_touches_the_source() {
+        let path = write_single_entity_scene("autosave_sidecar");
+        let source_before = std::fs::read(&path).unwrap();
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        dirty_the_host(&mut host);
+
+        let written = host.autosave_to_recovery().unwrap().expect("should autosave");
+        assert!(written.exists(), "recovery file must exist");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            source_before,
+            "autosave must NOT modify the source scene"
+        );
+        // The recovery file is the full-fidelity .hscene document.
+        let text = std::fs::read_to_string(&written).unwrap();
+        assert!(text.starts_with(super::super::HSCENE_DOC_HEADER_V2));
+    }
+
+    /// Autosave must not clear the dirty flag: the work is still unsaved
+    /// relative to the source, and the user must still press Save.
+    #[test]
+    fn autosave_does_not_clear_the_dirty_flag() {
+        let path = write_single_entity_scene("autosave_dirty");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        dirty_the_host(&mut host);
+
+        host.autosave_to_recovery().unwrap();
+        assert!(
+            host.is_dirty(),
+            "autosave is a safety net, not a save — dirty must persist"
+        );
+    }
+
+    /// During play/replay `session.scene()` is the live mutated copy.
+    /// Checkpointing it would capture transient simulation state as authored
+    /// work, so autosave is a no-op outside Editing.
+    #[test]
+    fn autosave_is_a_noop_during_play_mode() {
+        let path = write_single_entity_scene("autosave_play");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        dirty_the_host(&mut host);
+        // Save first so entering play is clean, then re-dirty is impossible in
+        // play; we just assert the guard rejects the write.
+        host.execute(EditorCommand::EnterPlayMode).unwrap();
+        assert_eq!(host.play_state(), EditorPlayState::Playing);
+
+        assert!(
+            host.autosave_to_recovery().unwrap().is_none(),
+            "autosave must not run during play mode"
+        );
+    }
+
+    /// An untitled scene has no stable identity to recover into.
+    #[test]
+    fn autosave_skips_untitled_scene() {
+        let scene = SceneDocument {
+            name: "Untitled".into(),
+            runtime_slice: Default::default(),
+            entities: Vec::new(),
+        };
+        let host = EditorRuntimeHost::new(EditorSceneSession::new(scene)).unwrap();
+        assert!(host.recovery_path().is_none());
+        assert!(host.autosave_to_recovery().unwrap().is_none());
+    }
+
+    /// An explicit save deletes the recovery file: disk now matches memory, so
+    /// a leftover sidecar would falsely look like crash evidence on startup.
+    #[test]
+    fn explicit_save_clears_the_recovery_file() {
+        let path = write_single_entity_scene("autosave_cleared");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        dirty_the_host(&mut host);
+
+        let recovery = host.autosave_to_recovery().unwrap().unwrap();
+        assert!(recovery.exists());
+
+        host.execute(EditorCommand::Save).unwrap();
+        assert!(!host.is_dirty());
+        assert!(
+            !recovery.exists(),
+            "a successful save must clear the recovery sidecar"
+        );
     }
 }

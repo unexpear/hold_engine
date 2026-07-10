@@ -17,7 +17,7 @@ pub mod viewport;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::platform::atomic_write::{atomic_write, AtomicWriteError};
 
@@ -41,6 +41,125 @@ pub const HSCENE_DOC_HEADER_V2: &str = "HOLD_SCENE_DOC_V2";
 
 /// Terminator closing a V2 document. Its absence means the file was cut short.
 pub const HSCENE_DOC_END: &str = "endscenedoc";
+
+// ── Autosave + crash recovery (M11) ──────────────────────────────────────────
+
+/// Directory (relative to the scene's own directory) holding recovery files.
+/// Hidden so it does not litter the author's scene folder, yet co-located so
+/// recovery is a single path lookup rather than a keyed directory scan.
+pub const RECOVERY_DIR: &str = ".hold/recovery";
+
+/// Extension appended to a scene's filename to form its recovery file.
+pub const RECOVERY_EXT: &str = "autosave";
+
+/// Seconds of edit inactivity before an autosave fires. Debouncing means the
+/// durable write (an `FlushFileBuffers`) lands when the user has already
+/// paused — the least noticeable moment — rather than mid-keystroke.
+pub const AUTOSAVE_IDLE_DEBOUNCE_SECS: f32 = 3.0;
+
+/// Upper bound between autosaves while continuously editing. Without this
+/// floor, an author who never pauses would never checkpoint.
+pub const AUTOSAVE_MAX_INTERVAL_SECS: f32 = 60.0;
+
+/// The recovery file for a scene at `scene_path`:
+/// `<scene_dir>/.hold/recovery/<filename>.autosave`.
+///
+/// Returns `None` for a path with no filename. Untitled scenes (no path at
+/// all) have no stable identity to recover into and are not autosaved.
+pub fn recovery_path_for_scene(scene_path: &Path) -> Option<PathBuf> {
+    let file_name = scene_path.file_name()?;
+    let dir = scene_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut name = file_name.to_os_string();
+    name.push(".");
+    name.push(RECOVERY_EXT);
+    Some(dir.join(RECOVERY_DIR).join(name))
+}
+
+/// Decides *when* an autosave should run. Pure timing logic — no filesystem,
+/// no clock of its own — so the cadence is unit-testable.
+///
+/// Two rules, both required:
+/// - **Idle debounce:** fire once the author has stopped editing for
+///   [`AUTOSAVE_IDLE_DEBOUNCE_SECS`].
+/// - **Interval floor:** fire regardless after [`AUTOSAVE_MAX_INTERVAL_SECS`]
+///   of continuous editing, so a long unbroken session still checkpoints.
+///
+/// An autosave only ever fires when there has been an edit *since the last
+/// one*, so an idle dirty scene is not rewritten every few seconds.
+#[derive(Debug, Clone)]
+pub struct AutosaveScheduler {
+    idle_debounce_secs: f32,
+    max_interval_secs: f32,
+    since_last_edit: f32,
+    since_last_save: f32,
+    /// Whether an edit has landed since the last autosave. Prevents an idle
+    /// dirty scene from being written over and over.
+    edited_since_save: bool,
+    last_seen_revision: u64,
+}
+
+impl Default for AutosaveScheduler {
+    fn default() -> Self {
+        Self::new(AUTOSAVE_IDLE_DEBOUNCE_SECS, AUTOSAVE_MAX_INTERVAL_SECS)
+    }
+}
+
+impl AutosaveScheduler {
+    pub fn new(idle_debounce_secs: f32, max_interval_secs: f32) -> Self {
+        Self {
+            idle_debounce_secs,
+            max_interval_secs,
+            since_last_edit: 0.0,
+            since_last_save: 0.0,
+            edited_since_save: false,
+            last_seen_revision: 0,
+        }
+    }
+
+    /// Advance by `dt`. `dirty` is the host's [`EditorRuntimeHost::is_dirty`]
+    /// (already gated on `Editing`, so this never fires during play or
+    /// replay). `edit_revision` is bumped by the host on every edit; a change
+    /// restarts the idle debounce.
+    ///
+    /// Returns `true` exactly on the frames an autosave should run. The caller
+    /// must call [`Self::note_saved`] after a successful write.
+    pub fn tick(&mut self, dt: f32, dirty: bool, edit_revision: u64) -> bool {
+        if !dirty {
+            // A clean scene (saved, reloaded, or mid-play) has nothing to
+            // checkpoint; reset so reopening dirty starts a fresh debounce.
+            self.reset();
+            self.last_seen_revision = edit_revision;
+            return false;
+        }
+
+        if edit_revision != self.last_seen_revision {
+            self.last_seen_revision = edit_revision;
+            self.since_last_edit = 0.0;
+            self.edited_since_save = true;
+        }
+
+        if !self.edited_since_save {
+            return false;
+        }
+
+        self.since_last_edit += dt;
+        self.since_last_save += dt;
+
+        self.since_last_edit >= self.idle_debounce_secs
+            || self.since_last_save >= self.max_interval_secs
+    }
+
+    /// Call after an autosave (or an explicit save) durably lands.
+    pub fn note_saved(&mut self) {
+        self.reset();
+    }
+
+    fn reset(&mut self) {
+        self.since_last_edit = 0.0;
+        self.since_last_save = 0.0;
+        self.edited_since_save = false;
+    }
+}
 
 use crate::ecs::components::{
     ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
@@ -3091,5 +3210,97 @@ entity "sun" {
         text.push_str("entity|9|sneaky\nendentity\n");
         let err = SceneDocument::from_hscene_str(&text).unwrap_err();
         assert!(err.contains("content after"), "got: {err}");
+    }
+
+    // ── M11: autosave scheduling (pure timing, no filesystem) ────────────
+
+    #[test]
+    fn recovery_path_is_a_hidden_sidecar_next_to_the_scene() {
+        let p = recovery_path_for_scene(Path::new("C:\\proj\\levels\\forest.hsc")).unwrap();
+        assert_eq!(
+            p,
+            Path::new("C:\\proj\\levels")
+                .join(RECOVERY_DIR)
+                .join("forest.hsc.autosave")
+        );
+    }
+
+    /// A clean scene never autosaves, however long it sits.
+    #[test]
+    fn scheduler_never_fires_when_not_dirty() {
+        let mut s = AutosaveScheduler::default();
+        for _ in 0..1000 {
+            assert!(!s.tick(1.0, false, 0));
+        }
+    }
+
+    /// Debounce: an edit does not fire immediately; it fires once the author
+    /// has been idle for the debounce window.
+    #[test]
+    fn scheduler_fires_after_idle_debounce() {
+        let mut s = AutosaveScheduler::new(3.0, 60.0);
+        // Edit lands (revision changes).
+        assert!(!s.tick(0.1, true, 1), "must not fire immediately on edit");
+        // Idle for just under the window.
+        let mut t = 0.1;
+        while t < 2.9 {
+            assert!(!s.tick(0.1, true, 1), "fired too early at t={t}");
+            t += 0.1;
+        }
+        // Crossing the window fires.
+        assert!(s.tick(0.5, true, 1), "must fire after the idle debounce");
+    }
+
+    /// Continuous editing keeps restarting the debounce, so the idle rule
+    /// alone would never fire — the interval floor guarantees a checkpoint.
+    #[test]
+    fn scheduler_interval_floor_fires_during_continuous_editing() {
+        let mut s = AutosaveScheduler::new(3.0, 10.0);
+        let mut rev = 0u64;
+        let mut fired_at = None;
+        for i in 1..=200 {
+            rev += 1; // an edit every frame: the idle timer never matures
+            if s.tick(0.1, true, rev) {
+                fired_at = Some(i as f32 * 0.1);
+                break;
+            }
+        }
+        let t = fired_at.expect("interval floor must fire during continuous editing");
+        assert!(
+            (9.9..=10.2).contains(&t),
+            "floor should fire near the 10s bound, fired at {t}"
+        );
+    }
+
+    /// After an autosave, an *idle* dirty scene is not rewritten again and
+    /// again — only a new edit re-arms the scheduler.
+    #[test]
+    fn scheduler_does_not_refire_without_a_new_edit() {
+        let mut s = AutosaveScheduler::new(3.0, 60.0);
+        assert!(!s.tick(0.1, true, 1));
+        assert!(s.tick(5.0, true, 1), "first fire");
+        s.note_saved();
+
+        // Still dirty (user hasn't pressed Save), but no new edit: never fires.
+        for _ in 0..1000 {
+            assert!(!s.tick(1.0, true, 1), "re-fired without a new edit");
+        }
+        // A fresh edit re-arms it.
+        assert!(!s.tick(0.1, true, 2));
+        assert!(s.tick(5.0, true, 2), "a new edit must re-arm the scheduler");
+    }
+
+    /// Going clean (an explicit save) resets the scheduler, so reopening a
+    /// dirty state starts a fresh debounce rather than firing instantly.
+    #[test]
+    fn scheduler_resets_when_scene_becomes_clean() {
+        let mut s = AutosaveScheduler::new(3.0, 60.0);
+        assert!(!s.tick(0.1, true, 1));
+        s.tick(2.0, true, 1); // partway through the debounce
+        assert!(!s.tick(0.1, false, 1), "clean scene must not fire");
+        // Now dirty again with a new edit: the debounce restarts from zero.
+        assert!(!s.tick(0.1, true, 2));
+        assert!(!s.tick(2.0, true, 2), "debounce must have restarted");
+        assert!(s.tick(1.5, true, 2));
     }
 }

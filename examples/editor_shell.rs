@@ -330,6 +330,9 @@ struct EditorShellApp {
     action_log: Vec<EditorUiActionLogEntry>,
     assistant_suggestions: Vec<EditorAssistantSuggestion>,
     self_test_remaining: Option<f32>,
+    /// Decides when to checkpoint unsaved work to the recovery sidecar
+    /// (M11). Pure timing; the write itself goes through the host.
+    autosave: hold::AutosaveScheduler,
     /// Hot-reload pipeline. `None` when the source root the
     /// scene was opened from doesn't exist on disk (e.g.
     /// running from a synthetic test scene under `examples/`
@@ -395,6 +398,7 @@ impl EditorShellApp {
             action_log: Vec::new(),
             assistant_suggestions: Vec::new(),
             self_test_remaining: self_test_seconds,
+            autosave: hold::AutosaveScheduler::default(),
             hot_reload,
         };
         app.push_action_log(
@@ -2322,6 +2326,49 @@ impl EditorShellApp {
         self.push_action_log(EditorUiActionTone::Suggestion, label, detail);
     }
 
+    /// Per-frame autosave tick (M11). Asks the scheduler whether enough idle
+    /// time has passed since the last edit (or whether the interval floor has
+    /// elapsed during continuous editing), and if so checkpoints the scene to
+    /// its recovery sidecar.
+    ///
+    /// Never touches the source file and never clears the dirty flag — the
+    /// user still has unsaved work. A failed autosave is logged and the
+    /// scheduler is NOT reset, so it retries on the next opportunity rather
+    /// than silently giving up on the user's data.
+    fn tick_autosave(&mut self, dt: f32) {
+        let dirty = self.server.host().is_dirty();
+        let revision = self.server.host().edit_revision();
+        if !self.autosave.tick(dt, dirty, revision) {
+            return;
+        }
+
+        match self.server.host().autosave_to_recovery() {
+            Ok(Some(path)) => {
+                self.autosave.note_saved();
+                self.push_action_log(
+                    EditorUiActionTone::Suggestion,
+                    "Autosaved",
+                    format!("Recovery checkpoint written to {}", path.display()),
+                );
+            }
+            Ok(None) => {
+                // Untitled scene, or not in Editing. Nothing to checkpoint;
+                // stop asking every frame.
+                self.autosave.note_saved();
+            }
+            Err(err) => {
+                // Deliberately do NOT note_saved(): leaving the scheduler armed
+                // means the next idle window retries. Losing an autosave
+                // silently is exactly what this milestone exists to prevent.
+                self.push_action_log(
+                    EditorUiActionTone::Error,
+                    "Autosave failed",
+                    format!("{err}"),
+                );
+            }
+        }
+    }
+
     /// Called from `App::update` at the very top of every frame
     /// so reloads land before the editor camera tick, input
     /// processing, and the renderer; the rest of the frame sees
@@ -2385,6 +2432,11 @@ impl App for EditorShellApp {
         // the host's current play_state lets the dispatcher buffer
         // reloads while replay is recording, per Q7.
         self.tick_hot_reload();
+
+        // Autosave tick (M11, ADR 0003 Pillar 3). Debounced and dirty-gated;
+        // is_dirty() is already Editing-only, so play/replay can never
+        // checkpoint transient simulation state as authored work.
+        self.tick_autosave(dt);
 
         // Live record/replay tick (ADR 0005 — M8.0). Captures
         // input when recording, synthesizes input from the
