@@ -33,6 +33,42 @@ use std::path::Path;
 
 use crate::platform::atomic_write::{atomic_write, AtomicWriteError};
 
+// ── Scene format version + truncation sentinel (M11) ─────────────────────────
+//
+// A `.hsc` scene is a bag of top-level blocks with no length prefix and no
+// terminator, so `parse_scene` treated EOF as success: a file truncated on an
+// entity boundary parsed as a valid *smaller* scene and the trailing entities
+// vanished silently. That is the worst kind of data loss — it looks like it
+// worked.
+//
+// Fix: a version header at the top, and a sentinel at the bottom. A file that
+// declares the header MUST close with the sentinel, so a cut-short file is a
+// typed error instead of a quiet truncation.
+//
+// Deliberately NOT a checksum. The charter requires scene files to stay
+// human-readable and hand-editable; a CRC would be invalidated by every manual
+// edit. A sentinel is something a person can type. Atomic writes (M11.3)
+// already make a torn *destination* impossible — this catches the cases atomic
+// write cannot: interrupted file copies, bit rot, pre-M11 torn files, and
+// third-party writers.
+//
+// Back-compat: the header is OPTIONAL on read. Files without it (every scene
+// authored before M11) parse leniently, exactly as before. The engine always
+// writes the modern form.
+
+/// First-token marker declaring the scene-format version. Presence switches
+/// the parser into strict mode.
+pub const SCENE_FORMAT_HEADER: &str = "hold_scene";
+
+/// The scene format version this engine reads and writes. Version 1 was the
+/// implicit, unmarked, unterminated format; version 2 adds the header and the
+/// [`SCENE_END_SENTINEL`].
+pub const SCENE_FORMAT_VERSION: u32 = 2;
+
+/// Terminator that must close a scene declaring [`SCENE_FORMAT_HEADER`].
+/// Its absence means the file was cut short.
+pub const SCENE_END_SENTINEL: &str = "end_scene";
+
 use crate::ecs::components::{
     ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
     SphereCollider, Stats, Transform, Velocity,
@@ -406,15 +442,50 @@ impl<'a> Parser<'a> {
             entities: Vec::new(),
         };
 
+        // Optional format-version header (M11). Its presence puts the parser
+        // in STRICT mode, which requires the trailing sentinel — see
+        // SCENE_END_SENTINEL for why truncation would otherwise be silent.
+        // Its absence means a pre-M11 file, parsed leniently.
+        let mut strict = false;
+        if let Some(Token::Word(SCENE_FORMAT_HEADER)) = self.peek()? {
+            let line = self.lex.line;
+            self.next()?;
+            let version = self.expect_number()? as u32;
+            if version != SCENE_FORMAT_VERSION {
+                return Err(SceneError::new(
+                    line,
+                    format!(
+                        "unsupported scene format version {version}; \
+                         this engine reads and writes version {SCENE_FORMAT_VERSION}"
+                    ),
+                ));
+            }
+            strict = true;
+        }
+
         // Optional "scene" header.
         if let Some(Token::Word("scene")) = self.peek()? {
             self.next()?; // consume "scene"
             scene.name = self.expect_str()?;
         }
 
+        let mut saw_end = false;
         while self.peek()?.is_some() {
             let line = self.lex.line;
             match self.peek()? {
+                // Accepted in both modes; only *required* in strict mode, so a
+                // hand-written legacy file may add it without a version header.
+                Some(Token::Word(SCENE_END_SENTINEL)) => {
+                    self.next()?;
+                    if self.peek()?.is_some() {
+                        return Err(SceneError::new(
+                            line,
+                            format!("content after '{SCENE_END_SENTINEL}' terminator"),
+                        ));
+                    }
+                    saw_end = true;
+                    break;
+                }
                 Some(Token::Word("runtime_slice")) => {
                     self.next()?;
                     if !scene.runtime_slice.is_empty() {
@@ -433,6 +504,20 @@ impl<'a> Parser<'a> {
                     ));
                 }
             }
+        }
+
+        // The whole point of the sentinel: a file that *declares* the modern
+        // format but stops early was cut short. Without this check a scene
+        // truncated on an entity boundary parses as a valid SMALLER scene and
+        // the missing entities vanish with no error.
+        if strict && !saw_end {
+            return Err(SceneError::new(
+                self.lex.line,
+                format!(
+                    "truncated scene: file declares '{SCENE_FORMAT_HEADER}' but is missing the \
+                     '{SCENE_END_SENTINEL}' terminator — it was likely cut short"
+                ),
+            ));
         }
 
         Ok(scene)
@@ -1605,6 +1690,10 @@ pub fn spawn_scene(
 pub fn serialize_scene(scene: &SceneData) -> String {
     let mut out = String::with_capacity(1024);
 
+    // Version header first: it is what puts a reader into strict mode and so
+    // makes the trailing sentinel mandatory (M11).
+    out.push_str(&format!("{SCENE_FORMAT_HEADER} {SCENE_FORMAT_VERSION}\n\n"));
+
     if !scene.name.is_empty() {
         out.push_str(&format!("scene \"{}\"\n\n", scene.name));
     }
@@ -1799,6 +1888,11 @@ pub fn serialize_scene(scene: &SceneData) -> String {
 
         out.push_str("}\n\n");
     }
+
+    // Terminator. A reader that declared strict mode via the header and then
+    // hits EOF without this knows the file was cut short (M11).
+    out.push_str(SCENE_END_SENTINEL);
+    out.push('\n');
 
     out
 }
@@ -2212,6 +2306,114 @@ entity "player" {
         let roundtrip = parse_scene(&text).unwrap();
         assert_eq!(roundtrip.runtime_slice, scene.runtime_slice);
         assert_eq!(roundtrip.entities.len(), scene.entities.len());
+    }
+
+    // ── M11: truncation detection via the format header + sentinel ───────
+
+    /// `SceneData` deliberately does not derive `Debug`, so `unwrap_err()` is
+    /// unavailable on a parse result. Extract the error explicitly.
+    fn expect_parse_err(src: &str) -> SceneError {
+        match parse_scene(src) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a parse error, but the scene parsed successfully"),
+        }
+    }
+
+    /// The serializer emits the version header and the terminator, and the
+    /// result round-trips through the strict parser.
+    #[test]
+    fn serialized_scene_carries_header_and_sentinel_and_round_trips() {
+        let scene = parse_scene(SAMPLE).unwrap();
+        let text = serialize_scene(&scene);
+
+        assert!(
+            text.starts_with(&format!("{SCENE_FORMAT_HEADER} {SCENE_FORMAT_VERSION}")),
+            "serialized scene must declare the format version first"
+        );
+        assert!(
+            text.trim_end().ends_with(SCENE_END_SENTINEL),
+            "serialized scene must close with the terminator"
+        );
+
+        let roundtrip = parse_scene(&text).unwrap();
+        assert_eq!(roundtrip.entities.len(), scene.entities.len());
+    }
+
+    /// THE load-bearing test. A modern scene cut short on an entity boundary
+    /// is a typed error — the entities do not silently vanish.
+    ///
+    /// The second half of this test demonstrates the hazard the header exists
+    /// to close: the *identical* truncated text, stripped of its header, parses
+    /// happily as a valid smaller scene. That was the pre-M11 behaviour for
+    /// every file.
+    #[test]
+    fn truncated_scene_is_an_error_not_a_silently_smaller_scene() {
+        let scene = parse_scene(SAMPLE).unwrap();
+        assert!(scene.entities.len() >= 2, "sample needs several entities");
+        let text = serialize_scene(&scene);
+
+        // Cut on an entity boundary: right after the first entity's closing
+        // brace. This is exactly the shape a torn write produces.
+        let first_close = text.find("}\n\n").expect("entity block") + 3;
+        let truncated = &text[..first_close];
+
+        // Strict mode (header present): refused.
+        let err = expect_parse_err(truncated);
+        assert!(
+            err.to_string().contains(SCENE_END_SENTINEL),
+            "error should name the missing terminator, got: {err}"
+        );
+
+        // The hazard, demonstrated: strip the header and the very same bytes
+        // parse as a valid — but silently incomplete — scene.
+        let header_line = format!("{SCENE_FORMAT_HEADER} {SCENE_FORMAT_VERSION}\n\n");
+        let legacy = truncated.strip_prefix(header_line.as_str()).unwrap();
+        let silently_smaller = parse_scene(legacy).expect("legacy files stay lenient");
+        assert!(
+            silently_smaller.entities.len() < scene.entities.len(),
+            "this is the silent data loss the sentinel prevents"
+        );
+    }
+
+    /// Pre-M11 scenes (no header) keep parsing exactly as before — the
+    /// sentinel is opt-in on read, so existing content is not orphaned.
+    #[test]
+    fn legacy_scene_without_header_still_parses() {
+        let legacy = "scene \"Old\"\n\nentity \"a\" {\n  transform { pos 1 2 3 }\n}\n";
+        let scene = parse_scene(legacy).unwrap();
+        assert_eq!(scene.name, "Old");
+        assert_eq!(scene.entities.len(), 1);
+    }
+
+    /// A legacy file may adopt the terminator without the header; it is
+    /// accepted (and still terminates the parse) rather than being a syntax
+    /// error.
+    #[test]
+    fn sentinel_is_accepted_without_header() {
+        let text = format!("scene \"X\"\n\n{SCENE_END_SENTINEL}\n");
+        let scene = parse_scene(&text).unwrap();
+        assert_eq!(scene.name, "X");
+    }
+
+    /// Anything after the terminator means the file is not what it claims.
+    #[test]
+    fn content_after_sentinel_is_rejected() {
+        let scene = parse_scene(SAMPLE).unwrap();
+        let mut text = serialize_scene(&scene);
+        text.push_str("entity \"sneaky\" {\n}\n");
+        let err = expect_parse_err(&text);
+        assert!(err.to_string().contains("content after"), "got: {err}");
+    }
+
+    /// A future format version is refused loudly rather than mis-parsed.
+    #[test]
+    fn unsupported_scene_format_version_is_rejected() {
+        let text = format!("{SCENE_FORMAT_HEADER} 99\n\nscene \"X\"\n\n{SCENE_END_SENTINEL}\n");
+        let err = expect_parse_err(&text);
+        assert!(
+            err.to_string().contains("unsupported scene format version 99"),
+            "got: {err}"
+        );
     }
 
     // ── M11: the authored save path is atomic ────────────────────────────

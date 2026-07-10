@@ -21,6 +21,27 @@ use std::path::Path;
 
 use crate::platform::atomic_write::{atomic_write, AtomicWriteError};
 
+// ── `.hscene` document version + truncation terminator (M11) ─────────────────
+//
+// The editor's full-fidelity scene document. Its parser already rejects a
+// truncation *inside* an entity or component ("unterminated entity"), but a cut
+// exactly on an `endentity` boundary left every record well-formed — so the
+// document parsed as a valid, silently *smaller* scene and the trailing
+// entities disappeared without error.
+//
+// V2 adds a required terminator. V1 documents (everything written before M11)
+// are still accepted without one, so existing files are not orphaned.
+
+/// Legacy header. Accepted on read; never written. Parsed leniently — a V1
+/// document has no terminator to check.
+pub const HSCENE_DOC_HEADER_V1: &str = "HOLD_SCENE_DOC_V1";
+
+/// Current header. A document declaring it MUST close with [`HSCENE_DOC_END`].
+pub const HSCENE_DOC_HEADER_V2: &str = "HOLD_SCENE_DOC_V2";
+
+/// Terminator closing a V2 document. Its absence means the file was cut short.
+pub const HSCENE_DOC_END: &str = "endscenedoc";
+
 use crate::ecs::components::{
     ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
     SphereCollider, Stats, Transform, Velocity,
@@ -486,9 +507,13 @@ impl SceneDocument {
     }
 
     /// Serialize the editor scene document to a stable line-based text format.
+    ///
+    /// Writes the V2 header, which obliges a reader to require the
+    /// [`HSCENE_DOC_END`] terminator (M11). See that constant for why.
     pub fn to_hscene_string(&self) -> String {
         let mut out = String::new();
-        out.push_str("HOLD_SCENE_DOC_V1\n");
+        out.push_str(HSCENE_DOC_HEADER_V2);
+        out.push('\n');
         out.push_str(&format!("name|{}\n", escape_text(&self.name)));
         encode_runtime_slice_lines(&mut out, &self.runtime_slice);
         for entity in &self.entities {
@@ -510,15 +535,23 @@ impl SceneDocument {
             }
             out.push_str("endentity\n");
         }
+        out.push_str(HSCENE_DOC_END);
+        out.push('\n');
         out
     }
 
     /// Parse the editor scene document from the line-based text format.
+    ///
+    /// A V2 document must close with [`HSCENE_DOC_END`]; a V1 document
+    /// (written before M11) is accepted without it, so existing files are not
+    /// orphaned.
     pub fn from_hscene_str(src: &str) -> Result<Self, &'static str> {
         let mut lines = src.lines();
-        if lines.next() != Some("HOLD_SCENE_DOC_V1") {
-            return Err("invalid scene document header");
-        }
+        let strict = match lines.next() {
+            Some(HSCENE_DOC_HEADER_V2) => true,
+            Some(HSCENE_DOC_HEADER_V1) => false,
+            _ => return Err("invalid scene document header"),
+        };
 
         let name_line = lines.next().ok_or("missing scene name line")?;
         let (_, name) = name_line.split_once('|').ok_or("invalid scene name line")?;
@@ -534,9 +567,19 @@ impl SceneDocument {
 
         let mut current_entity: Option<EditorEntity> = None;
         let mut current_component: Option<InspectorComponent> = None;
+        let mut saw_end = false;
 
         for line in lines {
             if line.is_empty() {
+                continue;
+            }
+
+            if saw_end {
+                return Err("content after scene document terminator");
+            }
+
+            if line == HSCENE_DOC_END {
+                saw_end = true;
                 continue;
             }
 
@@ -617,6 +660,12 @@ impl SceneDocument {
         }
         if current_entity.is_some() {
             return Err("unterminated entity");
+        }
+        // A V2 document that stops before its terminator was cut short. Without
+        // this, a truncation on an `endentity` boundary parses as a valid but
+        // silently smaller document — every entity after the cut vanishes.
+        if strict && !saw_end {
+            return Err("truncated scene document: missing terminator");
         }
 
         Ok(doc)
@@ -2965,5 +3014,82 @@ entity "sun" {
 
         let sun = id_to_entity[&2];
         assert!(world.has_component::<DirectionalLight>(sun));
+    }
+
+    // ── M11: .hscene truncation detection ────────────────────────────────
+
+    fn sample_doc() -> SceneDocument {
+        SceneDocument {
+            name: "Doc".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
+            entities: vec![
+                EditorEntity {
+                    id: 1,
+                    name: "a".into(),
+                    components: vec![InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([1.0, 2.0, 3.0]),
+                        }],
+                    }],
+                },
+                EditorEntity {
+                    id: 2,
+                    name: "b".into(),
+                    components: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn hscene_doc_carries_v2_header_and_terminator_and_round_trips() {
+        let doc = sample_doc();
+        let text = doc.to_hscene_string();
+        assert!(text.starts_with(HSCENE_DOC_HEADER_V2));
+        assert!(text.trim_end().ends_with(HSCENE_DOC_END));
+        assert_eq!(SceneDocument::from_hscene_str(&text).unwrap(), doc);
+    }
+
+    /// A V2 document cut on an `endentity` boundary — every record well-formed,
+    /// so the old parser accepted it as a smaller scene — is now an error.
+    #[test]
+    fn truncated_hscene_doc_is_an_error_not_a_smaller_doc() {
+        let doc = sample_doc();
+        let text = doc.to_hscene_string();
+
+        // Cut right after the FIRST entity's `endentity`, dropping entity "b".
+        let cut = text.find("endentity\n").unwrap() + "endentity\n".len();
+        let truncated = &text[..cut];
+
+        let err = SceneDocument::from_hscene_str(truncated).unwrap_err();
+        assert!(err.contains("truncated"), "got: {err}");
+
+        // The hazard, demonstrated: the same bytes under the V1 header parse
+        // as a valid but silently smaller document.
+        let legacy = truncated.replacen(HSCENE_DOC_HEADER_V2, HSCENE_DOC_HEADER_V1, 1);
+        let smaller = SceneDocument::from_hscene_str(&legacy).unwrap();
+        assert_eq!(smaller.entities.len(), 1, "entity 'b' silently vanished");
+    }
+
+    /// Pre-M11 V1 documents still load, terminator or not.
+    #[test]
+    fn legacy_v1_hscene_doc_still_parses() {
+        let doc = sample_doc();
+        let v1 = doc
+            .to_hscene_string()
+            .replacen(HSCENE_DOC_HEADER_V2, HSCENE_DOC_HEADER_V1, 1)
+            .replace(&format!("{HSCENE_DOC_END}\n"), "");
+        let parsed = SceneDocument::from_hscene_str(&v1).unwrap();
+        assert_eq!(parsed.entities.len(), 2);
+    }
+
+    #[test]
+    fn content_after_hscene_terminator_is_rejected() {
+        let mut text = sample_doc().to_hscene_string();
+        text.push_str("entity|9|sneaky\nendentity\n");
+        let err = SceneDocument::from_hscene_str(&text).unwrap_err();
+        assert!(err.contains("content after"), "got: {err}");
     }
 }
