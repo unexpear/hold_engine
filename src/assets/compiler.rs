@@ -500,6 +500,27 @@ pub fn compile_material_asset(
     )?)
 }
 
+/// Write a compiled asset to the compiled tree.
+///
+/// # Why this is deliberately NOT an atomic write (M11 decision record)
+///
+/// M11 routed every *authored* writer (`.hsc`, `.hscene`, `.hproj`) through
+/// [`crate::platform::atomic_write`], because authored work is irreplaceable:
+/// a torn write destroys something the user cannot get back.
+///
+/// Compiled assets are the opposite: **derived, regenerable data**. M10 gave
+/// the envelope a CRC-32 integrity footer and made `source_asset_is_stale`
+/// version- and checksum-aware, so a torn `.hcmp` fails its CRC, reads as
+/// *stale*, and is transparently regenerated from the authored source. The
+/// worst case is one recompile — never data loss.
+///
+/// Making this atomic would therefore buy nothing, while costing a real
+/// `FlushFileBuffers` per asset across a full build of hundreds or thousands
+/// of files. That is a measurable build-time cost for zero authored-data
+/// benefit, so the plain `fs::write` stays on purpose.
+///
+/// This is a decision, not an oversight. If compiled assets ever become
+/// non-regenerable (e.g. a shipped asset pack with no sources), revisit it.
 pub fn write_compiled_asset(
     compiled_root: &Path,
     blob: &CompiledAssetBlob,

@@ -19,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use crate::platform::atomic_write::{atomic_write, AtomicWriteError};
+
 use crate::ecs::components::{
     ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
     SphereCollider, Stats, Transform, Velocity,
@@ -1667,6 +1669,11 @@ pub enum EditorIoError {
     Parse(&'static str),
     Scene(SceneError),
     Bridge(SceneBridgeError),
+    /// An atomic save failed. The destination file is unchanged and still
+    /// holds its previous complete contents, so the caller MUST NOT clear a
+    /// dirty flag — the user's work is still only in memory. The variant
+    /// names the failing phase and carries the Win32 error code (M11).
+    AtomicWrite(AtomicWriteError),
 }
 
 impl std::fmt::Display for EditorIoError {
@@ -1676,15 +1683,31 @@ impl std::fmt::Display for EditorIoError {
             Self::Parse(msg) => write!(f, "editor parse error: {msg}"),
             Self::Scene(err) => write!(f, "editor scene error: {err}"),
             Self::Bridge(err) => write!(f, "editor scene bridge error: {err}"),
+            Self::AtomicWrite(err) => write!(f, "editor save failed: {err}"),
         }
     }
 }
 
-impl std::error::Error for EditorIoError {}
+impl std::error::Error for EditorIoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Scene(e) => Some(e),
+            Self::AtomicWrite(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
-/// Save a project document to its `.hproj` location.
+/// Save a project document to its `.hproj` location, atomically and durably.
+/// A crash mid-save leaves the previous `.hproj` intact rather than an
+/// unopenable truncated one (ADR 0003 Pillar 3).
 pub fn save_project(project: &Project) -> Result<(), EditorIoError> {
-    fs::write(project.project_file(), project.to_hproj_string()).map_err(EditorIoError::Io)
+    atomic_write(
+        Path::new(&project.project_file()),
+        project.to_hproj_string().as_bytes(),
+    )
+    .map_err(EditorIoError::AtomicWrite)
 }
 
 /// Load a project document from a `.hproj` file path.
@@ -1693,9 +1716,14 @@ pub fn load_project<P: AsRef<Path>>(path: P) -> Result<Project, EditorIoError> {
     Project::from_hproj_str(&src).map_err(EditorIoError::Parse)
 }
 
-/// Save an editor scene document to a file path.
+/// Save an editor scene document to a file path, atomically and durably.
+///
+/// `.hscene` is the only format that round-trips the full-fidelity inspector
+/// representation (the `.hsc` bridge drops editor-only components), so a torn
+/// write here loses strictly more than a torn `.hsc`.
 pub fn save_scene_doc<P: AsRef<Path>>(path: P, scene: &SceneDocument) -> Result<(), EditorIoError> {
-    fs::write(path, scene.to_hscene_string()).map_err(EditorIoError::Io)
+    atomic_write(path.as_ref(), scene.to_hscene_string().as_bytes())
+        .map_err(EditorIoError::AtomicWrite)
 }
 
 /// Load an editor scene document from a file path.
@@ -1716,7 +1744,7 @@ pub fn save_scene_doc_to_hsc<P: AsRef<Path>>(
     scene: &SceneDocument,
 ) -> Result<(), EditorIoError> {
     let runtime_scene = scene.to_scene_data().map_err(EditorIoError::Bridge)?;
-    save_scene(path, &runtime_scene).map_err(EditorIoError::Scene)
+    save_scene(path, &runtime_scene).map_err(EditorIoError::AtomicWrite)
 }
 
 #[derive(Debug)]

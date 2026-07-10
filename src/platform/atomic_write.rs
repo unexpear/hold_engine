@@ -200,12 +200,7 @@ fn atomic_write_impl(
     bytes: &[u8],
     fault: AtomicWriteFault,
 ) -> Result<(), AtomicWriteError> {
-    let parent = dest
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| AtomicWriteError::NoParentDirectory {
-            dest: dest.to_path_buf(),
-        })?;
+    let parent = temp_parent(dest)?;
 
     let (handle, temp) = create_temp_file(dest, parent)?;
 
@@ -282,6 +277,25 @@ fn atomic_write_impl(
     }
 
     Ok(())
+}
+
+/// The directory the temp file must be created in: the destination's own
+/// directory, so the subsequent `MoveFileExW` is a same-volume atomic swap.
+///
+/// A bare filename (`"scene.hsc"`) has an *empty* parent but resolves against
+/// the current directory — still the destination's directory — so it maps to
+/// `"."`. Only a genuinely parentless path (empty string, or a filesystem
+/// root like `C:\`) is refused, since there is no directory to place a temp
+/// in. Pure function so the path logic is testable without mutating the
+/// process-wide current directory.
+fn temp_parent(dest: &Path) -> Result<&Path, AtomicWriteError> {
+    match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Ok(p),
+        Some(_) => Ok(Path::new(".")),
+        None => Err(AtomicWriteError::NoParentDirectory {
+            dest: dest.to_path_buf(),
+        }),
+    }
 }
 
 /// Create a uniquely-named temp file next to `dest`. `CREATE_NEW` makes a
@@ -620,13 +634,38 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// A destination with no parent directory is refused rather than silently
-    /// placing the temp somewhere else (which would break same-volume
-    /// atomicity).
+    /// A genuinely parentless path (empty, or a filesystem root) is refused
+    /// rather than silently placing the temp somewhere else, which would
+    /// break same-volume atomicity.
     #[test]
     fn destination_without_parent_is_rejected() {
-        let err = atomic_write(Path::new("scene.hsc"), NEW).unwrap_err();
-        assert!(matches!(err, AtomicWriteError::NoParentDirectory { .. }));
+        for p in ["", "\\", "C:\\"] {
+            let err = atomic_write(Path::new(p), NEW).unwrap_err();
+            assert!(
+                matches!(err, AtomicWriteError::NoParentDirectory { .. }),
+                "expected NoParentDirectory for {p:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// Temp placement resolution, tested as a pure function — mutating the
+    /// process-wide current directory in a test would race with every other
+    /// test in the binary.
+    ///
+    /// A bare filename resolves against the current directory (still the
+    /// destination's own directory, so same-volume atomicity holds) rather
+    /// than being refused.
+    #[test]
+    fn temp_parent_resolves_bare_filename_to_current_directory() {
+        assert_eq!(temp_parent(Path::new("scene.hsc")).unwrap(), Path::new("."));
+        assert_eq!(
+            temp_parent(Path::new("dir/scene.hsc")).unwrap(),
+            Path::new("dir")
+        );
+        assert_eq!(
+            temp_parent(Path::new("C:\\proj\\scene.hsc")).unwrap(),
+            Path::new("C:\\proj")
+        );
     }
 
     /// Temp files are created in the destination's OWN directory. Placing

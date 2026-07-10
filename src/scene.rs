@@ -31,6 +31,8 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+use crate::platform::atomic_write::{atomic_write, AtomicWriteError};
+
 use crate::ecs::components::{
     ActiveCamera, Camera, DirectionalLight, GlobalTransform, ParticleEmitter, RigidBody,
     SphereCollider, Stats, Transform, Velocity,
@@ -1801,10 +1803,21 @@ pub fn serialize_scene(scene: &SceneData) -> String {
     out
 }
 
-/// Save a scene to a file.
-pub fn save_scene<P: AsRef<Path>>(path: P, scene: &SceneData) -> Result<(), SceneError> {
+/// Save a scene to a file, atomically and durably.
+///
+/// The scene is serialized fully in memory first, then written through
+/// [`atomic_write`]: a power loss leaves either the previous scene or the new
+/// scene on disk, never a half-written one (ADR 0003 Pillar 3). On any error
+/// the destination retains its previous complete contents.
+///
+/// The error type is [`AtomicWriteError`], not [`SceneError`]: serialization
+/// is infallible, so the only way this fails is the write itself. Previously
+/// the `io::Error` was laundered into `SceneError::new(0, format!("IO: {e}"))`
+/// — a `String` error with a meaningless line number that made a disk failure
+/// type-indistinguishable from a parse failure.
+pub fn save_scene<P: AsRef<Path>>(path: P, scene: &SceneData) -> Result<(), AtomicWriteError> {
     let text = serialize_scene(scene);
-    fs::write(path, text).map_err(|e| SceneError::new(0, format!("IO: {e}")))
+    atomic_write(path.as_ref(), text.as_bytes())
 }
 
 fn write_runtime_slice(out: &mut String, slice: &RuntimeSliceAuthoring) {
@@ -2199,5 +2212,90 @@ entity "player" {
         let roundtrip = parse_scene(&text).unwrap();
         assert_eq!(roundtrip.runtime_slice, scene.runtime_slice);
         assert_eq!(roundtrip.entities.len(), scene.entities.len());
+    }
+
+    // ── M11: the authored save path is atomic ────────────────────────────
+
+    fn scene_test_dir(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "hold_scene_save_{}_{}_{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `save_scene` writes through the atomic primitive: the file round-trips,
+    /// and a successful save leaves no temp litter beside it.
+    #[test]
+    fn save_scene_round_trips_and_leaves_no_temp_litter() {
+        let dir = scene_test_dir("roundtrip");
+        let path = dir.join("level.hsc");
+
+        let scene = parse_scene(SAMPLE).unwrap();
+        save_scene(&path, &scene).unwrap();
+
+        let reloaded = load_scene(&path).unwrap();
+        assert_eq!(reloaded.name, scene.name);
+        assert_eq!(reloaded.entities.len(), scene.entities.len());
+
+        let temps = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(crate::platform::atomic_write::TEMP_PREFIX)
+            })
+            .count();
+        assert_eq!(temps, 0, "a successful save must leave no temp file");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Overwriting an existing scene never leaves the destination truncated:
+    /// the previous file is replaced whole. Guards the charter's
+    /// old-or-new invariant at the `save_scene` layer, not just inside the
+    /// primitive.
+    #[test]
+    fn save_scene_over_existing_file_replaces_it_wholly() {
+        let dir = scene_test_dir("overwrite");
+        let path = dir.join("level.hsc");
+
+        // A big scene first, then a small one: a truncate-in-place writer
+        // would leave trailing bytes of the old file behind.
+        let big = parse_scene(SAMPLE).unwrap();
+        save_scene(&path, &big).unwrap();
+        let small = parse_scene("scene \"Tiny\"\n").unwrap();
+        save_scene(&path, &small).unwrap();
+
+        let reloaded = load_scene(&path).unwrap();
+        assert_eq!(reloaded.name, "Tiny");
+        assert!(reloaded.entities.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), serialize_scene(&small));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A save into a directory that does not exist surfaces a typed
+    /// AtomicWriteError naming the failing phase — not a stringified
+    /// `SceneError { line: 0, msg: "IO: ..." }` (the pre-M11 behaviour, which
+    /// made a disk failure indistinguishable from a parse failure).
+    #[test]
+    fn save_scene_surfaces_typed_write_error() {
+        let dir = scene_test_dir("typed_err");
+        let path = dir.join("missing").join("level.hsc");
+        let scene = parse_scene(SAMPLE).unwrap();
+        match save_scene(&path, &scene) {
+            Err(AtomicWriteError::TempCreate { win32_error, .. }) => {
+                assert_ne!(win32_error, 0);
+            }
+            other => panic!("expected typed TempCreate error, got {other:?}"),
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 }
