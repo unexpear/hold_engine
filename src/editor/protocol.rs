@@ -81,6 +81,8 @@ pub fn encode_command(command: &EditorCommand) -> String {
         EditorCommand::ReloadSource => "cmd|ReloadSource".into(),
         EditorCommand::ForcePatch => "cmd|ForcePatch".into(),
         EditorCommand::ForceRebuild => "cmd|ForceRebuild".into(),
+        EditorCommand::RecoverAutosave => "cmd|RecoverAutosave".into(),
+        EditorCommand::DiscardAutosave => "cmd|DiscardAutosave".into(),
         EditorCommand::SetTerrainSettings {
             size_meters,
             chunk_size_meters,
@@ -240,6 +242,12 @@ pub fn decode_command(message: &str) -> Result<EditorCommand, EditorProtocolErro
         "ReloadSource" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ReloadSource),
         "ForcePatch" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ForcePatch),
         "ForceRebuild" => expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::ForceRebuild),
+        "RecoverAutosave" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::RecoverAutosave)
+        }
+        "DiscardAutosave" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorCommand::DiscardAutosave)
+        }
         "SetTerrainSettings" => {
             expect_len(tokens.as_slice(), 7)?;
             Ok(EditorCommand::SetTerrainSettings {
@@ -383,6 +391,10 @@ pub fn encode_event(event: &EditorEvent) -> String {
         EditorEvent::RuntimeSliceUpdated { path } => {
             format!("evt|RuntimeSliceUpdated|{}", escape_token(path))
         }
+        EditorEvent::AutosaveRecovered { path } => {
+            format!("evt|AutosaveRecovered|{}", escape_token(path))
+        }
+        EditorEvent::AutosaveDiscarded => "evt|AutosaveDiscarded".into(),
         EditorEvent::FrameCaptured { generation, passes } => {
             // Serialize as generation|count|(index|name|w|h)*. Pixel
             // data intentionally does not travel over the line
@@ -462,6 +474,15 @@ pub fn decode_event(message: &str) -> Result<EditorEvent, EditorProtocolError> {
             Ok(EditorEvent::RuntimeSliceUpdated {
                 path: tokens[2].clone(),
             })
+        }
+        "AutosaveRecovered" => {
+            expect_len(tokens.as_slice(), 3)?;
+            Ok(EditorEvent::AutosaveRecovered {
+                path: tokens[2].clone(),
+            })
+        }
+        "AutosaveDiscarded" => {
+            expect_len(tokens.as_slice(), 2).map(|_| EditorEvent::AutosaveDiscarded)
         }
         "AssetInvalidated" => {
             expect_len(tokens.as_slice(), 5)?;
@@ -788,6 +809,8 @@ mod tests {
             EditorCommand::Redo,
             EditorCommand::ReloadSource,
             EditorCommand::ForceRebuild,
+            EditorCommand::RecoverAutosave,
+            EditorCommand::DiscardAutosave,
             EditorCommand::SetTerrainSettings {
                 size_meters: Vec3::new(1024.0, 320.0, 1024.0),
                 chunk_size_meters: 64,
@@ -1086,6 +1109,27 @@ mod tests {
                 assert_eq!(error, "missing field `albedo` | line 12");
             }
             other => panic!("expected CompileFailed, got {:?}", other),
+        }
+    }
+
+    /// The M11 recovery events round-trip over the bridge, including a path
+    /// containing protocol-reserved characters. A codec mismatch here would
+    /// silently break recovery for a remote editor client.
+    #[test]
+    fn autosave_recovery_events_roundtrip() {
+        let original = EditorEvent::AutosaveRecovered {
+            path: "C:\\proj\\.hold/recovery/awkward | name.hsc.autosave".into(),
+        };
+        match decode_event(&encode_event(&original)).unwrap() {
+            EditorEvent::AutosaveRecovered { path } => {
+                assert_eq!(path, "C:\\proj\\.hold/recovery/awkward | name.hsc.autosave");
+            }
+            other => panic!("expected AutosaveRecovered, got {other:?}"),
+        }
+
+        match decode_event(&encode_event(&EditorEvent::AutosaveDiscarded)).unwrap() {
+            EditorEvent::AutosaveDiscarded => {}
+            other => panic!("expected AutosaveDiscarded, got {other:?}"),
         }
     }
 

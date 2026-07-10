@@ -442,6 +442,23 @@ impl EditorShellApp {
                 );
             }
         }
+
+        // Crash-recovery probe (M11). A leftover recovery sidecar means unsaved
+        // work never reached the source file. We PROMPT rather than auto-load:
+        // silently replacing the scene the user just opened would be its own
+        // kind of data loss. The palette exposes Recover / Discard.
+        if let Some(path) = app.server.host().pending_recovery() {
+            app.push_action_log(
+                EditorUiActionTone::Error,
+                "Unsaved work recovered",
+                format!(
+                    "A previous session ended with unsaved changes ({}). \
+                     Open the command palette: Recover Autosave, or Discard Recovery.",
+                    path.display()
+                ),
+            );
+        }
+
         app.refresh_status();
         app
     }
@@ -1105,6 +1122,26 @@ impl EditorShellApp {
             vec![EditorCommand::Save],
             EditorUiPaletteEntrySource::BuiltIn,
         );
+
+        // Crash recovery (M11). Only offered while a sidecar actually exists,
+        // so the palette does not advertise a no-op.
+        let has_recovery = host.pending_recovery().is_some();
+        push_entry(
+            "Recover Autosave",
+            "Load unsaved work from a previous session (still unsaved afterwards)",
+            "recover autosave crash restore unsaved",
+            has_recovery && play_state == EditorPlayState::Editing,
+            vec![EditorCommand::RecoverAutosave],
+            EditorUiPaletteEntrySource::BuiltIn,
+        );
+        push_entry(
+            "Discard Recovery",
+            "Delete the recovery file and keep the scene as it is on disk",
+            "discard recovery autosave delete",
+            has_recovery,
+            vec![EditorCommand::DiscardAutosave],
+            EditorUiPaletteEntrySource::BuiltIn,
+        );
         push_entry(
             "Undo Last Edit",
             "Restore the previous authored snapshot",
@@ -1534,6 +1571,14 @@ impl EditorShellApp {
                 "Command Rebuild".into(),
                 "Rebuild runtime world from document".into(),
             ),
+            EditorCommand::RecoverAutosave => (
+                "Command Recover".into(),
+                "Load unsaved work from the autosave recovery file".into(),
+            ),
+            EditorCommand::DiscardAutosave => (
+                "Command Discard Recovery".into(),
+                "Delete the recovery file and keep the on-disk scene".into(),
+            ),
             EditorCommand::EnterPlayMode => ("Command Play".into(), "Enter play mode".into()),
             EditorCommand::PausePlayMode => {
                 ("Command Pause".into(), "Pause runtime simulation".into())
@@ -1654,6 +1699,16 @@ impl EditorShellApp {
             EditorEvent::RuntimeSliceUpdated { path } => (
                 "Event Runtime Slice Updated".into(),
                 path.clone(),
+                EditorUiActionTone::Event,
+            ),
+            EditorEvent::AutosaveRecovered { path } => (
+                "Event Autosave Recovered".into(),
+                format!("Unsaved work restored from {path}; still unsaved — press Ctrl+S"),
+                EditorUiActionTone::Suggestion,
+            ),
+            EditorEvent::AutosaveDiscarded => (
+                "Event Autosave Discarded".into(),
+                "Recovery file deleted; on-disk scene kept".into(),
                 EditorUiActionTone::Event,
             ),
             EditorEvent::AssetInvalidated {
@@ -2074,6 +2129,12 @@ impl EditorShellApp {
                             generation,
                             passes.len()
                         );
+                    }
+                    EditorEvent::AutosaveRecovered { path } => {
+                        println!("[editor] recovered unsaved work from {path}");
+                    }
+                    EditorEvent::AutosaveDiscarded => {
+                        println!("[editor] discarded autosave recovery file");
                     }
                 }
             }

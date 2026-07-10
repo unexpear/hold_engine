@@ -593,6 +593,64 @@ impl EditorRuntimeHost {
         }
     }
 
+    /// A recovery sidecar left over from a previous session, if any.
+    ///
+    /// Its presence means unsaved work never made it into the source file —
+    /// the session ended (crashed, or was quit) between an autosave and a
+    /// save. An explicit save always deletes the sidecar, so a leftover one is
+    /// never a false positive after a clean save.
+    ///
+    /// Recovery is offered, never applied automatically: silently loading the
+    /// sidecar would overwrite whatever file the user deliberately opened.
+    pub fn pending_recovery(&self) -> Option<PathBuf> {
+        let path = self.recovery_path()?;
+        path.is_file().then_some(path)
+    }
+
+    fn cmd_recover_autosave(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        if self.play_state() != EditorPlayState::Editing {
+            return Err(EditorCommandError::UnsupportedCommandState {
+                command: "RecoverAutosave",
+                state: self.play_state(),
+            });
+        }
+        let path = self
+            .pending_recovery()
+            .ok_or(EditorCommandError::MissingSourcePath)?;
+
+        let recovered = super::load_scene_doc(&path)
+            .map_err(|err| EditorCommandError::Session(EditorSessionError::Io(err)))?;
+
+        *self.session.scene_mut() = recovered;
+        self.session
+            .rebuild_world(&mut self.world)
+            .map_err(EditorCommandError::Session)?;
+        self.world_requires_rebuild = false;
+        // Undo history predates the recovered document; keeping it would let
+        // an undo splice the two together into a scene that never existed.
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.init_cursor_to_first();
+
+        // The recovered document differs from the on-disk source, so it is
+        // unsaved work. Marking it edited also re-arms the autosave scheduler.
+        self.mark_edited();
+
+        Ok(vec![
+            EditorEvent::AutosaveRecovered {
+                path: path.display().to_string(),
+            },
+            EditorEvent::WorldRebuilt,
+        ])
+    }
+
+    fn cmd_discard_autosave(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
+        // Idempotent: discarding when there is nothing to discard is a no-op,
+        // not an error, so a stale UI prompt cannot fail the command.
+        self.clear_recovery();
+        Ok(vec![EditorEvent::AutosaveDiscarded])
+    }
+
     /// Whether the live world is stale and needs a rebuild to match the scene.
     pub fn world_requires_rebuild(&self) -> bool {
         self.world_requires_rebuild
@@ -802,6 +860,8 @@ impl EditorRuntimeHost {
             EditorCommand::ReloadSource => self.cmd_reload_source(),
             EditorCommand::ForcePatch => self.cmd_force_patch(),
             EditorCommand::ForceRebuild => self.cmd_force_rebuild(),
+            EditorCommand::RecoverAutosave => self.cmd_recover_autosave(),
+            EditorCommand::DiscardAutosave => self.cmd_discard_autosave(),
             EditorCommand::SetTerrainSettings {
                 size_meters,
                 chunk_size_meters,
@@ -2927,6 +2987,120 @@ entity "cam" {
         assert!(
             !recovery.exists(),
             "a successful save must clear the recovery sidecar"
+        );
+    }
+
+    // ── M11: crash recovery ──────────────────────────────────────────────
+
+    /// The end-to-end promise: edit, autosave, "crash" (drop the host without
+    /// saving), reopen — the unsaved work is detected and recoverable, and the
+    /// recovered scene is still marked unsaved.
+    #[test]
+    fn unsaved_work_survives_a_crash_and_is_recoverable() {
+        let path = write_single_entity_scene("recover_roundtrip");
+
+        // Session 1: edit, autosave, then "crash" (never save).
+        let recovered_terrain = {
+            let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+            dirty_the_host(&mut host);
+            host.autosave_to_recovery().unwrap().unwrap();
+            host.session().scene().runtime_slice.clone()
+            // host dropped without Save — exactly a crash from disk's view.
+        };
+
+        // Session 2: reopen. The source is untouched, so the freshly loaded
+        // scene lacks the edit — but the sidecar is found.
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        assert!(!host.is_dirty(), "a freshly opened scene is clean");
+        assert_ne!(
+            host.session().scene().runtime_slice,
+            recovered_terrain,
+            "the source file must NOT contain the unsaved edit"
+        );
+        let pending = host.pending_recovery().expect("crash evidence must be found");
+        assert!(pending.is_file());
+
+        // Recover: the unsaved edit comes back, and is still unsaved.
+        host.execute(EditorCommand::RecoverAutosave).unwrap();
+        assert_eq!(
+            host.session().scene().runtime_slice,
+            recovered_terrain,
+            "recovery must restore the unsaved edit"
+        );
+        assert!(
+            host.is_dirty(),
+            "recovered work is still unsaved relative to the source"
+        );
+    }
+
+    /// Recovery is never automatic: merely opening a scene with a pending
+    /// sidecar must leave the on-disk document loaded, untouched.
+    #[test]
+    fn recovery_is_offered_not_applied_automatically() {
+        let path = write_single_entity_scene("recover_prompted");
+        {
+            let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+            dirty_the_host(&mut host);
+            host.autosave_to_recovery().unwrap().unwrap();
+        }
+
+        let host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        assert!(host.pending_recovery().is_some(), "sidecar present");
+        assert!(
+            !host.is_dirty(),
+            "opening must not silently install the recovery document"
+        );
+    }
+
+    /// Declining recovery deletes the sidecar and keeps the on-disk scene.
+    #[test]
+    fn discarding_recovery_deletes_the_sidecar_and_keeps_the_source() {
+        let path = write_single_entity_scene("recover_discard");
+        let source_before = std::fs::read(&path).unwrap();
+        {
+            let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+            dirty_the_host(&mut host);
+            host.autosave_to_recovery().unwrap().unwrap();
+        }
+
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        assert!(host.pending_recovery().is_some());
+        host.execute(EditorCommand::DiscardAutosave).unwrap();
+
+        assert!(host.pending_recovery().is_none(), "sidecar must be gone");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            source_before,
+            "discarding must not touch the source scene"
+        );
+    }
+
+    /// Discarding when there is nothing to discard is a no-op, not an error —
+    /// a stale UI prompt must not be able to fail the command.
+    #[test]
+    fn discarding_without_a_sidecar_is_idempotent() {
+        let path = write_single_entity_scene("recover_idempotent");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        assert!(host.pending_recovery().is_none());
+        host.execute(EditorCommand::DiscardAutosave).unwrap();
+        host.execute(EditorCommand::DiscardAutosave).unwrap();
+    }
+
+    /// A clean save leaves no sidecar, so reopening does not falsely claim a
+    /// crash. Guards against the recovery prompt crying wolf after every save.
+    #[test]
+    fn clean_save_leaves_no_crash_evidence() {
+        let path = write_single_entity_scene("recover_no_false_positive");
+        {
+            let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+            dirty_the_host(&mut host);
+            host.autosave_to_recovery().unwrap().unwrap();
+            host.execute(EditorCommand::Save).unwrap();
+        }
+        let host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        assert!(
+            host.pending_recovery().is_none(),
+            "a clean save must leave no crash evidence"
         );
     }
 }

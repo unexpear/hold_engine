@@ -73,6 +73,14 @@ pub enum EditorCommand {
     ReloadSource,
     ForcePatch,
     ForceRebuild,
+    /// Load the autosave recovery sidecar into the live scene, replacing the
+    /// document loaded from the on-disk source. Recovery is always explicit:
+    /// silently loading it would overwrite whatever the user just opened.
+    /// Result is dirty — the recovered work is still unsaved (M11).
+    RecoverAutosave,
+    /// Delete the recovery sidecar and keep the on-disk source as loaded. The
+    /// only thing lost is the unsaved delta the user chose to discard (M11).
+    DiscardAutosave,
     SetTerrainSettings {
         size_meters: Vec3,
         chunk_size_meters: u32,
@@ -159,6 +167,13 @@ pub enum EditorEvent {
         logical_name: String,
         error: String,
     },
+    /// Unsaved work from a previous session was recovered from its autosave
+    /// sidecar and installed into the live scene. The scene is now dirty
+    /// relative to the on-disk source (M11).
+    AutosaveRecovered { path: String },
+    /// The user declined recovery; the sidecar was deleted and the on-disk
+    /// source is authoritative (M11).
+    AutosaveDiscarded,
     /// The frame graph produced a new per-pass thumbnail capture
     /// (M9 — ADR 0002 Q8, ADR 0003 Pillar 4). Carries pass metadata
     /// only; the RGBA pixel data stays on the native side. Bridge
