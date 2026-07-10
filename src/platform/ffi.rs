@@ -381,7 +381,50 @@ extern "system" {
     ) -> BOOL;
     pub fn CancelIoEx(hFile: HANDLE, lpOverlapped: *mut OVERLAPPED) -> BOOL;
     pub fn CloseHandle(hObject: HANDLE) -> BOOL;
+
+    // ── Atomic-write entry points (M11, ADR 0003 Pillar 3) ───────────────
+    //
+    // `std::fs::rename` is unusable for an atomic replace on Windows: it
+    // fails when the destination already exists. `MoveFileExW` with
+    // MOVEFILE_REPLACE_EXISTING performs the swap as a single journalled
+    // directory-entry update, which is what makes "either the old file or
+    // the new file, never a half-written one" true.
+    pub fn WriteFile(
+        hFile: HANDLE,
+        lpBuffer: *const c_void,
+        nNumberOfBytesToWrite: DWORD,
+        lpNumberOfBytesWritten: *mut DWORD,
+        lpOverlapped: *mut OVERLAPPED,
+    ) -> BOOL;
+    /// Force the file's buffered data to physical media. Must succeed
+    /// *before* the rename, otherwise the directory entry could point at
+    /// a file whose contents never reached disk.
+    pub fn FlushFileBuffers(hFile: HANDLE) -> BOOL;
+    pub fn MoveFileExW(
+        lpExistingFileName: LPCWSTR,
+        lpNewFileName: LPCWSTR,
+        dwFlags: DWORD,
+    ) -> BOOL;
+    pub fn DeleteFileW(lpFileName: LPCWSTR) -> BOOL;
 }
+
+// ── Atomic-write constants (M11) ─────────────────────────────────────────────
+
+pub const GENERIC_WRITE: DWORD = 0x4000_0000;
+/// Fail if the file already exists — used for the temp file so a unique
+/// name collision is detected rather than silently clobbering.
+pub const CREATE_NEW: DWORD = 1;
+pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x0000_0080;
+
+/// Replace the destination if it exists. Without this flag `MoveFileExW`
+/// fails exactly the way `std::fs::rename` does.
+pub const MOVEFILE_REPLACE_EXISTING: DWORD = 0x0000_0001;
+/// Do not return until the rename has been flushed to disk. Windows has
+/// no POSIX-style directory fsync; this is the equivalent guarantee for
+/// the directory-entry update.
+pub const MOVEFILE_WRITE_THROUGH: DWORD = 0x0000_0008;
+
+pub const ERROR_ALREADY_EXISTS: DWORD = 183;
 
 #[link(name = "gdi32")]
 extern "system" {
