@@ -2495,16 +2495,22 @@ entity "player" {
     }
 
     /// Overwriting an existing scene never leaves the destination truncated:
-    /// the previous file is replaced whole. Guards the charter's
-    /// old-or-new invariant at the `save_scene` layer, not just inside the
-    /// primitive.
+    /// Saving a smaller scene over a larger one leaves the file holding exactly
+    /// the new content (no stale bytes), and it reloads correctly.
+    ///
+    /// Note: this checks the SUCCESS-path result, which a plain truncating
+    /// `fs::write` would also satisfy (`File::create` truncates, so it does not
+    /// leave trailing bytes either). The atomicity that distinguishes
+    /// `save_scene` — old-or-new under a crash, and no temp litter — is proven
+    /// in `platform::atomic_write` (the fault-injection suite) and by
+    /// `save_scene_round_trips_and_leaves_no_temp_litter`. This test guards the
+    /// plumbing: that the smaller document round-trips through the real save
+    /// path without corruption.
     #[test]
-    fn save_scene_over_existing_file_replaces_it_wholly() {
+    fn save_scene_over_existing_file_round_trips_smaller_content() {
         let dir = scene_test_dir("overwrite");
         let path = dir.join("level.hsc");
 
-        // A big scene first, then a small one: a truncate-in-place writer
-        // would leave trailing bytes of the old file behind.
         let big = parse_scene(SAMPLE).unwrap();
         save_scene(&path, &big).unwrap();
         let small = parse_scene("scene \"Tiny\"\n").unwrap();

@@ -2887,13 +2887,19 @@ entity "camera" {
         assert_eq!(loaded, doc);
     }
 
-    // ── M11: the sibling authored writers are atomic too (review) ─────────
+    // ── M11: the sibling authored writers route through atomic_write (review)
     //
-    // save_scene (.hsc) has whole-replacement + typed-error tests in scene.rs.
-    // save_project (.hproj) and save_scene_doc (.hscene) route through the same
-    // atomic_write primitive; these pin that they do (whole replacement, no
-    // trailing bytes from a larger previous file) and surface a typed
-    // EditorIoError::AtomicWrite on failure, not a stringified io::Error.
+    // save_scene (.hsc) has round-trip + typed-error tests in scene.rs.
+    // save_project (.hproj) and save_scene_doc (.hscene) go through the same
+    // atomic_write primitive. These pin that a smaller document round-trips
+    // over a larger one without corruption, and that a failure surfaces a
+    // typed EditorIoError::AtomicWrite, not a stringified io::Error.
+    //
+    // These do NOT by themselves prove atomicity: a plain truncating fs::write
+    // would also produce the correct success-path result (File::create
+    // truncates, so it leaves no trailing bytes). The atomicity — old-or-new
+    // under a crash — is proven in platform::atomic_write's fault-injection
+    // suite, which these writers inherit by construction.
 
     #[test]
     fn save_project_surfaces_typed_atomic_write_error() {
@@ -2909,7 +2915,7 @@ entity "camera" {
     }
 
     #[test]
-    fn save_scene_doc_over_larger_file_replaces_it_wholly() {
+    fn save_scene_doc_over_larger_file_round_trips_smaller_content() {
         let root = unique_test_dir("doc_replace");
         fs::create_dir_all(&root).unwrap();
         let path = format!("{root}/level.hscene");
@@ -2934,8 +2940,8 @@ entity "camera" {
         };
         save_scene_doc(&path, &small).unwrap();
 
-        // A truncate-in-place writer would leave trailing bytes of `big`; the
-        // atomic swap replaces the file wholesale.
+        // The file now holds exactly `small` — the larger `big` content is
+        // fully gone and the smaller document reloads correctly.
         let loaded = load_scene_doc(&path).unwrap();
         assert_eq!(loaded, small);
         assert_eq!(fs::read_to_string(&path).unwrap(), small.to_hscene_string());
