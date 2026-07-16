@@ -450,7 +450,23 @@ impl<'a> Parser<'a> {
         if let Some(Token::Word(SCENE_FORMAT_HEADER)) = self.peek()? {
             let line = self.lex.line;
             self.next()?;
-            let version = self.expect_number()? as u32;
+            // A version is an exact non-negative integer. Guard the fractional
+            // case explicitly: `f32 as u32` truncates toward zero, so a bare
+            // cast would silently accept `2.5` as `2` — a version the engine
+            // must not understand slipping through the gate. (Negative and
+            // out-of-range floats saturate to 0 / u32::MAX and are rejected by
+            // the equality check, but a non-integer 2.x would not be.)
+            let raw = self.expect_number()?;
+            if raw < 0.0 || raw.fract() != 0.0 || raw > u32::MAX as f32 {
+                return Err(SceneError::new(
+                    line,
+                    format!(
+                        "invalid scene format version {raw}; \
+                         expected the integer {SCENE_FORMAT_VERSION}"
+                    ),
+                ));
+            }
+            let version = raw as u32;
             if version != SCENE_FORMAT_VERSION {
                 return Err(SceneError::new(
                     line,
@@ -2414,6 +2430,24 @@ entity "player" {
             err.to_string().contains("unsupported scene format version 99"),
             "got: {err}"
         );
+    }
+
+    /// A fractional version must be rejected, not truncated to 2. `f32 as u32`
+    /// truncates toward zero, so a bare cast would silently accept `2.5` as the
+    /// current version — a version the engine does not actually understand.
+    #[test]
+    fn fractional_scene_format_version_is_rejected() {
+        for v in ["2.5", "2.999", "1.5"] {
+            let text = format!("{SCENE_FORMAT_HEADER} {v}\n\nscene \"X\"\n\n{SCENE_END_SENTINEL}\n");
+            let err = expect_parse_err(&text);
+            assert!(
+                err.to_string().contains("invalid scene format version"),
+                "version {v} must be rejected as non-integer, got: {err}"
+            );
+        }
+        // The exact integer still works.
+        let ok = format!("{SCENE_FORMAT_HEADER} 2\n\nscene \"X\"\n\n{SCENE_END_SENTINEL}\n");
+        assert!(parse_scene(&ok).is_ok(), "integer version 2 must still parse");
     }
 
     // ── M11: the authored save path is atomic ────────────────────────────
