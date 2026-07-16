@@ -207,7 +207,14 @@ pub struct StatsDef {
 enum Token<'a> {
     Word(&'a str),
     Str(&'a str), // contents without quotes
+    /// A numeric literal written WITH a decimal point (e.g. `1.5`, `-0.25`).
+    /// Float fields (positions, colours, fov, …) read these.
     Number(f32),
+    /// A numeric literal written WITHOUT a decimal point (e.g. `128`,
+    /// `3000000000`). Lexed as `i64` so integer fields keep full precision:
+    /// an f32 only represents integers exactly up to 2^24, so a u32 seed
+    /// parsed through f32 would not round-trip. See `expect_uint`.
+    Integer(i64),
     LBrace,
     RBrace,
 }
@@ -336,10 +343,27 @@ impl<'a> Lexer<'a> {
         }
         let slice = &self.src[start..self.pos];
         if has_digit {
-            let val: f32 = slice
-                .parse()
-                .map_err(|_| SceneError::new(self.line, format!("invalid number: {slice}")))?;
-            Ok(Some(Token::Number(val)))
+            if has_dot {
+                let val: f32 = slice
+                    .parse()
+                    .map_err(|_| SceneError::new(self.line, format!("invalid number: {slice}")))?;
+                Ok(Some(Token::Number(val)))
+            } else {
+                // No decimal point: an integer literal, parsed with full
+                // precision. A value too large for i64 falls back to a float
+                // token — it is out of range for any integer field anyway, and
+                // this keeps float parsing lenient for astronomically large
+                // magnitudes.
+                match slice.parse::<i64>() {
+                    Ok(n) => Ok(Some(Token::Integer(n))),
+                    Err(_) => {
+                        let val: f32 = slice.parse().map_err(|_| {
+                            SceneError::new(self.line, format!("invalid number: {slice}"))
+                        })?;
+                        Ok(Some(Token::Number(val)))
+                    }
+                }
+            }
         } else {
             // Not a valid number — treat as word.
             while self.pos < self.src.len() {
@@ -414,11 +438,60 @@ impl<'a> Parser<'a> {
     fn expect_number(&mut self) -> Result<f32, SceneError> {
         match self.next()? {
             Some(Token::Number(n)) => Ok(n),
+            // An integer literal where a float is expected is fine
+            // (`pos 0 1 0`). i64 -> f32 is lossy above 2^24, but a float field
+            // does not need exact large-integer precision.
+            Some(Token::Integer(n)) => Ok(n as f32),
             _ => Err(SceneError::new(
                 self.line(),
-                format!("expected number, got unexpected token"),
+                "expected number, got unexpected token".to_string(),
             )),
         }
+    }
+
+    /// Read a field that must be a non-negative integer in `[0, max]`.
+    ///
+    /// Accepts an integer literal (`128`, exact even above 2^24) or an
+    /// integer-valued float written with a point (`128.0`), and REJECTS a
+    /// fractional value, a negative, or an out-of-range one with a typed,
+    /// line-numbered error. This replaces the `expect_number()? as uN` pattern,
+    /// which silently truncated a fractional value (`2.5` -> `2`) AND lost
+    /// precision on large integers (a `u32` seed parsed through `f32` did not
+    /// round-trip) — the latter a determinism hazard (ADR 0005).
+    fn expect_uint(&mut self, max: u64) -> Result<u64, SceneError> {
+        let line = self.line();
+        let value = match self.next()? {
+            Some(Token::Integer(n)) => {
+                if n < 0 {
+                    return Err(SceneError::new(
+                        line,
+                        format!("expected a non-negative integer, got {n}"),
+                    ));
+                }
+                n as u64
+            }
+            // A float token only reaches here if the author wrote a decimal
+            // point. Accept it only if it is exactly integer-valued.
+            Some(Token::Number(f)) => {
+                if !f.is_finite() || f < 0.0 || f.fract() != 0.0 || f > u64::MAX as f32 {
+                    return Err(SceneError::new(
+                        line,
+                        format!("expected a non-negative integer, got {f}"),
+                    ));
+                }
+                f as u64
+            }
+            _ => {
+                return Err(SceneError::new(line, "expected an integer".to_string()));
+            }
+        };
+        if value > max {
+            return Err(SceneError::new(
+                line,
+                format!("integer value {value} exceeds the maximum {max} for this field"),
+            ));
+        }
+        Ok(value)
     }
 
     fn expect_bool_flag(&mut self) -> Result<bool, SceneError> {
@@ -450,23 +523,11 @@ impl<'a> Parser<'a> {
         if let Some(Token::Word(SCENE_FORMAT_HEADER)) = self.peek()? {
             let line = self.lex.line;
             self.next()?;
-            // A version is an exact non-negative integer. Guard the fractional
-            // case explicitly: `f32 as u32` truncates toward zero, so a bare
-            // cast would silently accept `2.5` as `2` — a version the engine
-            // must not understand slipping through the gate. (Negative and
-            // out-of-range floats saturate to 0 / u32::MAX and are rejected by
-            // the equality check, but a non-integer 2.x would not be.)
-            let raw = self.expect_number()?;
-            if raw < 0.0 || raw.fract() != 0.0 || raw > u32::MAX as f32 {
-                return Err(SceneError::new(
-                    line,
-                    format!(
-                        "invalid scene format version {raw}; \
-                         expected the integer {SCENE_FORMAT_VERSION}"
-                    ),
-                ));
-            }
-            let version = raw as u32;
+            // A version is an exact non-negative integer. expect_uint rejects a
+            // fractional literal (a bare `expect_number()? as u32` would
+            // truncate `2.5` to `2` and slip a version the engine cannot read
+            // through the gate) and reads large integers exactly.
+            let version = self.expect_uint(u32::MAX as u64)? as u32;
             if version != SCENE_FORMAT_VERSION {
                 return Err(SceneError::new(
                     line,
@@ -647,7 +708,7 @@ impl<'a> Parser<'a> {
                         match key {
                             "size" | "size_meters" => terrain.size_meters = self.expect_vec3()?,
                             "chunk_size" | "chunk_size_meters" => {
-                                terrain.chunk_size_meters = self.expect_number()?.max(0.0) as u32
+                                terrain.chunk_size_meters = self.expect_uint(u32::MAX as u64)? as u32
                             }
                             "height_scale" | "height_scale_meters" => {
                                 terrain.height_scale_meters = self.expect_number()?
@@ -686,7 +747,7 @@ impl<'a> Parser<'a> {
                             "material" => layer.material = Some(self.expect_str()?),
                             "tiling" => layer.tiling = self.expect_number()?,
                             "channel" | "weightmap_channel" => {
-                                layer.weightmap_channel = self.expect_number()?.max(0.0) as u8
+                                layer.weightmap_channel = self.expect_uint(u8::MAX as u64)? as u8
                             }
                             _ => return Err(SceneError::new(line, "unknown paint_layer field")),
                         }
@@ -1401,7 +1462,7 @@ impl<'a> Parser<'a> {
                                 emitter.rate_per_second = self.expect_number()?
                             }
                             "max" | "max_particles" => {
-                                emitter.max_particles = self.expect_number()?.max(0.0) as u32
+                                emitter.max_particles = self.expect_uint(u32::MAX as u64)? as u32
                             }
                             "spawn_radius" => emitter.spawn_radius = self.expect_number()?,
                             "dir" | "direction" => {
@@ -1433,7 +1494,7 @@ impl<'a> Parser<'a> {
                                 let a = self.expect_number()?;
                                 emitter.end_color = Color::new(r, g, b, a);
                             }
-                            "seed" => emitter.seed = self.expect_number()?.max(0.0) as u32,
+                            "seed" => emitter.seed = self.expect_uint(u32::MAX as u64)? as u32,
                             _ => {
                                 return Err(SceneError::new(
                                     line,
@@ -1801,10 +1862,11 @@ pub fn serialize_scene(scene: &SceneData) -> String {
                 "    rate_per_second {}\n",
                 fmt_f32(emitter.rate_per_second),
             ));
-            out.push_str(&format!(
-                "    max_particles {}\n",
-                fmt_f32(emitter.max_particles as f32),
-            ));
+            // Integer fields are written directly, NOT via `as f32` + fmt_f32:
+            // an f32 cannot represent every u32 exactly (only up to 2^24), so
+            // routing a large value through f32 would serialize the rounded
+            // integer and break the round trip.
+            out.push_str(&format!("    max_particles {}\n", emitter.max_particles));
             out.push_str(&format!(
                 "    spawn_radius {}\n",
                 fmt_f32(emitter.spawn_radius),
@@ -1850,7 +1912,7 @@ pub fn serialize_scene(scene: &SceneData) -> String {
                 fmt_f32(emitter.end_color.b),
                 fmt_f32(emitter.end_color.a),
             ));
-            out.push_str(&format!("    seed {}\n", fmt_f32(emitter.seed as f32)));
+            out.push_str(&format!("    seed {}\n", emitter.seed));
             out.push_str("  }\n");
         }
 
@@ -1940,7 +2002,7 @@ fn write_runtime_slice(out: &mut String, slice: &RuntimeSliceAuthoring) {
         out.push('\n');
         out.push_str(&format!(
             "    chunk_size {}\n",
-            fmt_f32(slice.terrain.chunk_size_meters as f32),
+            slice.terrain.chunk_size_meters,
         ));
         out.push_str(&format!(
             "    height_scale {}\n",
@@ -1955,10 +2017,7 @@ fn write_runtime_slice(out: &mut String, slice: &RuntimeSliceAuthoring) {
             out.push_str(&format!("    material \"{}\"\n", material));
         }
         out.push_str(&format!("    tiling {}\n", fmt_f32(layer.tiling)));
-        out.push_str(&format!(
-            "    channel {}\n",
-            fmt_f32(layer.weightmap_channel as f32),
-        ));
+        out.push_str(&format!("    channel {}\n", layer.weightmap_channel));
         out.push_str("  }\n");
     }
 
@@ -2441,13 +2500,68 @@ entity "player" {
             let text = format!("{SCENE_FORMAT_HEADER} {v}\n\nscene \"X\"\n\n{SCENE_END_SENTINEL}\n");
             let err = expect_parse_err(&text);
             assert!(
-                err.to_string().contains("invalid scene format version"),
+                err.to_string().contains("non-negative integer"),
                 "version {v} must be rejected as non-integer, got: {err}"
             );
         }
         // The exact integer still works.
         let ok = format!("{SCENE_FORMAT_HEADER} 2\n\nscene \"X\"\n\n{SCENE_END_SENTINEL}\n");
         assert!(parse_scene(&ok).is_ok(), "integer version 2 must still parse");
+    }
+
+    /// Integer fields keep FULL precision through a round trip. A u32 seed
+    /// above 2^24 (which most random seeds are) would not survive being
+    /// serialized/parsed through f32 — a determinism hazard, since the seed is
+    /// exactly what must reproduce a recorded run (ADR 0005). Written directly
+    /// as an integer and read via Token::Integer, it round-trips exactly.
+    #[test]
+    fn large_integer_fields_round_trip_exactly() {
+        // 3_000_000_003 is > 2^24 and is NOT representable exactly in f32
+        // (nearest f32 differs by ~256), so an f32 round trip would corrupt it.
+        let seed = 3_000_000_003u32;
+        let max_particles = 20_000_001u32; // also > 2^24
+        let src = format!(
+            "scene \"S\"\n\
+             entity \"fx\" {{\n  \
+               particle_emitter {{ max_particles {max_particles} seed {seed} }}\n\
+             }}\n"
+        );
+        let scene = parse_scene(&src).unwrap();
+        let emitter = scene.entities[0].particle_emitter.as_ref().unwrap();
+        assert_eq!(emitter.seed, seed, "seed must parse exactly");
+        assert_eq!(emitter.max_particles, max_particles);
+
+        // And survive a full serialize -> parse cycle.
+        let round = parse_scene(&serialize_scene(&scene)).unwrap();
+        let round_emitter = round.entities[0].particle_emitter.as_ref().unwrap();
+        assert_eq!(round_emitter.seed, seed, "seed must survive serialization");
+        assert_eq!(round_emitter.max_particles, max_particles);
+    }
+
+    /// A fractional value in an integer field is a typed error, not a silent
+    /// truncation (`seed 42.9` must NOT become 42).
+    #[test]
+    fn fractional_integer_field_is_rejected() {
+        let src = "scene \"S\"\n\
+                   entity \"fx\" {\n  particle_emitter { seed 42.9 }\n}\n";
+        let err = expect_parse_err(src);
+        assert!(
+            err.to_string().contains("non-negative integer"),
+            "a fractional seed must be rejected, got: {err}"
+        );
+    }
+
+    /// An integer field written with a trailing `.0` (integer-valued float) is
+    /// still accepted — back-compat for anything the old serializer emitted.
+    #[test]
+    fn integer_valued_float_is_accepted_in_integer_field() {
+        let src = "scene \"S\"\n\
+                   entity \"fx\" {\n  particle_emitter { seed 128.0 }\n}\n";
+        let scene = parse_scene(src).unwrap();
+        assert_eq!(
+            scene.entities[0].particle_emitter.as_ref().unwrap().seed,
+            128
+        );
     }
 
     // ── M11: the authored save path is atomic ────────────────────────────
