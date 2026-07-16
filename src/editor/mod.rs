@@ -358,7 +358,14 @@ impl Project {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InspectorValue {
     Bool(bool),
+    /// A floating-point field (positions, colours, fov, …).
     Number(f32),
+    /// An integer field (particle `seed`, `max_particles`, …). Distinct from
+    /// [`Self::Number`] so a `u32` field keeps FULL precision: an f32 only
+    /// represents integers exactly up to 2^24, so a large seed stored as a
+    /// number would not round-trip — a determinism hazard (ADR 0005). `i64`
+    /// covers every `u8`/`u16`/`u32`/`i32` field and their negatives.
+    Integer(i64),
     Text(String),
     Vec3([f32; 3]),
 }
@@ -1011,7 +1018,7 @@ fn components_from_scene_entity(
             fields: vec![
                 number_field("emitting", if emitter.emitting { 1.0 } else { 0.0 }),
                 number_field("rate_per_second", emitter.rate_per_second),
-                number_field("max_particles", emitter.max_particles as f32),
+                integer_field("max_particles", emitter.max_particles as i64),
                 number_field("spawn_radius", emitter.spawn_radius),
                 vec3_field(
                     "direction",
@@ -1048,7 +1055,7 @@ fn components_from_scene_entity(
                     ],
                 ),
                 number_field("end_color_alpha", emitter.end_color.a),
-                number_field("seed", emitter.seed as f32),
+                integer_field("seed", emitter.seed as i64),
             ],
         });
     }
@@ -1141,6 +1148,13 @@ fn number_field(name: &str, value: f32) -> InspectorField {
     InspectorField {
         name: name.into(),
         value: InspectorValue::Number(value),
+    }
+}
+
+fn integer_field(name: &str, value: i64) -> InspectorField {
+    InspectorField {
+        name: name.into(),
+        value: InspectorValue::Integer(value),
     }
 }
 
@@ -1256,10 +1270,10 @@ fn bridge_particle_emitter(
         rate_per_second: optional_number(component, "rate_per_second")
             .or_else(|| optional_number(component, "rate"))
             .unwrap_or(default.rate_per_second),
-        max_particles: optional_number(component, "max_particles")
-            .or_else(|| optional_number(component, "max"))
-            .unwrap_or(default.max_particles as f32)
-            .max(0.0) as u32,
+        max_particles: optional_integer(component, "max_particles")
+            .or_else(|| optional_integer(component, "max"))
+            .map(|v| v.clamp(0, u32::MAX as i64) as u32)
+            .unwrap_or(default.max_particles),
         spawn_radius: optional_number(component, "spawn_radius").unwrap_or(default.spawn_radius),
         direction: optional_vec3(component, "direction").unwrap_or(default.direction),
         spread: optional_number(component, "spread").unwrap_or(default.spread),
@@ -1293,9 +1307,7 @@ fn bridge_particle_emitter(
                 )
             })
             .unwrap_or(default.end_color),
-        seed: optional_number(component, "seed")
-            .unwrap_or(default.seed as f32)
-            .max(0.0) as u32,
+        seed: optional_u32(component, "seed", default.seed),
     })
 }
 
@@ -1404,6 +1416,7 @@ fn encode_field(field: &InspectorField) -> String {
             )
         }
         InspectorValue::Number(v) => format!("field|{}|number|{}", escape_text(&field.name), v),
+        InspectorValue::Integer(v) => format!("field|{}|integer|{}", escape_text(&field.name), v),
         InspectorValue::Text(v) => {
             format!("field|{}|text|{}", escape_text(&field.name), escape_text(v))
         }
@@ -1432,6 +1445,10 @@ fn decode_field(rest: &str) -> Result<InspectorField, &'static str> {
         "number" => {
             let raw = parts.next().ok_or("missing number value")?;
             InspectorValue::Number(raw.parse::<f32>().map_err(|_| "invalid number value")?)
+        }
+        "integer" => {
+            let raw = parts.next().ok_or("missing integer value")?;
+            InspectorValue::Integer(raw.parse::<i64>().map_err(|_| "invalid integer value")?)
         }
         "text" => InspectorValue::Text(unescape_text(parts.next().ok_or("missing text value")?)?),
         "vec3" => {
@@ -2197,10 +2214,10 @@ pub fn apply_scene_document_to_world(
                             rate_per_second: optional_number(component, "rate_per_second")
                                 .or_else(|| optional_number(component, "rate"))
                                 .unwrap_or(default.rate_per_second),
-                            max_particles: optional_number(component, "max_particles")
-                                .or_else(|| optional_number(component, "max"))
-                                .unwrap_or(default.max_particles as f32)
-                                .max(0.0) as u32,
+                            max_particles: optional_integer(component, "max_particles")
+                                .or_else(|| optional_integer(component, "max"))
+                                .map(|v| v.clamp(0, u32::MAX as i64) as u32)
+                                .unwrap_or(default.max_particles),
                             spawn_radius: optional_number(component, "spawn_radius")
                                 .unwrap_or(default.spawn_radius),
                             direction: optional_vec3(component, "direction")
@@ -2245,9 +2262,7 @@ pub fn apply_scene_document_to_world(
                                 })
                                 .unwrap_or(default.end_color),
                             accumulator: 0.0,
-                            seed: optional_number(component, "seed")
-                                .unwrap_or(default.seed as f32)
-                                .max(0.0) as u32,
+                            seed: optional_u32(component, "seed", default.seed),
                         },
                     );
                 }
@@ -2407,7 +2422,30 @@ fn required_vec3(
 fn optional_number(component: &InspectorComponent, field: &str) -> Option<f32> {
     match component.get_field(field)? {
         InspectorValue::Number(v) => Some(*v),
+        InspectorValue::Integer(v) => Some(*v as f32),
         _ => None,
+    }
+}
+
+/// Read an integer field, accepting either an [`InspectorValue::Integer`]
+/// (exact) or a legacy [`InspectorValue::Number`] (a pre-integer-variant
+/// `.hscene` on disk stored these as f32; truncate toward zero, matching the
+/// old behaviour). Returns `None` if the field is absent or a non-numeric
+/// kind.
+fn optional_integer(component: &InspectorComponent, field: &str) -> Option<i64> {
+    match component.get_field(field)? {
+        InspectorValue::Integer(v) => Some(*v),
+        InspectorValue::Number(v) => Some(*v as i64),
+        _ => None,
+    }
+}
+
+/// Read an integer field and clamp it into `u32`, falling back to `default`.
+/// Used for `u32` component fields (`seed`, `max_particles`).
+fn optional_u32(component: &InspectorComponent, field: &str, default: u32) -> u32 {
+    match optional_integer(component, field) {
+        Some(v) => v.clamp(0, u32::MAX as i64) as u32,
+        None => default,
     }
 }
 
@@ -3356,6 +3394,147 @@ entity "sun" {
         text.push_str("entity|9|sneaky\nendentity\n");
         let err = SceneDocument::from_hscene_str(&text).unwrap_err();
         assert!(err.contains("content after"), "got: {err}");
+    }
+
+    // ── InspectorValue::Integer — exact integer fields ───────────────────
+    //
+    // `seed` / `max_particles` are u32 component fields. The pre-integer
+    // editor stored them as `InspectorValue::Number(f32)`, which silently
+    // corrupts any value past f32's 2^24 exact-integer ceiling — a
+    // determinism hazard, since a scene's RNG seed must round-trip
+    // byte-for-byte (ADR 0005). These tests pin the exact-integer guarantee,
+    // the fractional-rejection guarantee, and the legacy-`number` back-compat
+    // read path.
+
+    /// A u32 seed that is a genuine f32 hazard: it does NOT survive a trip
+    /// through f32. Each test below asserts this precondition up front — if it
+    /// ever stopped holding, the tests would quietly stop discriminating.
+    const HAZARD_SEED: u32 = 0xDEAD_BEEF; // 3_735_928_559, > 2^24
+
+    #[test]
+    fn integer_field_codec_round_trips_f32_hazard_exactly() {
+        assert_ne!(
+            (HAZARD_SEED as f32) as u32,
+            HAZARD_SEED,
+            "seed must be an f32 hazard or this test proves nothing"
+        );
+
+        let field = integer_field("seed", HAZARD_SEED as i64);
+        let line = encode_field(&field);
+        let rest = line.strip_prefix("field|").expect("encoded field| prefix");
+        let decoded = decode_field(rest).unwrap();
+
+        assert_eq!(decoded, field);
+        assert_eq!(decoded.value, InspectorValue::Integer(HAZARD_SEED as i64));
+    }
+
+    /// The codec REJECTS a fractional literal in an integer field rather than
+    /// truncating it. The silent-truncation bug (`2.5 as u32 == 2`) that this
+    /// whole variant exists to kill is structurally impossible on this path.
+    #[test]
+    fn integer_field_codec_rejects_fractional_and_garbage_literals() {
+        assert!(decode_field("seed|integer|2.5").is_err());
+        assert!(decode_field("seed|integer|not_a_number").is_err());
+        // A well-formed integer still parses, as a control.
+        assert!(decode_field("seed|integer|42").is_ok());
+    }
+
+    /// A large seed survives the full component → `ParticleEmitterDef`
+    /// conversion exactly when carried as an Integer. The same value carried
+    /// as a legacy `Number` is corrupted — the precise reason the Integer
+    /// variant exists.
+    #[test]
+    fn particle_emitter_seed_survives_conversion_when_integer() {
+        assert_ne!((HAZARD_SEED as f32) as u32, HAZARD_SEED);
+
+        let exact = InspectorComponent {
+            type_name: "ParticleEmitter".into(),
+            fields: vec![
+                integer_field("seed", HAZARD_SEED as i64),
+                integer_field("max_particles", 20_000_001),
+            ],
+        };
+        let def = bridge_particle_emitter(1, &exact).unwrap();
+        assert_eq!(def.seed, HAZARD_SEED, "integer seed must be exact");
+        assert_eq!(def.max_particles, 20_000_001);
+
+        // Legacy Number path: still parses (back-compat) but is lossy —
+        // demonstrating the hazard the Integer path closes.
+        let legacy = InspectorComponent {
+            type_name: "ParticleEmitter".into(),
+            fields: vec![number_field("seed", HAZARD_SEED as f32)],
+        };
+        let legacy_def = bridge_particle_emitter(1, &legacy).unwrap();
+        assert_ne!(
+            legacy_def.seed, HAZARD_SEED,
+            "an f32-backed seed is expected to be corrupted"
+        );
+    }
+
+    /// A pre-integer `.hscene` stored `seed` as `field|seed|number|<f32>`.
+    /// Such a file must still load: the reader accepts the legacy `Number`
+    /// kind. Values within f32's exact range round-trip exactly; only >2^24
+    /// seeds were ever at risk, and those are what the `integer` kind fixes
+    /// going forward.
+    #[test]
+    fn legacy_number_seed_field_still_reads() {
+        let legacy = InspectorComponent {
+            type_name: "ParticleEmitter".into(),
+            fields: vec![number_field("seed", 12_345.0)],
+        };
+        let def = bridge_particle_emitter(1, &legacy).unwrap();
+        assert_eq!(def.seed, 12_345);
+    }
+
+    /// The clamp guards in the integer read helpers saturate rather than wrap:
+    /// a negative value floors at 0 and an above-`u32::MAX` value ceilings at
+    /// `u32::MAX`. These bounds are unreachable through the authored formats
+    /// (the `.hsc` parser rejects them outright), but the helpers are the
+    /// safety net for a hand-edited `.hscene` or a wire-supplied value.
+    #[test]
+    fn integer_read_helpers_saturate_out_of_u32_range() {
+        let comp = InspectorComponent {
+            type_name: "ParticleEmitter".into(),
+            fields: vec![
+                integer_field("seed", -5),
+                integer_field("max_particles", u32::MAX as i64 + 1000),
+            ],
+        };
+        let def = bridge_particle_emitter(1, &comp).unwrap();
+        assert_eq!(def.seed, 0, "a negative seed floors at 0");
+        assert_eq!(
+            def.max_particles,
+            u32::MAX,
+            "an oversized count ceilings at u32::MAX rather than wrapping"
+        );
+    }
+
+    /// End-to-end: a `.hscene` document carrying an integer `seed` field
+    /// round-trips through the on-disk text codec with the exact value intact.
+    #[test]
+    fn hscene_doc_round_trips_integer_seed_field_exactly() {
+        assert_ne!((HAZARD_SEED as f32) as u32, HAZARD_SEED);
+
+        let doc = SceneDocument {
+            name: "Fx".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
+            entities: vec![EditorEntity {
+                id: 1,
+                name: "sparks".into(),
+                components: vec![InspectorComponent {
+                    type_name: "ParticleEmitter".into(),
+                    fields: vec![integer_field("seed", HAZARD_SEED as i64)],
+                }],
+            }],
+        };
+
+        let text = doc.to_hscene_string();
+        let parsed = SceneDocument::from_hscene_str(&text).unwrap();
+        assert_eq!(parsed, doc);
+        assert_eq!(
+            parsed.entities[0].components[0].get_field("seed"),
+            Some(&InspectorValue::Integer(HAZARD_SEED as i64)),
+        );
     }
 
     // ── M11: autosave scheduling (pure timing, no filesystem) ────────────

@@ -655,6 +655,28 @@ fn draw_inspector(
                                 false,
                             );
                         }
+                        InspectorValue::Integer(_) => {
+                            // Same button layout as Number, but nudge by whole
+                            // units — an integer field has no sub-1 step.
+                            let minus_x = inner_x + inner_w - 50;
+                            let plus_x = inner_x + inner_w - 26;
+                            push_small_button(
+                                ui,
+                                minus_x,
+                                row_y + 1,
+                                "-",
+                                vec![select_field.clone(), EditorCommand::ApplyDelta(-1.0)],
+                                false,
+                            );
+                            push_small_button(
+                                ui,
+                                plus_x,
+                                row_y + 1,
+                                "+",
+                                vec![select_field.clone(), EditorCommand::ApplyDelta(1.0)],
+                                false,
+                            );
+                        }
                         InspectorValue::Vec3(_) => {
                             let active_axis = active_axis.unwrap_or(EditorAxis::X);
                             let axis_base_x = inner_x + inner_w - 94;
@@ -1605,6 +1627,8 @@ fn text_pixel_width(text: &str, scale: i32) -> i32 {
 fn format_field_label(name: &str, value: &InspectorValue) -> String {
     match value {
         InspectorValue::Number(number) => format!("{} {:.2}", name, number),
+        // No decimals — an integer field displays as a whole number.
+        InspectorValue::Integer(value) => format!("{} {}", name, value),
         InspectorValue::Text(text) => format!("{} {}", name, truncate_text(text, 16)),
         InspectorValue::Vec3(value) => {
             format!("{} {:.2} {:.2} {:.2}", name, value[0], value[1], value[2])
@@ -1749,6 +1773,89 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| matches!(command, EditorCommand::ApplyDelta(_))));
+    }
+
+    /// The Integer field's inspector arms. The stepper buttons nudge by a
+    /// WHOLE unit (±1.0), not the Number field's ±0.1 — a ±0.1 delta rounds to
+    /// zero on a discrete field, so a regression to ±0.1 would make the buttons
+    /// dead controls. The label renders the value with no decimals.
+    #[test]
+    fn integer_field_stepper_uses_whole_unit_delta_and_label_has_no_decimals() {
+        // Label arm: a whole number, no ".00".
+        assert_eq!(
+            format_field_label("seed", &InspectorValue::Integer(3_000_000_003)),
+            "seed 3000000003"
+        );
+        // Contrast: a Number renders with two decimals — the arms differ.
+        assert_eq!(
+            format_field_label("fov", &InspectorValue::Number(60.0)),
+            "fov 60.00"
+        );
+
+        // Stepper arm: mirror the Number stepper test's structure (Transform +
+        // a second single-scalar component), but make the scalar an Integer in
+        // a non-bridged component ("DebugBlock") so the world still builds.
+        let scene = SceneDocument {
+            name: "Ui".into(),
+            runtime_slice: crate::runtime_slice::RuntimeSliceAuthoring::default(),
+            entities: vec![EditorEntity {
+                id: 1,
+                name: "Fx".into(),
+                components: vec![
+                    InspectorComponent {
+                        type_name: "Transform".into(),
+                        fields: vec![InspectorField {
+                            name: "position".into(),
+                            value: InspectorValue::Vec3([0.0, 2.0, 10.0]),
+                        }],
+                    },
+                    InspectorComponent {
+                        type_name: "DebugBlock".into(),
+                        fields: vec![InspectorField {
+                            name: "seed".into(),
+                            value: InspectorValue::Integer(3_000_000_003),
+                        }],
+                    },
+                ],
+            }],
+        };
+        let mut host = EditorRuntimeHost::new(EditorSceneSession::new(scene)).unwrap();
+        host.execute(EditorCommand::SelectField {
+            entity_id: 1,
+            component_name: "DebugBlock".into(),
+            field_name: "seed".into(),
+        })
+        .unwrap();
+
+        let mut state = EditorNativeUiState::default();
+        let ui = build_native_ui(&host, 1280, 720, &mut state, &[], None);
+
+        // Scan the stepper button column across the inspector and collect every
+        // ApplyDelta magnitude. Only the Integer arm emits ±1.0 (Number and
+        // Vec3 steppers emit ±0.1), so requiring 1.0 to be present pins the
+        // Integer arm: a regression to ±0.1 removes it, and the absence fails.
+        let mut deltas = Vec::new();
+        for y in (100..720).step_by(2) {
+            for x in [1235, 1245, 1255, 1260] {
+                if let Some(commands) = ui.commands_at(x, y) {
+                    for command in &commands {
+                        if let EditorCommand::ApplyDelta(delta) = command {
+                            deltas.push(delta.abs());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            deltas.iter().any(|delta| (delta - 1.0).abs() < f32::EPSILON),
+            "an integer stepper (±1.0) must be present; found deltas {deltas:?}"
+        );
+        // Sanity: the ±0.1 Vec3 stepper from the Transform row is also present,
+        // confirming the scan actually reached editable rows.
+        assert!(
+            deltas.iter().any(|delta| (delta - 0.1).abs() < f32::EPSILON),
+            "expected the Vec3 ±0.1 stepper in the scan; found {deltas:?}"
+        );
     }
 
     #[test]

@@ -1356,6 +1356,16 @@ impl EditorRuntimeHost {
 
         let new_value = match &current_value {
             InspectorValue::Number(n) => InspectorValue::Number(n + delta),
+            // An integer field nudges by the rounded delta and stays an
+            // integer. `f32 -> i64` saturates and `saturating_add` guards
+            // overflow, so a nudge can never produce a fractional or wrapped
+            // value. `round()` is half-away-from-zero, so |delta| < 0.5 is a
+            // no-op and |delta| in [0.5, 1.0) still moves by one unit; the
+            // stepper buttons only ever send +/-1.0 (native_ui.rs), so in
+            // practice a nudge always moves the field by exactly one.
+            InspectorValue::Integer(n) => {
+                InspectorValue::Integer(n.saturating_add(delta.round() as i64))
+            }
             InspectorValue::Vec3(v) => {
                 let axis = self.cursor_axis.unwrap_or(EditorAxis::X);
                 let mut arr = *v;
@@ -1839,6 +1849,7 @@ fn compiled_asset_kind_label(kind: crate::assets::CompiledAssetKind) -> &'static
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecs::components::ParticleEmitter;
     use crate::{ActiveCamera, Camera, Transform, Vec3};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1897,6 +1908,27 @@ entity "cam" {
   transform { pos 0 5 0 rot 0 0 0 1 scale 1 1 1 }
   camera { fov 75 near 0.1 far 500 }
   active_camera
+}
+"#,
+        )
+        .unwrap();
+        path
+    }
+
+    /// A scene whose particle emitter carries a `seed` past f32's 2^24
+    /// exact-integer ceiling — a value a `Number`-backed field could not even
+    /// represent, so the integer nudge path is exercised on a real hazard.
+    fn write_particle_scene(suffix: &str) -> String {
+        let root = tmp_dir(suffix);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = format!("{root}/test.hsc");
+        std::fs::write(
+            &path,
+            r#"
+scene "Fx"
+entity "sparks" {
+  transform { pos 0 0 0 rot 0 0 0 1 scale 1 1 1 }
+  particle_emitter { max_particles 20000001 seed 3000000003 }
 }
 "#,
         )
@@ -2083,6 +2115,108 @@ entity "cam" {
             "fov_deg should be 60+5=65, got {}",
             camera.fov.to_degrees()
         );
+    }
+
+    /// The integer nudge path, end to end. A `seed` field is nudged and the
+    /// value is checked in BOTH the editor document AND the live runtime world
+    /// (`ParticleEmitter.seed`), because they travel different conversions: the
+    /// initial open runs `apply_scene_document_to_world`, while each edit
+    /// re-patches through `patch_particle_emitter_component`. Both must keep the
+    /// seed exact — an f32 hop on either would corrupt it (Bug B, ADR 0005).
+    ///
+    /// The seed is a genuine f32 hazard (it, +1, and +2 all collapse to the
+    /// same f32), so a `Number`-backed field could not distinguish these
+    /// values at all; every assertion below is meaningful only because the
+    /// field is Integer. The deltas exercise `round()` semantics: 1.0 moves by
+    /// one, 0.1 is a no-op (rounds to 0), 0.6 moves by one (rounds away from
+    /// zero — distinguishing `round()` from truncation).
+    #[test]
+    fn apply_delta_nudges_integer_seed_by_whole_units() {
+        // Precondition: seed and its nudged neighbours are all f32 hazards.
+        for v in [3_000_000_003u32, 3_000_000_004, 3_000_000_005] {
+            assert_eq!(
+                (v as f32) as u32,
+                3_000_000_000,
+                "seed neighbours must be f32-indistinguishable or this test proves nothing"
+            );
+        }
+
+        let path = write_particle_scene("delta_seed");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+
+        let ent_id = host
+            .session()
+            .scene()
+            .entities
+            .iter()
+            .find(|e| e.name == "sparks")
+            .unwrap()
+            .id;
+        host.select_entity(ent_id).unwrap();
+        let ent_idx = host
+            .session()
+            .scene()
+            .entities
+            .iter()
+            .position(|e| e.id == ent_id)
+            .unwrap();
+        host.cursor_entity_idx = Some(ent_idx);
+        let comp_idx = host.session().scene().entities[ent_idx]
+            .components
+            .iter()
+            .position(|c| c.type_name == "ParticleEmitter")
+            .unwrap();
+        host.cursor_component_idx = comp_idx;
+        let seed_idx = host.session().scene().entities[ent_idx].components[comp_idx]
+            .fields
+            .iter()
+            .position(|f| f.name == "seed")
+            .unwrap();
+        host.cursor_field_idx = seed_idx;
+
+        let runtime = host.applied_entity(ent_id).unwrap();
+        let world_seed = |host: &EditorRuntimeHost| {
+            host.world().get::<ParticleEmitter>(runtime).unwrap().seed
+        };
+        let doc_seed = |host: &EditorRuntimeHost| {
+            host.session()
+                .scene()
+                .get_value(ent_id, "ParticleEmitter", "seed")
+                .cloned()
+        };
+        // max_particles (20_000_001, also an f32 hazard: odd value past 2^24)
+        // rides the same two conversions; it must stay exact across a re-patch.
+        let world_max = |host: &EditorRuntimeHost| {
+            host.world()
+                .get::<ParticleEmitter>(runtime)
+                .unwrap()
+                .max_particles
+        };
+        assert_eq!((20_000_001u32 as f32) as u32 % 2, 0, "max is an f32 hazard");
+
+        // The authored seed parsed exactly (Integer, not a truncated f32), and
+        // the initial world build (apply path) carried it through exactly.
+        assert_eq!(doc_seed(&host), Some(InspectorValue::Integer(3_000_000_003)));
+        assert_eq!(world_seed(&host), 3_000_000_003, "apply path must be exact");
+        assert_eq!(world_max(&host), 20_000_001, "apply path max must be exact");
+
+        // A whole-unit nudge moves the integer by exactly 1 — in the document
+        // AND in the live world (patch path must be exact). The re-patch also
+        // re-reads max_particles, which must survive unchanged and exact.
+        host.execute(EditorCommand::ApplyDelta(1.0)).unwrap();
+        assert_eq!(doc_seed(&host), Some(InspectorValue::Integer(3_000_000_004)));
+        assert_eq!(world_seed(&host), 3_000_000_004, "patch path must be exact");
+        assert_eq!(world_max(&host), 20_000_001, "patch path max must be exact");
+
+        // A sub-half fine nudge rounds to zero — a no-op on a discrete field.
+        host.execute(EditorCommand::ApplyDelta(0.1)).unwrap();
+        assert_eq!(doc_seed(&host), Some(InspectorValue::Integer(3_000_000_004)));
+
+        // A delta in [0.5, 1.0) rounds AWAY from zero to one — this pins
+        // `round()`, since truncation would make it a no-op instead.
+        host.execute(EditorCommand::ApplyDelta(0.6)).unwrap();
+        assert_eq!(doc_seed(&host), Some(InspectorValue::Integer(3_000_000_005)));
+        assert_eq!(world_seed(&host), 3_000_000_005, "patch path must be exact");
     }
 
     // ── Vec3 axis edits ───────────────────────────────────────────────────

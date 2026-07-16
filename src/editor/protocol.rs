@@ -533,6 +533,10 @@ fn append_value_tokens(tokens: &mut Vec<String>, value: &InspectorValue) {
             tokens.push("number".into());
             tokens.push(number.to_string());
         }
+        InspectorValue::Integer(value) => {
+            tokens.push("integer".into());
+            tokens.push(value.to_string());
+        }
         InspectorValue::Text(text) => {
             tokens.push("text".into());
             tokens.push(escape_token(text));
@@ -566,6 +570,10 @@ fn parse_value_tokens(tokens: &[String]) -> Result<InspectorValue, EditorProtoco
         "number" => {
             expect_len(tokens, 2)?;
             Ok(InspectorValue::Number(parse_f32(&tokens[1])?))
+        }
+        "integer" => {
+            expect_len(tokens, 2)?;
+            Ok(InspectorValue::Integer(parse_i64(&tokens[1])?))
         }
         "text" => {
             expect_len(tokens, 2)?;
@@ -698,6 +706,12 @@ fn parse_u64(token: &str) -> Result<u64, EditorProtocolError> {
     token
         .parse::<u64>()
         .map_err(|_| invalid_token(token, "expected unsigned integer"))
+}
+
+fn parse_i64(token: &str) -> Result<i64, EditorProtocolError> {
+    token
+        .parse::<i64>()
+        .map_err(|_| invalid_token(token, "expected integer"))
 }
 
 fn parse_u32(token: &str) -> Result<u32, EditorProtocolError> {
@@ -1045,6 +1059,61 @@ mod tests {
                 _ => panic!("roundtrip mismatch"),
             }
         }
+    }
+
+    /// A `FieldEdited` event carrying an integer field value survives the
+    /// wire codec exactly, including a value past f32's 2^24 exact-integer
+    /// ceiling. The editor streams seed edits to remote clients through this
+    /// path, so an f32 hop here would reintroduce the determinism hazard the
+    /// `Integer` variant exists to remove.
+    #[test]
+    fn field_edited_integer_survives_f32_hazard() {
+        let hazard: i64 = 0xDEAD_BEEF; // 3_735_928_559
+        assert_ne!(
+            (hazard as f32) as i64,
+            hazard,
+            "value must be an f32 hazard or this test proves nothing"
+        );
+
+        let event = EditorEvent::FieldEdited {
+            cursor: EditorInspectorCursor {
+                entity_id: 3,
+                component_name: "ParticleEmitter".into(),
+                field_name: "seed".into(),
+                axis: None,
+            },
+            new_value: InspectorValue::Integer(hazard),
+        };
+        let decoded = decode_event(&encode_event(&event)).unwrap();
+        match decoded {
+            EditorEvent::FieldEdited { new_value, .. } => {
+                assert_eq!(new_value, InspectorValue::Integer(hazard));
+            }
+            other => panic!("expected FieldEdited, got {other:?}"),
+        }
+    }
+
+    /// A malformed integer literal in a `FieldEdited` value is a typed decode
+    /// error, not a silently-swallowed zero or a truncated value — matching the
+    /// module's negative-test convention for other decode kinds.
+    #[test]
+    fn field_edited_with_malformed_integer_is_rejected() {
+        let good = encode_event(&EditorEvent::FieldEdited {
+            cursor: EditorInspectorCursor {
+                entity_id: 3,
+                component_name: "ParticleEmitter".into(),
+                field_name: "seed".into(),
+                axis: None,
+            },
+            new_value: InspectorValue::Integer(42),
+        });
+        // Control: the well-formed message decodes.
+        assert!(decode_event(&good).is_ok());
+        // A fractional literal in an integer field must be REJECTED, not
+        // truncated (the silent-truncation bug this variant exists to kill).
+        assert!(decode_event(&good.replace("integer|42", "integer|2.5")).is_err());
+        // Garbage likewise, rather than a swallowed 0.
+        assert!(decode_event(&good.replace("integer|42", "integer|xyz")).is_err());
     }
 
     #[test]

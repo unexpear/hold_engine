@@ -10,10 +10,10 @@ use crate::math::{Quat, Vec3};
 use crate::renderer::Color;
 
 use super::{
-    apply_scene_document_to_world, has_any_field, load_scene_doc_from_hsc, optional_number,
-    optional_text, optional_vec3, required_number, required_vec3, save_scene_doc_to_hsc,
-    EditorApplyError, EditorEntity, EditorIoError, InspectorComponent, InspectorValue, Project,
-    SceneDocument,
+    apply_scene_document_to_world, has_any_field, load_scene_doc_from_hsc, optional_integer,
+    optional_number, optional_text, optional_u32, optional_vec3, required_number, required_vec3,
+    save_scene_doc_to_hsc, EditorApplyError, EditorEntity, EditorIoError, InspectorComponent,
+    InspectorValue, Project, SceneDocument,
 };
 
 /// Runtime state for a headless Play-in-Editor session.
@@ -927,10 +927,15 @@ fn patch_particle_emitter_component(
                 rate_per_second: optional_number(component, "rate_per_second")
                     .or_else(|| optional_number(component, "rate"))
                     .unwrap_or(default.rate_per_second),
-                max_particles: optional_number(component, "max_particles")
-                    .or_else(|| optional_number(component, "max"))
-                    .unwrap_or(default.max_particles as f32)
-                    .max(0.0) as u32,
+                // Exact integer read — an f32 hop here would truncate a large
+                // seed/count on the hot incremental-patch path, diverging the
+                // live world from the saved document and a full rebuild
+                // (determinism hazard, ADR 0005). Mirrors mod.rs's bridge and
+                // apply paths.
+                max_particles: optional_integer(component, "max_particles")
+                    .or_else(|| optional_integer(component, "max"))
+                    .map(|v| v.clamp(0, u32::MAX as i64) as u32)
+                    .unwrap_or(default.max_particles),
                 spawn_radius: optional_number(component, "spawn_radius")
                     .unwrap_or(default.spawn_radius),
                 direction: optional_vec3(component, "direction").unwrap_or(default.direction),
@@ -970,9 +975,7 @@ fn patch_particle_emitter_component(
                     })
                     .unwrap_or(default.end_color),
                 accumulator,
-                seed: optional_number(component, "seed")
-                    .unwrap_or(default.seed as f32)
-                    .max(0.0) as u32,
+                seed: optional_u32(component, "seed", default.seed),
             },
         );
     } else {
