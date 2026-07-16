@@ -3076,6 +3076,45 @@ entity "sparks" {
         );
     }
 
+    /// Block until a file written *after* this call is guaranteed a strictly
+    /// greater mtime than `reference`'s.
+    ///
+    /// The recovery freshness check ([`EditorRuntimeHost::pending_recovery`])
+    /// compares source and sidecar mtimes with `<=`. Filesystem timestamp
+    /// granularity is coarse on some Windows configurations, so two writes a
+    /// few hundred microseconds apart can share an mtime — making a
+    /// genuinely-newer sidecar look stale and flaking any test that writes the
+    /// source and sidecar in quick succession (worse under parallel I/O load).
+    /// Rather than sleep a guessed fixed amount, poll a probe file against the
+    /// *actual* filesystem clock (which can be coarser than `SystemTime::now`)
+    /// until it reports a strictly greater mtime; time only moves forward, so
+    /// any later write is then also strictly newer than `reference`.
+    fn wait_for_fresh_mtime_after(reference: impl AsRef<Path>) {
+        let reference = reference.as_ref();
+        let ref_mtime = std::fs::metadata(reference)
+            .and_then(|m| m.modified())
+            .expect("reference file must exist and expose an mtime");
+        let probe = {
+            let mut name = reference
+                .file_name()
+                .expect("reference path must have a file name")
+                .to_os_string();
+            name.push(".freshprobe");
+            reference.with_file_name(name)
+        };
+        // ~5s hang-guard only; crossing one timestamp tick takes at most a few
+        // ms, so the loop returns almost immediately in practice.
+        for _ in 0..5000 {
+            std::fs::write(&probe, b"probe").unwrap();
+            let probe_mtime = std::fs::metadata(&probe).and_then(|m| m.modified()).ok();
+            let _ = std::fs::remove_file(&probe);
+            if probe_mtime.is_some_and(|t| t > ref_mtime) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Autosave writes the recovery sidecar and leaves the author's source
     /// file byte-for-byte untouched. Overwriting the source with in-progress
     /// state would destroy the user's last clean save.
@@ -3172,6 +3211,9 @@ entity "sparks" {
     #[test]
     fn unsaved_work_survives_a_crash_and_is_recoverable() {
         let path = write_single_entity_scene("recover_roundtrip");
+        // Guarantee the sidecar lands in a strictly later mtime tick than the
+        // source, so the freshness check offers it (see wait_for_fresh_mtime_after).
+        wait_for_fresh_mtime_after(&path);
 
         // Session 1: edit, autosave, then "crash" (never save).
         let recovered_terrain = {
@@ -3212,6 +3254,7 @@ entity "sparks" {
     #[test]
     fn recovery_is_offered_not_applied_automatically() {
         let path = write_single_entity_scene("recover_prompted");
+        wait_for_fresh_mtime_after(&path);
         {
             let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
             dirty_the_host(&mut host);
@@ -3231,6 +3274,7 @@ entity "sparks" {
     fn discarding_recovery_deletes_the_sidecar_and_keeps_the_source() {
         let path = write_single_entity_scene("recover_discard");
         let source_before = std::fs::read(&path).unwrap();
+        wait_for_fresh_mtime_after(&path);
         {
             let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
             dirty_the_host(&mut host);
@@ -3267,6 +3311,8 @@ entity "sparks" {
     #[test]
     fn stale_sidecar_older_than_source_is_not_offered() {
         let path = write_single_entity_scene("recover_stale");
+        // The sidecar must be strictly newer than the source to be offered.
+        wait_for_fresh_mtime_after(&path);
         let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
         dirty_the_host(&mut host);
         let sidecar = host.autosave_to_recovery().unwrap().unwrap();
@@ -3274,7 +3320,7 @@ entity "sparks" {
 
         // Make the source strictly newer than the sidecar (simulating a save
         // that landed after the autosave but whose clear_recovery was lost).
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        wait_for_fresh_mtime_after(&sidecar);
         std::fs::write(&path, std::fs::read(&path).unwrap()).unwrap();
 
         assert!(
@@ -3294,6 +3340,10 @@ entity "sparks" {
         let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
         let recovery = host.recovery_path().unwrap();
         std::fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+        // Write the sidecar strictly after the source so the staleness guard
+        // offers it. (The write below sets the sidecar mtime; the ordering must
+        // be established BEFORE it, not after.)
+        wait_for_fresh_mtime_after(&path);
         // A V2 .hscene header with a half-written entity and NO terminator —
         // the strict parser must reject it (M11.4).
         std::fs::write(
@@ -3301,9 +3351,6 @@ entity "sparks" {
             format!("{}\nname|X\nentity|1|a\n", super::super::HSCENE_DOC_HEADER_V2),
         )
         .unwrap();
-        // Make it newer than the source so the staleness guard offers it.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = std::fs::File::open(&recovery); // touch is unnecessary; write above set mtime
         assert!(host.pending_recovery().is_some());
 
         let entities_before = host.session().scene().entities.len();
