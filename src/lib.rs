@@ -102,4 +102,5 @@ pub use editor::{
     InspectorComponent, InspectorField, InspectorValue, Project, ReplayMode, ReplayTickOutcome,
     SceneBridgeError, SceneDocument, SceneReloadOutcome, AutosaveScheduler,
     recovery_path_for_scene, AUTOSAVE_IDLE_DEBOUNCE_SECS, AUTOSAVE_MAX_INTERVAL_SECS,
+    AUTOSAVE_RETRY_BACKOFF_SECS,
 };

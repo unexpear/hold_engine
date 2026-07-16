@@ -425,6 +425,11 @@ pub const MOVEFILE_REPLACE_EXISTING: DWORD = 0x0000_0001;
 pub const MOVEFILE_WRITE_THROUGH: DWORD = 0x0000_0008;
 
 pub const ERROR_ALREADY_EXISTS: DWORD = 183;
+/// `CreateFileW` with `CREATE_NEW` reports this (not `ERROR_ALREADY_EXISTS`,
+/// which only `CREATE_ALWAYS`/`OPEN_ALWAYS` produce — and they *succeed*)
+/// when the target already exists. Used to distinguish a temp-name collision
+/// (retry) from a real create failure.
+pub const ERROR_FILE_EXISTS: DWORD = 80;
 
 #[link(name = "gdi32")]
 extern "system" {

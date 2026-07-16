@@ -2397,9 +2397,11 @@ impl EditorShellApp {
     /// scheduler is NOT reset, so it retries on the next opportunity rather
     /// than silently giving up on the user's data.
     fn tick_autosave(&mut self, dt: f32) {
-        let dirty = self.server.host().is_dirty();
-        let revision = self.server.host().edit_revision();
-        if !self.autosave.tick(dt, dirty, revision) {
+        let host = self.server.host();
+        let has_work = host.has_unsaved_authored_work();
+        let can_autosave = host.play_state() == EditorPlayState::Editing;
+        let revision = host.edit_revision();
+        if !self.autosave.tick(dt, has_work, can_autosave, revision) {
             return;
         }
 
@@ -2413,14 +2415,16 @@ impl EditorShellApp {
                 );
             }
             Ok(None) => {
-                // Untitled scene, or not in Editing. Nothing to checkpoint;
-                // stop asking every frame.
+                // Untitled scene: no recovery target. Advance the watermark so
+                // we do not ask again until a materially different edit.
                 self.autosave.note_saved();
             }
             Err(err) => {
-                // Deliberately do NOT note_saved(): leaving the scheduler armed
-                // means the next idle window retries. Losing an autosave
-                // silently is exactly what this milestone exists to prevent.
+                // note_failed() arms a back-off so a persistently-failing write
+                // (read-only recovery dir, a locked file) is retried after a
+                // delay rather than re-attempted every single frame. Losing an
+                // autosave silently is exactly what this milestone prevents.
+                self.autosave.note_failed();
                 self.push_action_log(
                     EditorUiActionTone::Error,
                     "Autosave failed",

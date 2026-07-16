@@ -75,89 +75,159 @@ pub fn recovery_path_for_scene(scene_path: &Path) -> Option<PathBuf> {
     Some(dir.join(RECOVERY_DIR).join(name))
 }
 
+/// Retry back-off after a failed autosave, so a persistently-failing write
+/// (read-only recovery dir, a locked file) does not re-attempt a full
+/// flush-through write every single frame.
+pub const AUTOSAVE_RETRY_BACKOFF_SECS: f32 = 5.0;
+
 /// Decides *when* an autosave should run. Pure timing logic — no filesystem,
 /// no clock of its own — so the cadence is unit-testable.
 ///
-/// Two rules, both required:
+/// It is driven by a **checkpoint watermark**: the last edit revision that was
+/// durably checkpointed. Work is pending whenever the current revision differs
+/// from that watermark. This is what lets an unsaved edit made just before
+/// entering play mode still autosave after returning to Editing — a bool
+/// "edited since save" flag could not, because play temporarily masks the
+/// dirty state and would clear it.
+///
+/// Two firing rules, both required:
 /// - **Idle debounce:** fire once the author has stopped editing for
 ///   [`AUTOSAVE_IDLE_DEBOUNCE_SECS`].
 /// - **Interval floor:** fire regardless after [`AUTOSAVE_MAX_INTERVAL_SECS`]
 ///   of continuous editing, so a long unbroken session still checkpoints.
 ///
-/// An autosave only ever fires when there has been an edit *since the last
-/// one*, so an idle dirty scene is not rewritten every few seconds.
+/// After a fire, the caller MUST report the outcome via [`Self::note_saved`]
+/// (advances the watermark) or [`Self::note_failed`] (arms a back-off and
+/// retries). Until one is called the scheduler will not fire again.
 #[derive(Debug, Clone)]
 pub struct AutosaveScheduler {
     idle_debounce_secs: f32,
     max_interval_secs: f32,
+    retry_backoff_secs: f32,
     since_last_edit: f32,
-    since_last_save: f32,
-    /// Whether an edit has landed since the last autosave. Prevents an idle
-    /// dirty scene from being written over and over.
-    edited_since_save: bool,
+    since_last_checkpoint: f32,
+    /// The most recent edit revision observed.
     last_seen_revision: u64,
+    /// The revision durably checkpointed. Work is pending iff this differs
+    /// from `last_seen_revision`.
+    checkpointed_revision: u64,
+    /// Set true when a fire is outstanding (awaiting note_saved/note_failed),
+    /// so tick does not re-fire every frame in the meantime.
+    fire_outstanding: bool,
+    /// Remaining back-off after a failed attempt.
+    backoff_remaining: f32,
 }
 
 impl Default for AutosaveScheduler {
     fn default() -> Self {
-        Self::new(AUTOSAVE_IDLE_DEBOUNCE_SECS, AUTOSAVE_MAX_INTERVAL_SECS)
+        Self::new(
+            AUTOSAVE_IDLE_DEBOUNCE_SECS,
+            AUTOSAVE_MAX_INTERVAL_SECS,
+            AUTOSAVE_RETRY_BACKOFF_SECS,
+        )
     }
 }
 
 impl AutosaveScheduler {
-    pub fn new(idle_debounce_secs: f32, max_interval_secs: f32) -> Self {
+    pub fn new(idle_debounce_secs: f32, max_interval_secs: f32, retry_backoff_secs: f32) -> Self {
         Self {
             idle_debounce_secs,
             max_interval_secs,
+            retry_backoff_secs,
             since_last_edit: 0.0,
-            since_last_save: 0.0,
-            edited_since_save: false,
+            since_last_checkpoint: 0.0,
             last_seen_revision: 0,
+            checkpointed_revision: 0,
+            fire_outstanding: false,
+            backoff_remaining: 0.0,
         }
     }
 
-    /// Advance by `dt`. `dirty` is the host's [`EditorRuntimeHost::is_dirty`]
-    /// (already gated on `Editing`, so this never fires during play or
-    /// replay). `edit_revision` is bumped by the host on every edit; a change
-    /// restarts the idle debounce.
+    /// Advance by `dt`.
     ///
-    /// Returns `true` exactly on the frames an autosave should run. The caller
-    /// must call [`Self::note_saved`] after a successful write.
-    pub fn tick(&mut self, dt: f32, dirty: bool, edit_revision: u64) -> bool {
-        if !dirty {
-            // A clean scene (saved, reloaded, or mid-play) has nothing to
-            // checkpoint; reset so reopening dirty starts a fresh debounce.
-            self.reset();
+    /// - `has_unsaved_work`: the host's raw persistent-dirty flag — true
+    ///   whenever there is unsaved *authored* work, INCLUDING during play (it
+    ///   is not masked by play state). When false the scene is saved, so the
+    ///   watermark is advanced to the current revision.
+    /// - `can_autosave`: whether the editor is in a state where checkpointing
+    ///   the document is meaningful — i.e. `Editing`. During play/replay the
+    ///   live document is transient simulation state, so we do not checkpoint,
+    ///   but we also do not lose track of the pending pre-play edit.
+    /// - `edit_revision`: the host's monotonic edit counter.
+    ///
+    /// Returns `true` exactly on the frames an autosave should run.
+    pub fn tick(
+        &mut self,
+        dt: f32,
+        has_unsaved_work: bool,
+        can_autosave: bool,
+        edit_revision: u64,
+    ) -> bool {
+        if !has_unsaved_work {
+            // Saved (or never edited): current state is the checkpoint.
             self.last_seen_revision = edit_revision;
+            self.checkpointed_revision = edit_revision;
+            self.since_last_edit = 0.0;
+            self.since_last_checkpoint = 0.0;
+            self.backoff_remaining = 0.0;
+            self.fire_outstanding = false;
             return false;
         }
 
         if edit_revision != self.last_seen_revision {
             self.last_seen_revision = edit_revision;
             self.since_last_edit = 0.0;
-            self.edited_since_save = true;
+            // A fresh edit supersedes any outstanding/backed-off attempt.
+            self.fire_outstanding = false;
+            self.backoff_remaining = 0.0;
         }
 
-        if !self.edited_since_save {
+        // Nothing pending relative to the watermark.
+        if self.last_seen_revision == self.checkpointed_revision {
             return false;
         }
 
         self.since_last_edit += dt;
-        self.since_last_save += dt;
+        self.since_last_checkpoint += dt;
 
-        self.since_last_edit >= self.idle_debounce_secs
-            || self.since_last_save >= self.max_interval_secs
+        if self.fire_outstanding {
+            return false; // waiting for the caller to report the outcome
+        }
+        if self.backoff_remaining > 0.0 {
+            self.backoff_remaining -= dt;
+            return false;
+        }
+        // Pending work exists, but we cannot checkpoint outside Editing. Keep
+        // the timers running so we fire promptly once Editing resumes.
+        if !can_autosave {
+            return false;
+        }
+
+        let should_fire = self.since_last_edit >= self.idle_debounce_secs
+            || self.since_last_checkpoint >= self.max_interval_secs;
+        if should_fire {
+            self.fire_outstanding = true;
+        }
+        should_fire
     }
 
-    /// Call after an autosave (or an explicit save) durably lands.
+    /// Report that a checkpoint (autosave or explicit save) durably landed.
+    /// Advances the watermark to the revision that was current when the fire
+    /// was requested.
     pub fn note_saved(&mut self) {
-        self.reset();
+        self.checkpointed_revision = self.last_seen_revision;
+        self.since_last_checkpoint = 0.0;
+        self.backoff_remaining = 0.0;
+        self.fire_outstanding = false;
     }
 
-    fn reset(&mut self) {
-        self.since_last_edit = 0.0;
-        self.since_last_save = 0.0;
-        self.edited_since_save = false;
+    /// Report that the checkpoint attempt failed. The watermark is NOT
+    /// advanced (the work is still un-checkpointed), and a back-off is armed
+    /// so the next attempt is not immediate — avoiding a per-frame retry of a
+    /// persistently-failing write.
+    pub fn note_failed(&mut self) {
+        self.fire_outstanding = false;
+        self.backoff_remaining = self.retry_backoff_secs;
     }
 }
 
@@ -3225,12 +3295,16 @@ entity "sun" {
         );
     }
 
-    /// A clean scene never autosaves, however long it sits.
+    fn sched(idle: f32, floor: f32) -> AutosaveScheduler {
+        AutosaveScheduler::new(idle, floor, 5.0)
+    }
+
+    /// A saved scene never autosaves, however long it sits.
     #[test]
-    fn scheduler_never_fires_when_not_dirty() {
+    fn scheduler_never_fires_when_no_unsaved_work() {
         let mut s = AutosaveScheduler::default();
         for _ in 0..1000 {
-            assert!(!s.tick(1.0, false, 0));
+            assert!(!s.tick(1.0, false, true, 0));
         }
     }
 
@@ -3238,29 +3312,26 @@ entity "sun" {
     /// has been idle for the debounce window.
     #[test]
     fn scheduler_fires_after_idle_debounce() {
-        let mut s = AutosaveScheduler::new(3.0, 60.0);
-        // Edit lands (revision changes).
-        assert!(!s.tick(0.1, true, 1), "must not fire immediately on edit");
-        // Idle for just under the window.
+        let mut s = sched(3.0, 60.0);
+        assert!(!s.tick(0.1, true, true, 1), "must not fire immediately on edit");
         let mut t = 0.1;
         while t < 2.9 {
-            assert!(!s.tick(0.1, true, 1), "fired too early at t={t}");
+            assert!(!s.tick(0.1, true, true, 1), "fired too early at t={t}");
             t += 0.1;
         }
-        // Crossing the window fires.
-        assert!(s.tick(0.5, true, 1), "must fire after the idle debounce");
+        assert!(s.tick(0.5, true, true, 1), "must fire after the idle debounce");
     }
 
     /// Continuous editing keeps restarting the debounce, so the idle rule
     /// alone would never fire — the interval floor guarantees a checkpoint.
     #[test]
     fn scheduler_interval_floor_fires_during_continuous_editing() {
-        let mut s = AutosaveScheduler::new(3.0, 10.0);
+        let mut s = sched(3.0, 10.0);
         let mut rev = 0u64;
         let mut fired_at = None;
         for i in 1..=200 {
             rev += 1; // an edit every frame: the idle timer never matures
-            if s.tick(0.1, true, rev) {
+            if s.tick(0.1, true, true, rev) {
                 fired_at = Some(i as f32 * 0.1);
                 break;
             }
@@ -3272,35 +3343,91 @@ entity "sun" {
         );
     }
 
-    /// After an autosave, an *idle* dirty scene is not rewritten again and
-    /// again — only a new edit re-arms the scheduler.
+    /// After a checkpoint (note_saved advances the watermark), an idle scene
+    /// with unsaved work is not rewritten again — only a new edit re-arms it.
     #[test]
     fn scheduler_does_not_refire_without_a_new_edit() {
-        let mut s = AutosaveScheduler::new(3.0, 60.0);
-        assert!(!s.tick(0.1, true, 1));
-        assert!(s.tick(5.0, true, 1), "first fire");
+        let mut s = sched(3.0, 60.0);
+        assert!(!s.tick(0.1, true, true, 1));
+        assert!(s.tick(5.0, true, true, 1), "first fire");
         s.note_saved();
 
-        // Still dirty (user hasn't pressed Save), but no new edit: never fires.
+        // Still unsaved relative to the SOURCE, but the autosave watermark is
+        // at rev 1, so no new checkpoint until a new edit.
         for _ in 0..1000 {
-            assert!(!s.tick(1.0, true, 1), "re-fired without a new edit");
+            assert!(!s.tick(1.0, true, true, 1), "re-fired without a new edit");
         }
-        // A fresh edit re-arms it.
-        assert!(!s.tick(0.1, true, 2));
-        assert!(s.tick(5.0, true, 2), "a new edit must re-arm the scheduler");
+        assert!(!s.tick(0.1, true, true, 2));
+        assert!(s.tick(5.0, true, true, 2), "a new edit must re-arm the scheduler");
     }
 
-    /// Going clean (an explicit save) resets the scheduler, so reopening a
-    /// dirty state starts a fresh debounce rather than firing instantly.
+    /// Going saved advances the watermark, so reopening a dirty state starts a
+    /// fresh debounce rather than firing instantly.
     #[test]
-    fn scheduler_resets_when_scene_becomes_clean() {
-        let mut s = AutosaveScheduler::new(3.0, 60.0);
-        assert!(!s.tick(0.1, true, 1));
-        s.tick(2.0, true, 1); // partway through the debounce
-        assert!(!s.tick(0.1, false, 1), "clean scene must not fire");
-        // Now dirty again with a new edit: the debounce restarts from zero.
-        assert!(!s.tick(0.1, true, 2));
-        assert!(!s.tick(2.0, true, 2), "debounce must have restarted");
-        assert!(s.tick(1.5, true, 2));
+    fn scheduler_advances_watermark_when_scene_becomes_saved() {
+        let mut s = sched(3.0, 60.0);
+        assert!(!s.tick(0.1, true, true, 1));
+        s.tick(2.0, true, true, 1); // partway through the debounce
+        assert!(!s.tick(0.1, false, true, 1), "saved scene must not fire");
+        assert!(!s.tick(0.1, true, true, 2));
+        assert!(!s.tick(2.0, true, true, 2), "debounce must have restarted");
+        assert!(s.tick(1.5, true, true, 2));
+    }
+
+    /// Regression (review #2): an unsaved edit made just before entering play
+    /// mode must still autosave after returning to Editing. During play,
+    /// can_autosave is false and the revision does not change, but the
+    /// unsaved-work watermark keeps the edit pending — so it fires on return.
+    #[test]
+    fn scheduler_checkpoints_pre_play_edit_after_a_play_cycle() {
+        let mut s = sched(3.0, 60.0);
+        // Edit in Editing, but enter play before the debounce matures.
+        assert!(!s.tick(0.1, true, true, 1));
+        // Play: has_unsaved_work stays TRUE (raw dirty), can_autosave FALSE.
+        for _ in 0..600 {
+            assert!(
+                !s.tick(0.1, true, false, 1),
+                "must never checkpoint during play"
+            );
+        }
+        // Back to Editing: the pending pre-play edit checkpoints promptly.
+        assert!(
+            s.tick(0.1, true, true, 1),
+            "the pre-play edit must autosave once Editing resumes"
+        );
+    }
+
+    /// Regression (review #1): a failing autosave does not re-fire every frame.
+    /// After note_failed the scheduler backs off, then retries.
+    #[test]
+    fn scheduler_backs_off_after_a_failed_autosave() {
+        let mut s = AutosaveScheduler::new(3.0, 60.0, 5.0);
+        assert!(!s.tick(0.1, true, true, 1));
+        assert!(s.tick(5.0, true, true, 1), "first fire");
+        s.note_failed();
+
+        // Within the back-off window: no re-fire, even though work is pending.
+        for _ in 0..8 {
+            assert!(!s.tick(0.5, true, true, 1), "must back off, not re-fire");
+        }
+        // The tick that drains the last of the back-off still returns false...
+        assert!(!s.tick(2.0, true, true, 1), "the draining tick does not itself fire");
+        // ...and the next one retries.
+        assert!(s.tick(0.1, true, true, 1), "must retry after the back-off");
+    }
+
+    /// After a fire, the scheduler will not fire again until the caller reports
+    /// the outcome (note_saved / note_failed) — no double-fire in one attempt.
+    #[test]
+    fn scheduler_holds_until_outcome_reported() {
+        let mut s = sched(3.0, 60.0);
+        assert!(!s.tick(0.1, true, true, 1));
+        assert!(s.tick(5.0, true, true, 1), "fires");
+        // No outcome reported yet: stays quiet.
+        for _ in 0..100 {
+            assert!(!s.tick(1.0, true, true, 1), "must not re-fire before outcome");
+        }
+        s.note_saved();
+        assert!(!s.tick(1.0, true, true, 1), "quiet after checkpoint");
     }
 }

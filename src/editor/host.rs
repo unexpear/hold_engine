@@ -542,6 +542,14 @@ impl EditorRuntimeHost {
         self.edit_revision
     }
 
+    /// Whether there is unsaved *authored* work — the raw persistent-dirty
+    /// flag, NOT masked by play state (unlike [`Self::is_dirty`]). The autosave
+    /// scheduler needs the unmasked value so that an edit made just before
+    /// entering play mode is still known to be pending after play ends.
+    pub fn has_unsaved_authored_work(&self) -> bool {
+        self.persistent_dirty
+    }
+
     // ── Autosave + crash recovery (M11) ───────────────────────────────────
 
     /// Where this scene's recovery file lives, or `None` for an untitled
@@ -593,18 +601,42 @@ impl EditorRuntimeHost {
         }
     }
 
-    /// A recovery sidecar left over from a previous session, if any.
+    /// A recovery sidecar left over from a previous session that is NEWER than
+    /// the on-disk source, if any.
     ///
     /// Its presence means unsaved work never made it into the source file —
     /// the session ended (crashed, or was quit) between an autosave and a
     /// save. An explicit save always deletes the sidecar, so a leftover one is
-    /// never a false positive after a clean save.
+    /// normally impossible after a clean save.
+    ///
+    /// **Staleness guard.** `clear_recovery` on save is best-effort (its
+    /// error is ignored) and a crash can strike between the source write and
+    /// the sidecar delete, so a sidecar OLDER than the source can survive a
+    /// save. Recovering it would revert the user to work they already
+    /// superseded. We therefore only offer a sidecar strictly newer than the
+    /// source; an older-or-equal one represents already-saved work and is not
+    /// offered. If there is no source file yet (never saved), any sidecar is
+    /// offered.
     ///
     /// Recovery is offered, never applied automatically: silently loading the
     /// sidecar would overwrite whatever file the user deliberately opened.
     pub fn pending_recovery(&self) -> Option<PathBuf> {
         let path = self.recovery_path()?;
-        path.is_file().then_some(path)
+        if !path.is_file() {
+            return None;
+        }
+        let sidecar_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+        // Compare against the on-disk source. If the source is unreadable /
+        // absent (never saved), the sidecar is the only record of the work —
+        // offer it.
+        match self
+            .session
+            .source_path()
+            .and_then(|src| std::fs::metadata(src).and_then(|m| m.modified()).ok())
+        {
+            Some(source_mtime) if sidecar_mtime <= source_mtime => None,
+            _ => Some(path),
+        }
     }
 
     fn cmd_recover_autosave(&mut self) -> Result<Vec<EditorEvent>, EditorCommandError> {
@@ -1103,6 +1135,14 @@ impl EditorRuntimeHost {
             .map_err(EditorCommandError::Session)?;
         self.persistent_dirty = persistent_dirty;
         self.pre_play_persistent_dirty = persistent_dirty;
+        // The document content changed, so any autosave sidecar is now stale.
+        // Bump the revision so the scheduler re-checkpoints the new state; and
+        // if the undo/redo landed on a clean state, delete the sidecar so a
+        // later startup does not offer recovery of work the user just undid.
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        if !persistent_dirty {
+            self.clear_recovery();
+        }
         self.world_requires_rebuild = false;
         self.restore_cursor_snapshot(cursor.as_ref());
 
@@ -3084,6 +3124,63 @@ entity "cam" {
         assert!(host.pending_recovery().is_none());
         host.execute(EditorCommand::DiscardAutosave).unwrap();
         host.execute(EditorCommand::DiscardAutosave).unwrap();
+    }
+
+    /// Staleness guard (review): a recovery sidecar OLDER than the source (it
+    /// survived a save because clear_recovery is best-effort, or a crash struck
+    /// between the source write and the delete) must NOT be offered — recovering
+    /// it would revert the user to already-saved work.
+    #[test]
+    fn stale_sidecar_older_than_source_is_not_offered() {
+        let path = write_single_entity_scene("recover_stale");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        dirty_the_host(&mut host);
+        let sidecar = host.autosave_to_recovery().unwrap().unwrap();
+        assert!(host.pending_recovery().is_some(), "fresh sidecar is offered");
+
+        // Make the source strictly newer than the sidecar (simulating a save
+        // that landed after the autosave but whose clear_recovery was lost).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, std::fs::read(&path).unwrap()).unwrap();
+
+        assert!(
+            host.pending_recovery().is_none(),
+            "a sidecar older than the source must not be offered"
+        );
+        // Clean it up.
+        let _ = std::fs::remove_file(sidecar);
+    }
+
+    /// RecoverAutosave against a corrupt/truncated sidecar (exactly what a
+    /// crash mid-autosave could leave, though atomic_write makes it unlikely)
+    /// surfaces a typed error and leaves the loaded scene untouched.
+    #[test]
+    fn recover_from_corrupt_sidecar_surfaces_typed_error_and_preserves_state() {
+        let path = write_single_entity_scene("recover_corrupt");
+        let mut host = EditorRuntimeHost::open_hsc(&path).unwrap();
+        let recovery = host.recovery_path().unwrap();
+        std::fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+        // A V2 .hscene header with a half-written entity and NO terminator —
+        // the strict parser must reject it (M11.4).
+        std::fs::write(
+            &recovery,
+            format!("{}\nname|X\nentity|1|a\n", super::super::HSCENE_DOC_HEADER_V2),
+        )
+        .unwrap();
+        // Make it newer than the source so the staleness guard offers it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = std::fs::File::open(&recovery); // touch is unnecessary; write above set mtime
+        assert!(host.pending_recovery().is_some());
+
+        let entities_before = host.session().scene().entities.len();
+        let result = host.execute(EditorCommand::RecoverAutosave);
+        assert!(result.is_err(), "corrupt sidecar recovery must error");
+        assert_eq!(
+            host.session().scene().entities.len(),
+            entities_before,
+            "a failed recovery must not partially mutate the scene"
+        );
+        let _ = std::fs::remove_file(recovery);
     }
 
     /// A clean save leaves no sidecar, so reopening does not falsely claim a

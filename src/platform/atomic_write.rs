@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ffi::{
     CloseHandle, CreateFileW, DeleteFileW, FlushFileBuffers, GetLastError, MoveFileExW, WriteFile,
-    CREATE_NEW, DWORD, ERROR_ALREADY_EXISTS, FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, HANDLE,
+    CREATE_NEW, DWORD, ERROR_FILE_EXISTS, FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, HANDLE,
     INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
@@ -312,12 +312,7 @@ fn create_temp_file(dest: &Path, parent: &Path) -> Result<(HANDLE, PathBuf), Ato
     let mut last_temp = PathBuf::new();
     for _ in 0..8 {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp = parent.join(format!(
-            "{TEMP_PREFIX}{}-{}-{}",
-            std::process::id(),
-            n,
-            stem
-        ));
+        let temp = temp_candidate(parent, &stem, n);
         let wide = path_to_wide(&temp);
         let handle = unsafe {
             CreateFileW(
@@ -335,14 +330,33 @@ fn create_temp_file(dest: &Path, parent: &Path) -> Result<(HANDLE, PathBuf), Ato
         }
         last_error = unsafe { GetLastError() };
         last_temp = temp;
-        if last_error != ERROR_ALREADY_EXISTS {
-            break; // a real error (missing dir, permissions) — don't spin
+        // CREATE_NEW reports ERROR_FILE_EXISTS (80) on a name collision, NOT
+        // ERROR_ALREADY_EXISTS (183) — the latter only comes from
+        // CREATE_ALWAYS/OPEN_ALWAYS, which succeed. Only a collision is worth
+        // retrying with a fresh counter; any other error (missing dir,
+        // permissions) is terminal.
+        if last_error != ERROR_FILE_EXISTS {
+            break;
         }
     }
     Err(AtomicWriteError::TempCreate {
         temp: last_temp,
         win32_error: last_error,
     })
+}
+
+/// The temp path for a given counter value. Extracted so a test can compute
+/// the exact next candidate and pre-seed a collision.
+fn temp_candidate(parent: &Path, stem: &str, n: u64) -> PathBuf {
+    parent.join(format!("{TEMP_PREFIX}{}-{}-{}", std::process::id(), n, stem))
+}
+
+/// Peek the next counter value without consuming it. Test-only; the counter
+/// is shared across threads, so a peeked value is only a hint under
+/// parallelism.
+#[cfg(test)]
+fn peek_temp_counter() -> u64 {
+    TEMP_COUNTER.load(Ordering::Relaxed)
 }
 
 /// `WriteFile` until every byte is written. A short write is not an error on
@@ -692,6 +706,58 @@ mod tests {
         let _ = atomic_write_with_fault(&a, b"aaaa", AtomicWriteFault::BeforeRename);
         let _ = atomic_write_with_fault(&b, b"bbbb", AtomicWriteFault::BeforeRename);
         assert_eq!(orphan_temps(&dir), 2, "temp names must not collide");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The Replace failure path (review): when MoveFileExW cannot replace the
+    /// destination — here because the destination is read-only, the same
+    /// old-file-intact outcome as a sharing violation — the error is a typed
+    /// Replace carrying the Win32 code, the destination still holds the OLD
+    /// file, and the temp is cleaned up (no litter).
+    #[test]
+    fn replace_failure_leaves_old_file_and_cleans_temp() {
+        let dir = test_dir("replace_fail");
+        let dest = seed_old(&dir);
+
+        // Mark the destination read-only so MoveFileExW(REPLACE_EXISTING)
+        // cannot delete/replace it.
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dest, perms).unwrap();
+
+        match atomic_write(&dest, NEW) {
+            Err(AtomicWriteError::Replace { win32_error, .. }) => {
+                assert_ne!(win32_error, 0, "must carry a real Win32 error code");
+            }
+            other => panic!("expected Replace error, got {other:?}"),
+        }
+
+        // Old file intact, no temp litter.
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&dest, perms).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), OLD, "old file must be intact");
+        assert_eq!(orphan_temps(&dir), 0, "failed replace must clean its temp");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The temp-name collision retry (review): a leftover temp occupying the
+    /// next candidate name does not fail the save — the loop retries with a
+    /// fresh counter and still writes. Guards the ERROR_FILE_EXISTS fix (the
+    /// loop previously broke on the wrong Win32 code and never retried).
+    #[test]
+    fn temp_name_collision_is_retried() {
+        let dir = test_dir("collision");
+        let dest = dir.join("scene.hsc");
+        // Pre-seed the next several temp candidates so the first create
+        // attempt collides (the counter is shared, so seed a small range to
+        // survive concurrent allocations from other tests).
+        let base = peek_temp_counter();
+        for n in base..base + 6 {
+            std::fs::write(temp_candidate(&dir, "scene.hsc", n), b"leftover").unwrap();
+        }
+        atomic_write(&dest, NEW).expect("collision must be retried, not fatal");
+        assert_eq!(std::fs::read(&dest).unwrap(), NEW);
         std::fs::remove_dir_all(dir).ok();
     }
 }
