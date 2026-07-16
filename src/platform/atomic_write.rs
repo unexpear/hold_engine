@@ -51,6 +51,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 
 use super::ffi::{
     CloseHandle, CreateFileW, DeleteFileW, FlushFileBuffers, GetLastError, MoveFileExW, WriteFile,
@@ -359,13 +361,32 @@ fn peek_temp_counter() -> u64 {
     TEMP_COUNTER.load(Ordering::Relaxed)
 }
 
+/// Largest single `WriteFile` request. `nNumberOfBytesToWrite` is a `DWORD`
+/// (u32), so a payload larger than 4 GiB must be written across multiple
+/// calls. Tests can lower this via [`TEST_MAX_CHUNK`] to force the multi-chunk
+/// path on a small payload, since a real 4 GiB buffer is impractical in CI.
+#[cfg(test)]
+static TEST_MAX_CHUNK: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+fn max_write_chunk() -> usize {
+    #[cfg(test)]
+    {
+        let capped = TEST_MAX_CHUNK.load(Ordering::Relaxed);
+        if capped != 0 {
+            return capped;
+        }
+    }
+    u32::MAX as usize
+}
+
 /// `WriteFile` until every byte is written. A short write is not an error on
 /// Windows, so the loop advances by the reported count.
 unsafe fn write_all(handle: HANDLE, bytes: &[u8]) -> Result<(), DWORD> {
     let mut offset: usize = 0;
     while offset < bytes.len() {
         let remaining = bytes.len() - offset;
-        let chunk = remaining.min(u32::MAX as usize) as DWORD;
+        let chunk = remaining.min(max_write_chunk()) as DWORD;
         let mut written: DWORD = 0;
         let ok = WriteFile(
             handle,
@@ -758,6 +779,30 @@ mod tests {
         }
         atomic_write(&dest, NEW).expect("collision must be retried, not fatal");
         assert_eq!(std::fs::read(&dest).unwrap(), NEW);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The write_all multi-chunk loop (review): a payload that exceeds one
+    /// WriteFile request must be written across calls, byte-exactly. A real
+    /// >4 GiB buffer is impractical in CI, so a test-only chunk cap forces the
+    /// same offset-advance path on a small payload.
+    #[test]
+    fn write_all_multi_chunk_loop_is_byte_exact() {
+        let dir = test_dir("chunked");
+        let dest = dir.join("chunked.bin");
+        let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+
+        // 7-byte chunks => ~143 loop iterations for a 1000-byte payload.
+        TEST_MAX_CHUNK.store(7, Ordering::Relaxed);
+        let result = atomic_write(&dest, &payload);
+        TEST_MAX_CHUNK.store(0, Ordering::Relaxed); // restore for other tests
+
+        result.expect("chunked write must succeed");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            payload,
+            "a multi-chunk write must land byte-exactly with no gaps or dupes"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -2887,6 +2887,76 @@ entity "camera" {
         assert_eq!(loaded, doc);
     }
 
+    // ── M11: the sibling authored writers are atomic too (review) ─────────
+    //
+    // save_scene (.hsc) has whole-replacement + typed-error tests in scene.rs.
+    // save_project (.hproj) and save_scene_doc (.hscene) route through the same
+    // atomic_write primitive; these pin that they do (whole replacement, no
+    // trailing bytes from a larger previous file) and surface a typed
+    // EditorIoError::AtomicWrite on failure, not a stringified io::Error.
+
+    #[test]
+    fn save_project_surfaces_typed_atomic_write_error() {
+        // A project rooted at a path whose parent directory does not exist:
+        // the temp create fails, and the error must be the typed AtomicWrite.
+        let root = unique_test_dir("proj_err");
+        let missing = format!("{root}/does/not/exist");
+        let project = Project::new("demo", missing);
+        match save_project(&project) {
+            Err(EditorIoError::AtomicWrite(_)) => {}
+            other => panic!("expected EditorIoError::AtomicWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_scene_doc_over_larger_file_replaces_it_wholly() {
+        let root = unique_test_dir("doc_replace");
+        fs::create_dir_all(&root).unwrap();
+        let path = format!("{root}/level.hscene");
+
+        let big = SceneDocument {
+            name: "Big".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
+            entities: (0..20)
+                .map(|i| EditorEntity {
+                    id: i,
+                    name: format!("entity_{i}_with_a_long_name"),
+                    components: Vec::new(),
+                })
+                .collect(),
+        };
+        save_scene_doc(&path, &big).unwrap();
+
+        let small = SceneDocument {
+            name: "Small".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
+            entities: Vec::new(),
+        };
+        save_scene_doc(&path, &small).unwrap();
+
+        // A truncate-in-place writer would leave trailing bytes of `big`; the
+        // atomic swap replaces the file wholesale.
+        let loaded = load_scene_doc(&path).unwrap();
+        assert_eq!(loaded, small);
+        assert_eq!(fs::read_to_string(&path).unwrap(), small.to_hscene_string());
+    }
+
+    #[test]
+    fn save_scene_doc_surfaces_typed_atomic_write_error() {
+        let root = unique_test_dir("doc_err");
+        fs::create_dir_all(&root).unwrap();
+        let path = format!("{root}/missing/level.hscene");
+        let doc = SceneDocument {
+            name: "X".into(),
+            runtime_slice: RuntimeSliceAuthoring::default(),
+            entities: Vec::new(),
+        };
+        match save_scene_doc(&path, &doc) {
+            Err(EditorIoError::AtomicWrite(_)) => {}
+            other => panic!("expected EditorIoError::AtomicWrite, got {other:?}"),
+        }
+    }
+
     #[test]
     fn scene_document_hsc_file_io_roundtrip() {
         let root = unique_test_dir("scene_hsc");
