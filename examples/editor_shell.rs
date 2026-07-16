@@ -2720,7 +2720,8 @@ fn main() {
                 engine.window.width(),
                 engine.window.height(),
             );
-            let renderer = SoftwareRenderer::new(hwnd, w, h);
+            // SAFETY: `hwnd` is the live window handle owned by `engine.window`.
+            let renderer = unsafe { SoftwareRenderer::new(hwnd, w, h) };
             engine.run_app(renderer, app);
         }
         BackendKind::OpenGL => {
@@ -2729,7 +2730,8 @@ fn main() {
                 engine.window.width(),
                 engine.window.height(),
             );
-            let renderer = OpenGLRenderer::new(hwnd, w, h);
+            // SAFETY: `hwnd` is the live window handle owned by `engine.window`.
+            let renderer = unsafe { OpenGLRenderer::new(hwnd, w, h) };
             engine.run_app(renderer, app);
         }
         BackendKind::Vulkan => {
@@ -2739,7 +2741,9 @@ fn main() {
                 engine.window.width(),
                 engine.window.height(),
             );
-            let renderer = hold::renderer::VulkanRenderer::new(hwnd, hinstance, w, h);
+            // SAFETY: `hwnd`/`hinstance` are the live window handle and module
+            // instance owned by `engine.window`.
+            let renderer = unsafe { hold::renderer::VulkanRenderer::new(hwnd, hinstance, w, h) };
             engine.run_app(renderer, app);
         }
     }

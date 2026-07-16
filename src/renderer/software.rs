@@ -15,7 +15,11 @@ pub struct SoftwareRenderer {
 }
 
 impl SoftwareRenderer {
-    pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
+    /// # Safety
+    /// `hwnd` must be a valid, live Win32 window handle that outlives the
+    /// returned renderer. Passing an invalid handle is undefined behaviour in
+    /// the Win32 calls this makes (`GetDC`, `StretchDIBits`, …).
+    pub unsafe fn new(hwnd: HWND, width: u32, height: u32) -> Self {
         let hdc = unsafe { GetDC(hwnd) };
         assert!(!hdc.is_null(), "GetDC failed");
         let n = (width * height) as usize;

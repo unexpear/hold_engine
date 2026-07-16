@@ -858,11 +858,15 @@ fn build_crate_texture() -> Texture {
 fn main() {
     let args = Args::parse();
     let engine = Engine::new(WINDOW_TITLE, 1280, 720);
-    let renderer = OpenGLRenderer::new(
-        engine.window.hwnd,
-        engine.window.width(),
-        engine.window.height(),
-    );
+    // SAFETY: `engine.window.hwnd` is the live window handle just created by
+    // `Engine::new`.
+    let renderer = unsafe {
+        OpenGLRenderer::new(
+            engine.window.hwnd,
+            engine.window.width(),
+            engine.window.height(),
+        )
+    };
     let mut scene = TexturedScene::new(args.self_test_seconds);
 
     println!("[textured] material + texture handle sample ready");

@@ -279,7 +279,8 @@ fn main() {
         engine.window.width(),
         engine.window.height(),
     );
-    let renderer = SoftwareRenderer::new(hwnd, w, h);
+    // SAFETY: `hwnd` is the live window handle just created by `Engine::new`.
+    let renderer = unsafe { SoftwareRenderer::new(hwnd, w, h) };
 
     // Prepare model geometry.
     let (obj_verts, obj_normals, obj_faces, face_colors_builtin);

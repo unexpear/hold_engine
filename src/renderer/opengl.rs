@@ -688,7 +688,12 @@ pub struct OpenGLRenderer {
 
 impl OpenGLRenderer {
     /// Create a WGL context on `hwnd`. Panics if the driver doesn't support GL.
-    pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
+    ///
+    /// # Safety
+    /// `hwnd` must be a valid, live Win32 window handle that outlives the
+    /// returned renderer. Passing an invalid handle is undefined behaviour in
+    /// the Win32 calls this makes (`GetDC`, `SetPixelFormat`, …).
+    pub unsafe fn new(hwnd: HWND, width: u32, height: u32) -> Self {
         unsafe {
             let hdc = GetDC(hwnd);
             assert!(!hdc.is_null(), "GetDC failed");

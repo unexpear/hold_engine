@@ -113,7 +113,18 @@ pub struct VulkanRenderer {
 
 impl VulkanRenderer {
     /// Initialise Vulkan from scratch for `hwnd`.  Panics if Vulkan isn't available.
-    pub fn new(hwnd: win32::HWND, hinstance: win32::HINSTANCE, width: u32, height: u32) -> Self {
+    ///
+    /// # Safety
+    /// `hwnd` and `hinstance` must be a valid, live Win32 window handle and its
+    /// module instance, both outliving the returned renderer. Passing invalid
+    /// handles is undefined behaviour in the Win32 / Vulkan-surface calls this
+    /// makes (`GetDC`, `vkCreateWin32SurfaceKHR`, …).
+    pub unsafe fn new(
+        hwnd: win32::HWND,
+        hinstance: win32::HINSTANCE,
+        width: u32,
+        height: u32,
+    ) -> Self {
         unsafe {
             let hdc = win32::GetDC(hwnd);
             assert!(!hdc.is_null(), "GetDC failed for Vulkan overlay blit");
