@@ -1,4 +1,5 @@
-//! Demo: spinning Gouraud-shaded tetrahedron rendered by the software backend.
+//! Demo: spinning Gouraud-shaded tetrahedron.
+//! Software rasterizer by default. Set FORGE_BACKEND=vulkan (or vk) for the same scene.
 //!
 //! Shows:
 //!  • Engine + ECS setup
@@ -12,8 +13,7 @@ use forge::{
     engine::Engine,
     input::{vk, InputState},
     math::{deg_to_rad, Mat4, Vec3},
-    renderer::{Color, Renderer},
-    renderer::software::SoftwareRenderer,
+    renderer::{software::SoftwareRenderer, vulkan::VulkanRenderer, Color, Draw3d},
     Entity,
 };
 
@@ -38,8 +38,7 @@ impl System for SpinSystem {
         // Collect entity IDs first to avoid borrow conflict.
         let entities: Vec<Entity> = world
             .query::<Transform>()
-            .iter()
-            .map(|(e, _)| *e)
+            .map(|(entity, _)| entity)
             .collect();
 
         for entity in entities {
@@ -63,7 +62,19 @@ impl System for SpinSystem {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let mut engine = Engine::new("Forge Engine — Software Demo", 960, 540);
+    let vulkan = match std::env::var("FORGE_BACKEND") {
+        Ok(value) => {
+            let value = value.to_ascii_lowercase();
+            value == "vulkan" || value == "vk"
+        }
+        Err(_) => false,
+    };
+    let title = if vulkan {
+        "Forge Engine — Vulkan Demo"
+    } else {
+        "Forge Engine — Software Demo"
+    };
+    let mut engine = Engine::new(title, 960, 540);
 
     // Spawn the tetrahedron entity.
     let tetra = engine.world.spawn();
@@ -71,12 +82,29 @@ fn main() {
     engine.world.add_component(tetra, AngularVelocity { y: 1.2, x: 0.4 });
 
     // Register the spin system so it runs automatically each frame.
-    engine.world.add_system(SpinSystem);
+    engine.schedule.add_system(SpinSystem);
 
-    // Build the software renderer using the window handle.
-    let (hwnd, w, h) = (engine.window.hwnd, engine.window.width(), engine.window.height());
-    let renderer = SoftwareRenderer::new(hwnd, w, h);
+    let (hwnd, hinstance, w, h) = (
+        engine.window.hwnd,
+        engine.window.hinstance,
+        engine.window.width(),
+        engine.window.height(),
+    );
+    if vulkan {
+        let renderer = VulkanRenderer::new(hwnd, hinstance, w, h);
+        engine.run(renderer, move |world, renderer, input, dt| {
+            demo_frame(tetra, world, renderer, input, dt);
+        });
+    } else {
+        let renderer = SoftwareRenderer::new(hwnd, w, h);
+        engine.run(renderer, move |world, renderer, input, dt| {
+            demo_frame(tetra, world, renderer, input, dt);
+        });
+    }
 
+}
+
+fn demo_frame<R: Draw3d>(tetra: Entity, world: &mut World, renderer: &mut R, input: &InputState, _dt: f32) {
     // Camera: sits back a bit, looks at origin.
     let eye    = Vec3::new(0.0, 0.5, 3.0);
     let center = Vec3::ZERO;
@@ -103,7 +131,6 @@ fn main() {
         Color::rgb(1.0, 0.9, 0.1),
     ];
 
-    engine.run(renderer, move |world, renderer, input, dt| {
         // Quit on Escape.
         if input.key_pressed(vk::ESCAPE) { std::process::exit(0); }
 
@@ -111,13 +138,10 @@ fn main() {
         renderer.clear(Color::rgb(0.05, 0.05, 0.12));
 
         // Read current transform (if the entity still exists).
-        let (ry, rx) = {
-            let transforms = world.query::<Transform>();
-            match transforms.first() {
-                Some((_, t)) => (t.rotation_y, t.rotation_x),
-                None => (0.0, 0.0),
-            }
-        };
+        let (ry, rx) = world
+            .get::<Transform>(tetra)
+            .map(|transform| (transform.rotation_y, transform.rotation_x))
+            .unwrap_or((0.0, 0.0));
 
         // Build MVP.
         let aspect = renderer.width() as f32 / renderer.height() as f32;
@@ -144,10 +168,10 @@ fn main() {
 
         // Draw a simple floor grid for spatial reference.
         draw_grid(renderer, &mvp);
-    });
 }
 
-fn draw_grid(r: &mut SoftwareRenderer, mvp: &Mat4) {
+
+fn draw_grid<R: Draw3d>(r: &mut R, mvp: &Mat4) {
     let grid_color = Color::rgb(0.25, 0.25, 0.35);
     let y = -0.55_f32;
     let range = 5;
@@ -160,7 +184,7 @@ fn draw_grid(r: &mut SoftwareRenderer, mvp: &Mat4) {
     }
 }
 
-fn project_line(r: &mut SoftwareRenderer, mvp: &Mat4, a: Vec3, b: Vec3, color: Color) {
+fn project_line<R: Draw3d>(r: &mut R, mvp: &Mat4, a: Vec3, b: Vec3, color: Color) {
     let ca = mvp.transform_point(a);
     let cb = mvp.transform_point(b);
     if ca.w <= 0.0 || cb.w <= 0.0 { return; }

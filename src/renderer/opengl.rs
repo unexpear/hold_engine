@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_macros)]
 //! OpenGL renderer backend.
 //!
 //! Sets up a WGL context on the window's DC, then loads OpenGL function
@@ -41,7 +42,9 @@ type GlDisable    = unsafe extern "system" fn(GLenum);
 ///
 /// Core functions (like glClear) are in opengl32.dll;
 /// modern functions (like glCreateShader) come from wglGetProcAddress.
-unsafe fn load_gl_fn(name: &str) -> *const c_void {
+/// The `opengl32` module handle must have been loaded once at startup and
+/// passed here — it is NOT freed by this function.
+unsafe fn load_gl_fn(name: &str, opengl32: HMODULE) -> *const c_void {
     let cname = cstr(name);
     // Try wglGetProcAddress first (extensions / modern GL).
     let ptr = wglGetProcAddress(cname.as_ptr());
@@ -49,16 +52,14 @@ unsafe fn load_gl_fn(name: &str) -> *const c_void {
         return ptr;
     }
     // Fall back to opengl32.dll for legacy core functions.
-    let module_name = wstr("opengl32.dll");
-    let module = LoadLibraryW(module_name.as_ptr());
-    if module.is_null() { return null_mut(); }
-    GetProcAddress(module, cname.as_ptr())
+    if opengl32.is_null() { return null_mut(); }
+    GetProcAddress(opengl32, cname.as_ptr())
 }
 
 macro_rules! gl_fn {
     ($ctx:expr, $name:ident, $ty:ty) => {
         unsafe {
-            let ptr = load_gl_fn(stringify!($name));
+            let ptr = load_gl_fn(stringify!($name), $ctx);
             if ptr.is_null() {
                 eprintln!("[GL] Failed to load {}", stringify!($name));
                 None
@@ -79,18 +80,18 @@ struct GlFns {
 }
 
 impl GlFns {
-    unsafe fn load() -> Self {
+    unsafe fn load(opengl32: HMODULE) -> Self {
         let clear_color = std::mem::transmute::<*const c_void, GlClearColor>(
-            load_gl_fn("glClearColor")
+            load_gl_fn("glClearColor", opengl32)
         );
         let clear = std::mem::transmute::<*const c_void, GlClear>(
-            load_gl_fn("glClear")
+            load_gl_fn("glClear", opengl32)
         );
         let viewport = std::mem::transmute::<*const c_void, GlViewport>(
-            load_gl_fn("glViewport")
+            load_gl_fn("glViewport", opengl32)
         );
         let enable = std::mem::transmute::<*const c_void, GlEnable>(
-            load_gl_fn("glEnable")
+            load_gl_fn("glEnable", opengl32)
         );
         Self { clear_color, clear, viewport, enable }
     }
@@ -99,12 +100,13 @@ impl GlFns {
 // ── OpenGLRenderer ────────────────────────────────────────────────────────────
 
 pub struct OpenGLRenderer {
-    hwnd:   HWND,
-    hdc:    HDC,
-    hglrc:  HGLRC,
-    width:  u32,
-    height: u32,
-    gl:     GlFns,
+    hwnd:     HWND,
+    hdc:      HDC,
+    hglrc:    HGLRC,
+    opengl32: HMODULE,
+    width:    u32,
+    height:   u32,
+    gl:       GlFns,
 }
 
 impl OpenGLRenderer {
@@ -137,12 +139,21 @@ impl OpenGLRenderer {
             let ok = wglMakeCurrent(hdc, hglrc);
             assert!(ok != 0, "wglMakeCurrent failed");
 
-            let gl = GlFns::load();
+            // Load opengl32.dll once and keep the handle alive for the lifetime
+            // of this renderer (used as fallback in load_gl_fn).
+            let lib_name = wstr("opengl32.dll");
+            let opengl32 = LoadLibraryW(lib_name.as_ptr());
+            // opengl32.dll should always be available on Windows — warn if not.
+            if opengl32.is_null() {
+                eprintln!("[GL] Warning: LoadLibraryW(\"opengl32.dll\") failed");
+            }
+
+            let gl = GlFns::load(opengl32);
 
             // Enable depth test by default.
             (gl.enable)(GL_DEPTH_TEST);
 
-            Self { hwnd, hdc, hglrc, width, height, gl }
+            Self { hwnd, hdc, hglrc, opengl32, width, height, gl }
         }
     }
 
@@ -182,6 +193,9 @@ impl Drop for OpenGLRenderer {
             wglMakeCurrent(null_mut(), null_mut());
             wglDeleteContext(self.hglrc);
             ReleaseDC(self.hwnd, self.hdc);
+            if !self.opengl32.is_null() {
+                FreeLibrary(self.opengl32);
+            }
         }
     }
 }

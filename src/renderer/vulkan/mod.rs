@@ -1,17 +1,20 @@
+#![allow(dead_code)]
 //! Vulkan renderer backend.
 //!
 //! Loads vulkan-1.dll at runtime (no linking, no ash/vulkano).
-//! Sets up: instance → Win32 surface → physical device → logical device →
-//!          swapchain → image views → render pass → framebuffers →
-//!          command pool / buffers → sync objects.
+//! Presents the same immediate-mode demo as the software backend:
+//! Gouraud triangles with a depth buffer, plus screen-space lines.
 
 pub mod ffi;
+mod geom;
+mod shaders;
 
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use ffi::*;
 use crate::platform::ffi as win32;
-use super::{Color, Renderer};
+use crate::math::{Mat4, Vec3};
+use super::{Color, Draw3d, Renderer};
 
 const FRAMES_IN_FLIGHT: usize = 2;
 
@@ -63,6 +66,32 @@ struct Vk {
     acquire_next_image:       PFN_vkAcquireNextImageKHR,
     queue_submit:             PFN_vkQueueSubmit,
     queue_present:            PFN_vkQueuePresentKHR,
+    get_physical_device_memory_props: PFN_vkGetPhysicalDeviceMemoryProperties,
+    get_physical_device_format_props: PFN_vkGetPhysicalDeviceFormatProperties,
+    create_shader_module:     PFN_vkCreateShaderModule,
+    destroy_shader_module:    PFN_vkDestroyShaderModule,
+    create_pipeline_layout:   PFN_vkCreatePipelineLayout,
+    destroy_pipeline_layout:  PFN_vkDestroyPipelineLayout,
+    create_graphics_pipelines: PFN_vkCreateGraphicsPipelines,
+    destroy_pipeline:         PFN_vkDestroyPipeline,
+    create_buffer:            PFN_vkCreateBuffer,
+    destroy_buffer:           PFN_vkDestroyBuffer,
+    get_buffer_memory_requirements: PFN_vkGetBufferMemoryRequirements,
+    allocate_memory:          PFN_vkAllocateMemory,
+    free_memory:              PFN_vkFreeMemory,
+    bind_buffer_memory:       PFN_vkBindBufferMemory,
+    map_memory:               PFN_vkMapMemory,
+    unmap_memory:             PFN_vkUnmapMemory,
+    create_image:             PFN_vkCreateImage,
+    destroy_image:            PFN_vkDestroyImage,
+    get_image_memory_requirements: PFN_vkGetImageMemoryRequirements,
+    bind_image_memory:        PFN_vkBindImageMemory,
+    cmd_bind_pipeline:        PFN_vkCmdBindPipeline,
+    cmd_set_viewport:         PFN_vkCmdSetViewport,
+    cmd_set_scissor:          PFN_vkCmdSetScissor,
+    cmd_bind_vertex_buffers:  PFN_vkCmdBindVertexBuffers,
+    cmd_push_constants:       PFN_vkCmdPushConstants,
+    cmd_draw:                 PFN_vkCmdDraw,
 }
 
 // ── Sync primitives per frame-in-flight ───────────────────────────────────────
@@ -72,6 +101,10 @@ struct FrameSync {
     render_finished: VkSemaphore,
     in_flight:       VkFence,
     cmd_buf:         VkCommandBuffer,
+    vb:              VkBuffer,
+    vb_mem:          VkDeviceMemory,
+    vb_ptr:          *mut u8,
+    vb_cap:          u64,
 }
 
 // ── VulkanRenderer ────────────────────────────────────────────────────────────
@@ -101,8 +134,22 @@ pub struct VulkanRenderer {
     frames:        Vec<FrameSync>,
     current_frame: usize,
     current_image: u32,
+    pending_resize: bool,
 
     clear_color:   Color,
+
+    depth_format:  VkFormat,
+    depth_image:   VkImage,
+    depth_memory:  VkDeviceMemory,
+    depth_view:    VkImageView,
+    mem_props:     VkPhysicalDeviceMemoryProperties,
+
+    pipeline_layout: VkPipelineLayout,
+    tri_pipeline:    VkPipeline,
+    line_pipeline:   VkPipeline,
+
+    vertices: Vec<GpuVertex>,
+    draws:    Vec<QueuedDraw>,
 }
 
 impl VulkanRenderer {
@@ -211,7 +258,7 @@ impl VulkanRenderer {
             // ── Find queue families ───────────────────────────────────────
             let mut qf_count = 0u32;
             get_queue_family_props(physical_device, &mut qf_count, null_mut());
-            let mut qf_props = vec![unsafe {std::mem::zeroed::<VkQueueFamilyProperties>()}; qf_count as usize];
+            let mut qf_props = vec![std::mem::zeroed::<VkQueueFamilyProperties>(); qf_count as usize];
             get_queue_family_props(physical_device, &mut qf_count, qf_props.as_mut_ptr());
 
             let mut graphics_family = u32::MAX;
@@ -308,6 +355,32 @@ impl VulkanRenderer {
             let acquire_next_image:       PFN_vkAcquireNextImageKHR     = dev_fn!("vkAcquireNextImageKHR",     PFN_vkAcquireNextImageKHR);
             let queue_submit:             PFN_vkQueueSubmit             = dev_fn!("vkQueueSubmit",             PFN_vkQueueSubmit);
             let queue_present:            PFN_vkQueuePresentKHR         = dev_fn!("vkQueuePresentKHR",         PFN_vkQueuePresentKHR);
+            let get_physical_device_memory_props: PFN_vkGetPhysicalDeviceMemoryProperties = dev_fn!("vkGetPhysicalDeviceMemoryProperties", PFN_vkGetPhysicalDeviceMemoryProperties);
+            let get_physical_device_format_props: PFN_vkGetPhysicalDeviceFormatProperties = dev_fn!("vkGetPhysicalDeviceFormatProperties", PFN_vkGetPhysicalDeviceFormatProperties);
+            let create_shader_module:     PFN_vkCreateShaderModule      = dev_fn!("vkCreateShaderModule",      PFN_vkCreateShaderModule);
+            let destroy_shader_module:    PFN_vkDestroyShaderModule     = dev_fn!("vkDestroyShaderModule",     PFN_vkDestroyShaderModule);
+            let create_pipeline_layout:   PFN_vkCreatePipelineLayout    = dev_fn!("vkCreatePipelineLayout",    PFN_vkCreatePipelineLayout);
+            let destroy_pipeline_layout:  PFN_vkDestroyPipelineLayout   = dev_fn!("vkDestroyPipelineLayout",   PFN_vkDestroyPipelineLayout);
+            let create_graphics_pipelines: PFN_vkCreateGraphicsPipelines = dev_fn!("vkCreateGraphicsPipelines", PFN_vkCreateGraphicsPipelines);
+            let destroy_pipeline:         PFN_vkDestroyPipeline         = dev_fn!("vkDestroyPipeline",         PFN_vkDestroyPipeline);
+            let create_buffer:            PFN_vkCreateBuffer            = dev_fn!("vkCreateBuffer",            PFN_vkCreateBuffer);
+            let destroy_buffer:           PFN_vkDestroyBuffer           = dev_fn!("vkDestroyBuffer",           PFN_vkDestroyBuffer);
+            let get_buffer_memory_requirements: PFN_vkGetBufferMemoryRequirements = dev_fn!("vkGetBufferMemoryRequirements", PFN_vkGetBufferMemoryRequirements);
+            let allocate_memory:          PFN_vkAllocateMemory          = dev_fn!("vkAllocateMemory",          PFN_vkAllocateMemory);
+            let free_memory:              PFN_vkFreeMemory              = dev_fn!("vkFreeMemory",              PFN_vkFreeMemory);
+            let bind_buffer_memory:       PFN_vkBindBufferMemory        = dev_fn!("vkBindBufferMemory",        PFN_vkBindBufferMemory);
+            let map_memory:               PFN_vkMapMemory               = dev_fn!("vkMapMemory",               PFN_vkMapMemory);
+            let unmap_memory:             PFN_vkUnmapMemory             = dev_fn!("vkUnmapMemory",             PFN_vkUnmapMemory);
+            let create_image:             PFN_vkCreateImage             = dev_fn!("vkCreateImage",             PFN_vkCreateImage);
+            let destroy_image:            PFN_vkDestroyImage            = dev_fn!("vkDestroyImage",            PFN_vkDestroyImage);
+            let get_image_memory_requirements: PFN_vkGetImageMemoryRequirements = dev_fn!("vkGetImageMemoryRequirements", PFN_vkGetImageMemoryRequirements);
+            let bind_image_memory:        PFN_vkBindImageMemory         = dev_fn!("vkBindImageMemory",         PFN_vkBindImageMemory);
+            let cmd_bind_pipeline:        PFN_vkCmdBindPipeline         = dev_fn!("vkCmdBindPipeline",         PFN_vkCmdBindPipeline);
+            let cmd_set_viewport:         PFN_vkCmdSetViewport          = dev_fn!("vkCmdSetViewport",          PFN_vkCmdSetViewport);
+            let cmd_set_scissor:          PFN_vkCmdSetScissor           = dev_fn!("vkCmdSetScissor",           PFN_vkCmdSetScissor);
+            let cmd_bind_vertex_buffers:  PFN_vkCmdBindVertexBuffers    = dev_fn!("vkCmdBindVertexBuffers",    PFN_vkCmdBindVertexBuffers);
+            let cmd_push_constants:       PFN_vkCmdPushConstants        = dev_fn!("vkCmdPushConstants",        PFN_vkCmdPushConstants);
+            let cmd_draw:                 PFN_vkCmdDraw                 = dev_fn!("vkCmdDraw",                 PFN_vkCmdDraw);
 
             let vk = Box::new(Vk {
                 get_instance_proc_addr: gipa,
@@ -352,6 +425,32 @@ impl VulkanRenderer {
                 acquire_next_image,
                 queue_submit,
                 queue_present,
+                get_physical_device_memory_props,
+                get_physical_device_format_props,
+                create_shader_module,
+                destroy_shader_module,
+                create_pipeline_layout,
+                destroy_pipeline_layout,
+                create_graphics_pipelines,
+                destroy_pipeline,
+                create_buffer,
+                destroy_buffer,
+                get_buffer_memory_requirements,
+                allocate_memory,
+                free_memory,
+                bind_buffer_memory,
+                map_memory,
+                unmap_memory,
+                create_image,
+                destroy_image,
+                get_image_memory_requirements,
+                bind_image_memory,
+                cmd_bind_pipeline,
+                cmd_set_viewport,
+                cmd_set_scissor,
+                cmd_bind_vertex_buffers,
+                cmd_push_constants,
+                cmd_draw,
             });
 
             // ── Queues ────────────────────────────────────────────────────
@@ -360,13 +459,22 @@ impl VulkanRenderer {
             (vk.get_device_queue)(device, graphics_family, 0, &mut graphics_queue);
             (vk.get_device_queue)(device, present_family,  0, &mut present_queue);
 
-            // ── Build swapchain + render pass + framebuffers ──────────────
+            // ── Build swapchain + depth + render pass + framebuffers ──────
             let (swapchain, sc_format, sc_extent, sc_images, sc_views) =
                 create_swapchain_objects(&vk, physical_device, device, surface,
                     graphics_family, present_family, width, height);
 
-            let render_pass = create_render_pass_obj(&vk, device, sc_format);
-            let framebuffers= create_framebuffers_obj(&vk, device, render_pass, &sc_views, sc_extent);
+            let mut mem_props = std::mem::zeroed::<VkPhysicalDeviceMemoryProperties>();
+            (vk.get_physical_device_memory_props)(physical_device, &mut mem_props);
+            let depth_format = geom::pick_depth_format(&vk, physical_device);
+            let render_pass = create_render_pass_obj(&vk, device, sc_format, depth_format);
+            let (depth_image, depth_memory, depth_view) =
+                geom::create_depth(&vk, device, &mem_props, depth_format, sc_extent);
+            let framebuffers = create_framebuffers_obj(
+                &vk, device, render_pass, &sc_views, depth_view, sc_extent,
+            );
+            let (pipeline_layout, tri_pipeline, line_pipeline) =
+                geom::create_demo_pipelines(&vk, device, render_pass);
 
             // ── Command pool ──────────────────────────────────────────────
             let pool_ci = VkCommandPoolCreateInfo {
@@ -409,11 +517,16 @@ impl VulkanRenderer {
                 (vk.create_semaphore)(device, &sem_ci, null_mut(), &mut img_avail);
                 (vk.create_semaphore)(device, &sem_ci, null_mut(), &mut render_done);
                 (vk.create_fence)(device, &fence_ci, null_mut(), &mut fence);
+                let host = geom::create_host_buffer(&vk, device, &mem_props, 256 * 24);
                 frames.push(FrameSync {
                     image_available: img_avail,
                     render_finished: render_done,
                     in_flight: fence,
                     cmd_buf: cmd_bufs[i],
+                    vb: host.buffer,
+                    vb_mem: host.memory,
+                    vb_ptr: host.ptr,
+                    vb_cap: host.cap,
                 });
             }
 
@@ -439,7 +552,18 @@ impl VulkanRenderer {
                 frames,
                 current_frame: 0,
                 current_image: 0,
+                pending_resize: false,
                 clear_color: Color::BLACK,
+                depth_format,
+                depth_image,
+                depth_memory,
+                depth_view,
+                mem_props,
+                pipeline_layout,
+                tri_pipeline,
+                line_pipeline,
+                vertices: Vec::new(),
+                draws: Vec::new(),
             }
         }
     }
@@ -447,30 +571,102 @@ impl VulkanRenderer {
     pub fn current_command_buffer(&self) -> VkCommandBuffer {
         self.frames[self.current_frame].cmd_buf
     }
+
+    fn recreate_swapchain(&mut self, width: u32, height: u32) {
+        unsafe {
+            (self.vk.device_wait_idle)(self.device);
+
+            for &framebuffer in &self.framebuffers {
+                (self.vk.destroy_framebuffer)(self.device, framebuffer, null_mut());
+            }
+            self.destroy_depth();
+            for &view in &self.sc_views {
+                (self.vk.destroy_image_view)(self.device, view, null_mut());
+            }
+            (self.vk.destroy_swapchain)(self.device, self.swapchain, null_mut());
+
+            let (swapchain, format, extent, images, views) = create_swapchain_objects(
+                &self.vk,
+                self.physical_device,
+                self.device,
+                self.surface,
+                self.graphics_family,
+                self.present_family,
+                width,
+                height,
+            );
+
+            self.swapchain = swapchain;
+            self.sc_format = format;
+            self.sc_extent = extent;
+            self.sc_images = images;
+            self.sc_views = views;
+            let (depth_image, depth_memory, depth_view) = geom::create_depth(
+                &self.vk, self.device, &self.mem_props, self.depth_format, self.sc_extent,
+            );
+            self.depth_image = depth_image;
+            self.depth_memory = depth_memory;
+            self.depth_view = depth_view;
+            self.framebuffers = create_framebuffers_obj(
+                &self.vk,
+                self.device,
+                self.render_pass,
+                &self.sc_views,
+                self.depth_view,
+                self.sc_extent,
+            );
+        }
+    }
+
+    fn acquire_swapchain_image(&mut self, semaphore: VkSemaphore) -> (u32, bool) {
+        unsafe {
+            loop {
+                let mut image_index = 0u32;
+                let result = (self.vk.acquire_next_image)(
+                    self.device,
+                    self.swapchain,
+                    u64::MAX,
+                    semaphore,
+                    0,
+                    &mut image_index,
+                );
+
+                match result {
+                    VK_SUCCESS => return (image_index, false),
+                    VK_SUBOPTIMAL_KHR => return (image_index, true),
+                    VK_ERROR_OUT_OF_DATE_KHR => {
+                        self.recreate_swapchain(self.sc_extent.width, self.sc_extent.height);
+                    }
+                    _ => panic!("vkAcquireNextImageKHR failed: {}", result),
+                }
+            }
+        }
+    }
 }
 
 impl Renderer for VulkanRenderer {
     fn width(&self)  -> u32 { self.sc_extent.width }
     fn height(&self) -> u32 { self.sc_extent.height }
 
-    fn resize(&mut self, _width: u32, _height: u32) {
-        // TODO: recreate swapchain on resize.
+    fn resize(&mut self, width: u32, height: u32) {
+        self.recreate_swapchain(width, height);
+        self.pending_resize = false;
     }
 
     fn begin_frame(&mut self) {
+        self.vertices.clear();
+        self.draws.clear();
         unsafe {
-            let f = &self.frames[self.current_frame];
+            let image_available = self.frames[self.current_frame].image_available;
+            let in_flight = self.frames[self.current_frame].in_flight;
 
             // Wait for this frame slot to be free.
-            (self.vk.wait_for_fences)(self.device, 1, &f.in_flight, VK_TRUE, u64::MAX);
-            (self.vk.reset_fences)(self.device, 1, &f.in_flight);
+            (self.vk.wait_for_fences)(self.device, 1, &in_flight, VK_TRUE, u64::MAX);
+            (self.vk.reset_fences)(self.device, 1, &in_flight);
 
             // Acquire the next swapchain image.
-            let mut image_index = 0u32;
-            (self.vk.acquire_next_image)(
-                self.device, self.swapchain, u64::MAX,
-                f.image_available, 0, &mut image_index,
-            );
+            let (image_index, needs_resize) = self.acquire_swapchain_image(image_available);
+            self.pending_resize = needs_resize;
             self.current_image = image_index;
 
             // Record: begin command buffer → begin render pass.
@@ -490,11 +686,16 @@ impl Renderer for VulkanRenderer {
         self.clear_color = color;
         unsafe {
             let f = &self.frames[self.current_frame];
-            let clear_value = VkClearValue {
-                color: VkClearColorValue {
-                    float32: [color.r, color.g, color.b, color.a],
+            let clear_values = [
+                VkClearValue {
+                    color: VkClearColorValue {
+                        float32: [color.r, color.g, color.b, color.a],
+                    },
                 },
-            };
+                VkClearValue {
+                    depthStencil: VkClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                },
+            ];
             let rp_begin = VkRenderPassBeginInfo {
                 sType:       VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                 pNext:       null_mut(),
@@ -504,8 +705,8 @@ impl Renderer for VulkanRenderer {
                     offset: VkOffset2D { x: 0, y: 0 },
                     extent: self.sc_extent,
                 },
-                clearValueCount: 1,
-                pClearValues:    &clear_value,
+                clearValueCount: clear_values.len() as u32,
+                pClearValues:    clear_values.as_ptr(),
             };
             (self.vk.cmd_begin_render_pass)(f.cmd_buf, &rp_begin, 0 /*INLINE*/);
         }
@@ -513,39 +714,201 @@ impl Renderer for VulkanRenderer {
 
     fn end_frame(&mut self) {
         unsafe {
-            let f = &self.frames[self.current_frame];
+            let (image_available, render_finished, in_flight) = {
+                let frame = &self.frames[self.current_frame];
+                (frame.image_available, frame.render_finished, frame.in_flight)
+            };
 
-            (self.vk.cmd_end_render_pass)(f.cmd_buf);
-            (self.vk.end_command_buffer)(f.cmd_buf);
+            self.flush_draws();
+            let cmd_buf = self.frames[self.current_frame].cmd_buf;
+            (self.vk.cmd_end_render_pass)(cmd_buf);
+            (self.vk.end_command_buffer)(cmd_buf);
 
             let wait_stage: VkPipelineStageFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
             let submit = VkSubmitInfo {
                 sType:                VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 pNext:                null_mut(),
                 waitSemaphoreCount:   1,
-                pWaitSemaphores:      &f.image_available,
+                pWaitSemaphores:      &image_available,
                 pWaitDstStageMask:    &wait_stage,
                 commandBufferCount:   1,
-                pCommandBuffers:      &f.cmd_buf,
+                pCommandBuffers:      &cmd_buf,
                 signalSemaphoreCount: 1,
-                pSignalSemaphores:    &f.render_finished,
+                pSignalSemaphores:    &render_finished,
             };
-            (self.vk.queue_submit)(self.graphics_queue, 1, &submit, f.in_flight);
+            let submit_result = (self.vk.queue_submit)(self.graphics_queue, 1, &submit, in_flight);
+            assert_eq!(submit_result, VK_SUCCESS, "vkQueueSubmit failed: {}", submit_result);
 
             let present = VkPresentInfoKHR {
                 sType:              VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 pNext:              null_mut(),
                 waitSemaphoreCount: 1,
-                pWaitSemaphores:    &f.render_finished,
+                pWaitSemaphores:    &render_finished,
                 swapchainCount:     1,
                 pSwapchains:        &self.swapchain,
                 pImageIndices:      &self.current_image,
                 pResults:           null_mut(),
             };
-            (self.vk.queue_present)(self.present_queue, &present);
+            let present_result = (self.vk.queue_present)(self.present_queue, &present);
+
+            if present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR || self.pending_resize {
+                self.recreate_swapchain(self.sc_extent.width, self.sc_extent.height);
+                self.pending_resize = false;
+            } else {
+                assert_eq!(present_result, VK_SUCCESS, "vkQueuePresentKHR failed: {}", present_result);
+            }
 
             self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
         }
+    }
+}
+
+impl VulkanRenderer {
+    fn destroy_depth(&mut self) {
+        unsafe {
+            (self.vk.destroy_image_view)(self.device, self.depth_view, null_mut());
+            (self.vk.destroy_image)(self.device, self.depth_image, null_mut());
+            (self.vk.free_memory)(self.device, self.depth_memory, null_mut());
+            self.depth_view = 0;
+            self.depth_image = 0;
+            self.depth_memory = 0;
+        }
+    }
+
+    fn ensure_vertex_buffer(&mut self, bytes: u64) {
+        let (old_vb, old_mem, old_cap) = {
+            let frame = &self.frames[self.current_frame];
+            (frame.vb, frame.vb_mem, frame.vb_cap)
+        };
+        if old_cap >= bytes { return; }
+        let new_cap = bytes.max(old_cap.saturating_mul(2)).max(4096);
+        unsafe {
+            if old_vb != 0 {
+                (self.vk.unmap_memory)(self.device, old_mem);
+                (self.vk.destroy_buffer)(self.device, old_vb, null_mut());
+                (self.vk.free_memory)(self.device, old_mem, null_mut());
+            }
+            let host = geom::create_host_buffer(&self.vk, self.device, &self.mem_props, new_cap);
+            let frame = &mut self.frames[self.current_frame];
+            frame.vb = host.buffer;
+            frame.vb_mem = host.memory;
+            frame.vb_ptr = host.ptr;
+            frame.vb_cap = host.cap;
+        }
+    }
+
+    /// Upload queued immediate-mode draws and record them inside the open render pass.
+    fn flush_draws(&mut self) {
+        if self.vertices.is_empty() || self.sc_extent.width == 0 || self.sc_extent.height == 0 {
+            return;
+        }
+        let bytes = (self.vertices.len() * std::mem::size_of::<GpuVertex>()) as u64;
+        self.ensure_vertex_buffer(bytes);
+        unsafe {
+            let frame = &self.frames[self.current_frame];
+            std::ptr::copy_nonoverlapping(
+                self.vertices.as_ptr() as *const u8,
+                frame.vb_ptr,
+                bytes as usize,
+            );
+            let cmd = frame.cmd_buf;
+            let vb = frame.vb;
+            let viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: self.sc_extent.width as f32,
+                height: self.sc_extent.height as f32,
+                minDepth: 0.0,
+                maxDepth: 1.0,
+            };
+            let scissor = VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent: self.sc_extent,
+            };
+            (self.vk.cmd_set_viewport)(cmd, 0, 1, &viewport);
+            (self.vk.cmd_set_scissor)(cmd, 0, 1, &scissor);
+            let offset = 0u64;
+            (self.vk.cmd_bind_vertex_buffers)(cmd, 0, 1, &vb, &offset);
+
+            let mut bound_lines: Option<bool> = None;
+            for draw in &self.draws {
+                if bound_lines != Some(draw.lines) {
+                    let pipeline = if draw.lines { self.line_pipeline } else { self.tri_pipeline };
+                    (self.vk.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                    bound_lines = Some(draw.lines);
+                }
+                if !draw.lines {
+                    (self.vk.cmd_push_constants)(
+                        cmd,
+                        self.pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
+                        64,
+                        draw.mvp.cols.as_ptr() as *const c_void,
+                    );
+                }
+                (self.vk.cmd_draw)(cmd, draw.count, 1, draw.first, 0);
+            }
+        }
+    }
+
+    fn enqueue(&mut self, verts: &[GpuVertex], lines: bool, mvp: Mat4) {
+        let first = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(verts);
+        self.draws.push(QueuedDraw { lines, first, count: verts.len() as u32, mvp });
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GpuVertex {
+    pos: [f32; 3],
+    color: [f32; 3],
+}
+
+struct QueuedDraw {
+    lines: bool,
+    first: u32,
+    count: u32,
+    mvp: Mat4,
+}
+
+impl Draw3d for VulkanRenderer {
+    fn draw_triangle_3d(&mut self, v0: Vec3, v1: Vec3, v2: Vec3, color: Color, mvp: &Mat4) {
+        self.draw_triangle_3d_shaded(v0, v1, v2, color, color, color, mvp);
+    }
+
+    fn draw_triangle_3d_shaded(
+        &mut self,
+        v0: Vec3, v1: Vec3, v2: Vec3,
+        c0: Color, c1: Color, c2: Color,
+        mvp: &Mat4,
+    ) {
+        let pack = |v: Vec3, c: Color| GpuVertex {
+            pos: [v.x, v.y, v.z],
+            color: [c.r, c.g, c.b],
+        };
+        self.enqueue(&[pack(v0, c0), pack(v1, c1), pack(v2, c2)], false, *mvp);
+    }
+
+    fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        let w = self.sc_extent.width as f32;
+        let h = self.sc_extent.height as f32;
+        if w < 1.0 || h < 1.0 { return; }
+        let ndc = |x: i32, y: i32| {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            [(px / w) * 2.0 - 1.0, (py / h) * 2.0 - 1.0, 0.0]
+        };
+        let col = [color.r, color.g, color.b];
+        self.enqueue(
+            &[
+                GpuVertex { pos: ndc(x0, y0), color: col },
+                GpuVertex { pos: ndc(x1, y1), color: col },
+            ],
+            true,
+            Mat4::IDENTITY,
+        );
     }
 }
 
@@ -558,8 +921,19 @@ impl Drop for VulkanRenderer {
                 (vk.destroy_semaphore)(self.device, f.image_available, null_mut());
                 (vk.destroy_semaphore)(self.device, f.render_finished, null_mut());
                 (vk.destroy_fence)(self.device, f.in_flight, null_mut());
+                if f.vb != 0 {
+                    (vk.unmap_memory)(self.device, f.vb_mem);
+                    (vk.destroy_buffer)(self.device, f.vb, null_mut());
+                    (vk.free_memory)(self.device, f.vb_mem, null_mut());
+                }
             }
+            (vk.destroy_pipeline)(self.device, self.tri_pipeline, null_mut());
+            (vk.destroy_pipeline)(self.device, self.line_pipeline, null_mut());
+            (vk.destroy_pipeline_layout)(self.device, self.pipeline_layout, null_mut());
             (vk.destroy_command_pool)(self.device, self.cmd_pool, null_mut());
+            (vk.destroy_image_view)(self.device, self.depth_view, null_mut());
+            (vk.destroy_image)(self.device, self.depth_image, null_mut());
+            (vk.free_memory)(self.device, self.depth_memory, null_mut());
             for &fb in &self.framebuffers { (vk.destroy_framebuffer)(self.device, fb, null_mut()); }
             (vk.destroy_render_pass)(self.device, self.render_pass, null_mut());
             for &iv in &self.sc_views    { (vk.destroy_image_view)(self.device, iv, null_mut()); }
@@ -567,6 +941,7 @@ impl Drop for VulkanRenderer {
             (vk.destroy_surface)(self.instance, self.surface, null_mut());
             (vk.destroy_device)(self.device, null_mut());
             (vk.destroy_instance)(self.instance, null_mut());
+            win32::FreeLibrary(self._lib);
         }
     }
 }
@@ -682,21 +1057,38 @@ unsafe fn create_swapchain_objects(
     (swapchain, chosen_fmt.format, extent, images, views)
 }
 
-unsafe fn create_render_pass_obj(vk: &Vk, dev: VkDevice, format: VkFormat) -> VkRenderPass {
-    let attachment = VkAttachmentDescription {
-        flags:          0,
-        format,
-        samples:        VK_SAMPLE_COUNT_1_BIT,
-        loadOp:         VK_ATTACHMENT_LOAD_OP_CLEAR,
-        storeOp:        VK_ATTACHMENT_STORE_OP_STORE,
-        stencilLoadOp:  VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        stencilStoreOp: VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        initialLayout:  VK_IMAGE_LAYOUT_UNDEFINED,
-        finalLayout:    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    };
+unsafe fn create_render_pass_obj(vk: &Vk, dev: VkDevice, format: VkFormat, depth_format: VkFormat) -> VkRenderPass {
+    let attachments = [
+        VkAttachmentDescription {
+            flags:          0,
+            format,
+            samples:        VK_SAMPLE_COUNT_1_BIT,
+            loadOp:         VK_ATTACHMENT_LOAD_OP_CLEAR,
+            storeOp:        VK_ATTACHMENT_STORE_OP_STORE,
+            stencilLoadOp:  VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            stencilStoreOp: VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            initialLayout:  VK_IMAGE_LAYOUT_UNDEFINED,
+            finalLayout:    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        },
+        VkAttachmentDescription {
+            flags:          0,
+            format:         depth_format,
+            samples:        VK_SAMPLE_COUNT_1_BIT,
+            loadOp:         VK_ATTACHMENT_LOAD_OP_CLEAR,
+            storeOp:        VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            stencilLoadOp:  VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            stencilStoreOp: VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            initialLayout:  VK_IMAGE_LAYOUT_UNDEFINED,
+            finalLayout:    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+    ];
     let color_ref = VkAttachmentReference {
         attachment: 0,
         layout:     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    let depth_ref = VkAttachmentReference {
+        attachment: 1,
+        layout:     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
     let subpass = VkSubpassDescription {
         flags:                   0,
@@ -706,25 +1098,29 @@ unsafe fn create_render_pass_obj(vk: &Vk, dev: VkDevice, format: VkFormat) -> Vk
         colorAttachmentCount:    1,
         pColorAttachments:       &color_ref,
         pResolveAttachments:     null_mut(),
-        pDepthStencilAttachment: null_mut(),
+        pDepthStencilAttachment: &depth_ref,
         preserveAttachmentCount: 0,
         pPreserveAttachments:    null_mut(),
     };
     let dependency = VkSubpassDependency {
         srcSubpass:      VK_SUBPASS_EXTERNAL,
         dstSubpass:      0,
-        srcStageMask:    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        dstStageMask:    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        srcStageMask:    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+            | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        dstStageMask:    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+            | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         srcAccessMask:   0,
-        dstAccessMask:   0x00000100, // COLOR_ATTACHMENT_WRITE
+        dstAccessMask:   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+            | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         dependencyFlags: 0,
     };
     let rp_ci = VkRenderPassCreateInfo {
         sType:           VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         pNext:           null_mut(),
         flags:           0,
-        attachmentCount: 1,
-        pAttachments:    &attachment,
+        attachmentCount: attachments.len() as u32,
+        pAttachments:    attachments.as_ptr(),
         subpassCount:    1,
         pSubpasses:      &subpass,
         dependencyCount: 1,
@@ -741,16 +1137,18 @@ unsafe fn create_framebuffers_obj(
     dev:         VkDevice,
     render_pass: VkRenderPass,
     views:       &[VkImageView],
+    depth_view:  VkImageView,
     extent:      VkExtent2D,
 ) -> Vec<VkFramebuffer> {
     views.iter().map(|&view| {
+        let attachments = [view, depth_view];
         let ci = VkFramebufferCreateInfo {
             sType:           VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             pNext:           null_mut(),
             flags:           0,
             renderPass:      render_pass,
-            attachmentCount: 1,
-            pAttachments:    &view,
+            attachmentCount: 2,
+            pAttachments:    attachments.as_ptr(),
             width:           extent.width,
             height:          extent.height,
             layers:          1,

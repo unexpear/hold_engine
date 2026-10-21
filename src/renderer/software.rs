@@ -1,13 +1,13 @@
 //! CPU software renderer with a barycentric triangle rasterizer.
 //! Blits each frame to the window via Win32 StretchDIBits — no GPU required.
 
-use std::ptr::null_mut;
 use crate::platform::ffi::*;
 use crate::math::{Mat4, Vec3, Vec4};
 use super::{Color, Renderer};
 
 pub struct SoftwareRenderer {
     hwnd:   HWND,
+    hdc:    HDC,
     width:  u32,
     height: u32,
     pixels: Vec<u32>,   // BGRA, 32bpp, row-major top→bottom
@@ -16,8 +16,26 @@ pub struct SoftwareRenderer {
 
 impl SoftwareRenderer {
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
+        let hdc = unsafe { GetDC(hwnd) };
+        assert!(!hdc.is_null(), "GetDC failed");
         let n = (width * height) as usize;
-        Self { hwnd, width, height, pixels: vec![0; n], depth: vec![f32::INFINITY; n] }
+        Self { hwnd, hdc, width, height, pixels: vec![0; n], depth: vec![f32::INFINITY; n] }
+    }
+
+    /// Transform a clip-space Vec4 into screen-space (x, y, depth).
+    #[inline]
+    fn clip_to_screen(&self, clip: Vec4) -> (f32, f32, f32) {
+        let inv_w = 1.0 / clip.w;
+        let nx = clip.x * inv_w;
+        let ny = clip.y * inv_w;
+        let nz = clip.z * inv_w;
+        let w = self.width  as f32;
+        let h = self.height as f32;
+        (
+            (nx * 0.5 + 0.5) * w,
+            (1.0 - (ny * 0.5 + 0.5)) * h,
+            nz,
+        )
     }
 
     // ── Direct pixel access ───────────────────────────────────────────────────
@@ -31,7 +49,7 @@ impl SoftwareRenderer {
     // ── 2D primitives ─────────────────────────────────────────────────────────
 
     /// Bresenham line.
-    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32, color: Color) {
+    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -121,11 +139,9 @@ impl SoftwareRenderer {
         if n0.y >  1.0 && n1.y >  1.0 && n2.y >  1.0 { return; }
 
         // Viewport transform → screen space.
-        let w = self.width  as f32;
-        let h = self.height as f32;
-        let s0 = ((n0.x * 0.5 + 0.5) * w, (1.0 - (n0.y * 0.5 + 0.5)) * h, n0.z);
-        let s1 = ((n1.x * 0.5 + 0.5) * w, (1.0 - (n1.y * 0.5 + 0.5)) * h, n1.z);
-        let s2 = ((n2.x * 0.5 + 0.5) * w, (1.0 - (n2.y * 0.5 + 0.5)) * h, n2.z);
+        let s0 = self.clip_to_screen(c0);
+        let s1 = self.clip_to_screen(c1);
+        let s2 = self.clip_to_screen(c2);
 
         self.rasterize(s0, s1, s2, color);
     }
@@ -142,18 +158,16 @@ impl SoftwareRenderer {
         let clip2 = mvp.transform_point(v2);
         if clip0.w <= 0.0 || clip1.w <= 0.0 || clip2.w <= 0.0 { return; }
 
-        let n0 = ndc(clip0); let n1 = ndc(clip1); let n2 = ndc(clip2);
-        let w = self.width as f32; let h = self.height as f32;
-        let s0 = ((n0.x*0.5+0.5)*w, (1.0-(n0.y*0.5+0.5))*h, n0.z);
-        let s1 = ((n1.x*0.5+0.5)*w, (1.0-(n1.y*0.5+0.5))*h, n1.z);
-        let s2 = ((n2.x*0.5+0.5)*w, (1.0-(n2.y*0.5+0.5))*h, n2.z);
+        let s0 = self.clip_to_screen(clip0);
+        let s1 = self.clip_to_screen(clip1);
+        let s2 = self.clip_to_screen(clip2);
 
         let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as i32;
         let max_x = (s0.0.max(s1.0).max(s2.0) as i32 + 1).min(self.width  as i32 - 1);
         let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
         let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
 
-        let area = edge2d(s0, s1, s2);
+        let area = edge2d((s0.0, s0.1), (s1.0, s1.1), (s2.0, s2.1));
         if area <= 0.0 { return; }
 
         for y in min_y..=max_y {
@@ -194,7 +208,7 @@ impl SoftwareRenderer {
         let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as i32;
         let max_y = (s0.1.max(s1.1).max(s2.1) as i32 + 1).min(self.height as i32 - 1);
 
-        let area = edge2d(s0, s1, s2);
+        let area = edge2d((s0.0, s0.1), (s1.0, s1.1), (s2.0, s2.1));
         if area <= 0.0 { return; } // back-face or degenerate
 
         let packed = color.to_bgra_u32();
@@ -234,14 +248,16 @@ impl Renderer for SoftwareRenderer {
 
     fn clear(&mut self, color: Color) {
         let packed = color.to_bgra_u32();
-        self.pixels.fill(packed);
-        self.depth.fill(f32::INFINITY);
+        self.pixels.iter_mut().zip(self.depth.iter_mut()).for_each(|(p, d)| {
+            *p = packed;
+            *d = f32::INFINITY;
+        });
     }
 
     fn end_frame(&mut self) {
         // Blit pixel buffer to the window via StretchDIBits.
         unsafe {
-            let hdc = GetDC(self.hwnd);
+            let hdc = self.hdc;
 
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -269,9 +285,13 @@ impl Renderer for SoftwareRenderer {
                 DIB_RGB_COLORS,
                 SRCCOPY,
             );
-
-            ReleaseDC(self.hwnd, hdc);
         }
+    }
+}
+
+impl Drop for SoftwareRenderer {
+    fn drop(&mut self) {
+        unsafe { ReleaseDC(self.hwnd, self.hdc); }
     }
 }
 
@@ -285,12 +305,31 @@ fn edge(a: (f32,f32), b: (f32,f32), p: (f32,f32)) -> f32 {
 
 /// Edge function for (x,y,z) tuples — ignores z.
 #[inline]
-fn edge2d(a: (f32,f32,f32), b: (f32,f32,f32), p: (f32,f32)) -> f32 {
-    edge((a.0,a.1), (b.0,b.1), p)
+fn edge2d(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
+    edge(a, b, p)
 }
 
 /// Perspective divide a clip-space Vec4 → NDC Vec3.
 #[inline]
 fn ndc(v: Vec4) -> Vec3 {
     Vec3::new(v.x / v.w, v.y / v.w, v.z / v.w)
+}
+
+impl super::Draw3d for SoftwareRenderer {
+    fn draw_triangle_3d(&mut self, v0: Vec3, v1: Vec3, v2: Vec3, color: Color, mvp: &Mat4) {
+        SoftwareRenderer::draw_triangle_3d(self, v0, v1, v2, color, mvp);
+    }
+
+    fn draw_triangle_3d_shaded(
+        &mut self,
+        v0: Vec3, v1: Vec3, v2: Vec3,
+        c0: Color, c1: Color, c2: Color,
+        mvp: &Mat4,
+    ) {
+        SoftwareRenderer::draw_triangle_3d_shaded(self, v0, v1, v2, c0, c1, c2, mvp);
+    }
+
+    fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        SoftwareRenderer::draw_line(self, x0, y0, x1, y1, color);
+    }
 }

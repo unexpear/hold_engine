@@ -1,138 +1,189 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+
 use super::entity::Entity;
-use super::system::System;
+use super::sparse_set::{SparseSet, SparseSetIter, SparseSetIterMut};
 
-// One sparse map per component type: entity → boxed component.
-type ComponentMap = HashMap<Entity, Box<dyn Any>>;
+// ── EntityMeta ────────────────────────────────────────────────────────────────
 
+struct EntityMeta {
+    generation: u32,
+    alive:      bool,
+}
+
+// ── AnyStorage trait ──────────────────────────────────────────────────────────
+
+/// Object-safe trait so `World` can erase the component type yet still call
+/// `remove_entity` when an entity is despawned.
+trait AnyStorage: 'static {
+    fn remove_entity(&mut self, entity: Entity);
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: 'static> AnyStorage for SparseSet<T> {
+    fn remove_entity(&mut self, entity: Entity) {
+        self.remove(entity);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ── World ─────────────────────────────────────────────────────────────────────
+
+/// The ECS world.  Owns all entity metadata and component storages.
+///
+/// Systems are **not** stored here; use [`super::schedule::SystemSchedule`]
+/// for that.
 pub struct World {
-    next_id: u64,
-    components: HashMap<TypeId, ComponentMap>,
-    systems: Vec<Box<dyn System>>,
+    entities:   Vec<EntityMeta>,
+    free_list:  Vec<u32>,
+    components: HashMap<TypeId, Box<dyn AnyStorage>>,
 }
 
 impl World {
     pub fn new() -> Self {
         Self {
-            next_id: 0,
+            entities:   Vec::new(),
+            free_list:  Vec::new(),
             components: HashMap::new(),
-            systems: Vec::new(),
         }
     }
 
-    // ── Entities ─────────────────────────────────────────────────────────────
+    // ── Entity lifecycle ──────────────────────────────────────────────────────
 
-    /// Allocate a new entity with no components.
+    /// Allocate a new entity (reusing a recycled slot when possible).
     pub fn spawn(&mut self) -> Entity {
-        let e = Entity::new(self.next_id);
-        self.next_id += 1;
-        e
+        if let Some(index) = self.free_list.pop() {
+            let meta = &mut self.entities[index as usize];
+            // Bump generation so old handles become invalid.
+            meta.generation += 1;
+            meta.alive = true;
+            Entity::new(index, meta.generation)
+        } else {
+            let index = self.entities.len() as u32;
+            self.entities.push(EntityMeta { generation: 0, alive: true });
+            Entity::new(index, 0)
+        }
     }
 
-    /// Remove an entity and all of its components.
+    /// Destroy an entity: checks the generation so stale handles are ignored.
     pub fn despawn(&mut self, entity: Entity) {
-        for storage in self.components.values_mut() {
-            storage.remove(&entity);
+        if !self.is_alive(entity) {
+            return;
         }
+        // Remove from every component storage.
+        for storage in self.components.values_mut() {
+            storage.remove_entity(entity);
+        }
+        let meta = &mut self.entities[entity.index as usize];
+        meta.alive = false;
+        self.free_list.push(entity.index);
+    }
+
+    /// Returns `true` if the handle refers to a currently-alive entity.
+    pub fn is_alive(&self, entity: Entity) -> bool {
+        let idx = entity.index as usize;
+        idx < self.entities.len()
+            && self.entities[idx].alive
+            && self.entities[idx].generation == entity.generation
     }
 
     // ── Components ────────────────────────────────────────────────────────────
 
-    pub fn add_component<C: Any>(&mut self, entity: Entity, component: C) {
-        self.components
-            .entry(TypeId::of::<C>())
-            .or_default()
-            .insert(entity, Box::new(component));
+    /// Attach (or replace) a component on an entity.
+    pub fn add_component<C: 'static>(&mut self, entity: Entity, component: C) {
+        if !self.is_alive(entity) {
+            return;
+        }
+        self.storage_mut::<C>().insert(entity, component);
     }
 
-    pub fn remove_component<C: Any>(&mut self, entity: Entity) {
+    /// Detach a component from an entity (no-op if absent).
+    pub fn remove_component<C: 'static>(&mut self, entity: Entity) {
         if let Some(storage) = self.components.get_mut(&TypeId::of::<C>()) {
-            storage.remove(&entity);
+            if let Some(set) = storage.as_any_mut().downcast_mut::<SparseSet<C>>() {
+                set.remove(entity);
+            }
         }
     }
 
-    pub fn has_component<C: Any>(&self, entity: Entity) -> bool {
-        self.components
-            .get(&TypeId::of::<C>())
-            .map_or(false, |s| s.contains_key(&entity))
+    pub fn has_component<C: 'static>(&self, entity: Entity) -> bool {
+        self.get::<C>(entity).is_some()
     }
 
-    pub fn get<C: Any>(&self, entity: Entity) -> Option<&C> {
-        self.components
-            .get(&TypeId::of::<C>())?
-            .get(&entity)?
-            .downcast_ref::<C>()
+    /// Shared reference to a component, with generation check.
+    pub fn get<C: 'static>(&self, entity: Entity) -> Option<&C> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        self.storage_ref::<C>()?.get(entity)
     }
 
-    pub fn get_mut<C: Any>(&mut self, entity: Entity) -> Option<&mut C> {
-        self.components
-            .get_mut(&TypeId::of::<C>())?
-            .get_mut(&entity)?
-            .downcast_mut::<C>()
+    /// Exclusive reference to a component, with generation check.
+    pub fn get_mut<C: 'static>(&mut self, entity: Entity) -> Option<&mut C> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        self.storage_mut::<C>().get_mut(entity)
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
-    /// All entities that have component C, with a shared reference.
-    pub fn query<C: Any>(&self) -> Vec<(Entity, &C)> {
-        match self.components.get(&TypeId::of::<C>()) {
-            None => Vec::new(),
-            Some(storage) => storage
-                .iter()
-                .filter_map(|(&e, c)| c.downcast_ref::<C>().map(|c| (e, c)))
-                .collect(),
+    /// Iterate every entity that has component `C`.
+    ///
+    /// Iterates the dense array directly — no Vec allocation, no indirection.
+    ///
+    /// **Multi-component queries:** for now, compose with `get`:
+    /// ```ignore
+    /// world.query::<A>()
+    ///      .filter_map(|(e, a)| world.get::<B>(e).map(|b| (e, a, b)))
+    /// ```
+    /// This is O(|A| × log(|B|)) rather than O(|A| ∩ |B|).  Archetype tables
+    /// are the correct long-term fix.
+    pub fn query<C: 'static>(&self) -> SparseSetIter<'_, C> {
+        match self.storage_ref::<C>() {
+            Some(set) => set.iter(),
+            None      => SparseSetIter::empty(),
         }
     }
 
-    /// All entities that have component C, with an exclusive reference.
-    pub fn query_mut<C: Any>(&mut self) -> Vec<(Entity, &mut C)> {
-        match self.components.get_mut(&TypeId::of::<C>()) {
-            None => Vec::new(),
-            Some(storage) => storage
-                .iter_mut()
-                .filter_map(|(&e, c)| c.downcast_mut::<C>().map(|c| (e, c)))
-                .collect(),
-        }
+    /// Mutable variant of [`query`].
+    pub fn query_mut<C: 'static>(&mut self) -> SparseSetIterMut<'_, C> {
+        self.storage_mut::<C>().iter_mut()
     }
 
-    /// Entities that have BOTH component A and component B.
-    /// Returns owned copies of the entity IDs and immutable references.
-    pub fn query2<A: Any, B: Any>(&self) -> Vec<(Entity, &A, &B)> {
-        let a_storage = match self.components.get(&TypeId::of::<A>()) {
-            Some(s) => s,
-            None => return Vec::new(),
-        };
-        let b_storage = match self.components.get(&TypeId::of::<B>()) {
-            Some(s) => s,
-            None => return Vec::new(),
-        };
-        a_storage
-            .iter()
-            .filter_map(|(&e, a)| {
-                let a = a.downcast_ref::<A>()?;
-                let b = b_storage.get(&e)?.downcast_ref::<B>()?;
-                Some((e, a, b))
-            })
-            .collect()
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /// Get or create the `SparseSet<C>` for component type `C`.
+    fn storage_mut<C: 'static>(&mut self) -> &mut SparseSet<C> {
+        let entry = self.components
+            .entry(TypeId::of::<C>())
+            .or_insert_with(|| Box::new(SparseSet::<C>::new()));
+
+        entry
+            .as_any_mut()
+            .downcast_mut::<SparseSet<C>>()
+            .expect("component storage downcast should match its TypeId")
     }
 
-    // ── Systems ───────────────────────────────────────────────────────────────
+    /// Read-only access to `SparseSet<C>`, or `None` if no component of that
+    /// type has ever been registered.
+    fn storage_ref<C: 'static>(&self) -> Option<&SparseSet<C>> {
+        let entry = self.components.get(&TypeId::of::<C>())?;
 
-    pub fn add_system<S: System>(&mut self, system: S) {
-        self.systems.push(Box::new(system));
-    }
-
-    /// Run all registered systems. Uses `take` to avoid borrow conflicts.
-    pub fn update(&mut self, dt: f32) {
-        let mut systems = std::mem::take(&mut self.systems);
-        for system in &mut systems {
-            system.update(self, dt);
-        }
-        self.systems = systems;
+        entry.as_any().downcast_ref::<SparseSet<C>>()
     }
 }
 
 impl Default for World {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

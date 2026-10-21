@@ -76,3 +76,21 @@ pub enum BackendKind {
     OpenGL,
     Vulkan,
 }
+
+use crate::math::{Mat4, Vec3};
+
+/// Immediate-mode draws the software demo already uses.
+/// draw_triangle_3d* takes model-space vertices and an OpenGL-convention MVP.
+/// draw_line is screen space: origin top-left, Y down, no depth test.
+pub trait Draw3d: Renderer {
+    fn draw_triangle_3d(&mut self, v0: Vec3, v1: Vec3, v2: Vec3, color: Color, mvp: &Mat4);
+
+    fn draw_triangle_3d_shaded(
+        &mut self,
+        v0: Vec3, v1: Vec3, v2: Vec3,
+        c0: Color, c1: Color, c2: Color,
+        mvp: &Mat4,
+    );
+
+    fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color);
+}

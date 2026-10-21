@@ -1,13 +1,17 @@
+pub mod assets;
 pub mod ecs;
 pub mod engine;
+pub mod events;
 pub mod input;
 pub mod math;
 pub mod platform;
 pub mod renderer;
 
 // Convenient re-exports at the crate root.
-pub use ecs::{Entity, System, World};
+pub use assets::{AssetStore, Handle};
+pub use ecs::{Entity, System, SystemSchedule, World};
 pub use engine::Engine;
+pub use events::{AppExit, EventBus, EventQueue, WindowResized};
 pub use input::{InputState, MouseButton};
 pub use math::{Mat4, Vec2, Vec3, Vec4};
 pub use renderer::{BackendKind, Color, Renderer};

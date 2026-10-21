@@ -126,6 +126,60 @@ pub const VK_SUBPASS_EXTERNAL: u32 = u32::MAX;
 pub const VK_TRUE:  VkBool32 = 1;
 pub const VK_FALSE: VkBool32 = 0;
 
+// ── Pipeline / memory (demo geometry) ─────────────────────────────────────────
+pub const VK_FORMAT_R32G32B32_SFLOAT: VkFormat = 106;
+pub const VK_FORMAT_D16_UNORM:        VkFormat = 124;
+pub const VK_FORMAT_D32_SFLOAT:       VkFormat = 126;
+pub const VK_FORMAT_D24_UNORM_S8_UINT: VkFormat = 129;
+
+pub const VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT: u32 = 0x00000200;
+pub const VK_IMAGE_TYPE_2D: i32 = 1;
+pub const VK_IMAGE_TILING_OPTIMAL: i32 = 0;
+pub const VK_IMAGE_TILING_LINEAR: i32 = 1;
+pub const VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT: VkImageUsageFlags = 0x00000020;
+pub const VK_IMAGE_ASPECT_DEPTH_BIT: VkImageAspectFlags = 0x00000002;
+pub const VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout = 3;
+pub const VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: VkBufferUsageFlags = 0x00000080;
+
+pub const VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT:  u32 = 0x00000001;
+pub const VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT:  u32 = 0x00000002;
+pub const VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: u32 = 0x00000004;
+
+pub const VK_SHADER_STAGE_VERTEX_BIT:   VkShaderStageFlags = 0x00000001;
+pub const VK_SHADER_STAGE_FRAGMENT_BIT: VkShaderStageFlags = 0x00000010;
+pub const VK_PRIMITIVE_TOPOLOGY_LINE_LIST:      i32 = 1;
+pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:  i32 = 3;
+pub const VK_POLYGON_MODE_FILL: i32 = 0;
+pub const VK_CULL_MODE_BACK_BIT: u32 = 0x00000002;
+pub const VK_FRONT_FACE_CLOCKWISE: i32 = 1;
+pub const VK_COMPARE_OP_LESS: i32 = 1;
+pub const VK_DYNAMIC_STATE_VIEWPORT: i32 = 0;
+pub const VK_DYNAMIC_STATE_SCISSOR:  i32 = 1;
+
+pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: u32 = 0x00000100;
+pub const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT: u32 = 0x00000200;
+pub const VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT: u32 = 0x00000100;
+pub const VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT:  u32 = 0x00000200;
+
+pub const VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO: VkStructureType = 5;
+pub const VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO: VkStructureType = 12;
+pub const VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO: VkStructureType = 14;
+pub const VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO: VkStructureType = 16;
+pub const VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO: VkStructureType = 18;
+pub const VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO: VkStructureType = 19;
+pub const VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO: VkStructureType = 20;
+pub const VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO: VkStructureType = 22;
+pub const VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO: VkStructureType = 23;
+pub const VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO: VkStructureType = 24;
+pub const VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO: VkStructureType = 25;
+pub const VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO: VkStructureType = 26;
+pub const VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO: VkStructureType = 27;
+pub const VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO: VkStructureType = 28;
+pub const VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO: VkStructureType = 30;
+
+pub type VkBufferUsageFlags = u32;
+pub type VkShaderStageFlags = u32;
+
 // ── Structs ───────────────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -365,6 +419,7 @@ pub struct VkCommandBufferBeginInfo {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkClearColorValue { pub float32: [f32; 4] }
 
 #[repr(C)]
@@ -444,19 +499,314 @@ pub struct VkQueueFamilyProperties {
 pub struct VkExtent3D { pub width: u32, pub height: u32, pub depth: u32 }
 
 #[repr(C)] #[derive(Clone, Copy)]
+pub struct VkPhysicalDeviceLimits {
+    pub _data: [u8; 504],
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkPhysicalDeviceSparseProperties {
+    pub residencyStandard2DBlockShape: VkBool32,
+    pub residencyStandard2DMultisampleBlockShape: VkBool32,
+    pub residencyStandard3DBlockShape: VkBool32,
+    pub residencyAlignedMipSize: VkBool32,
+    pub residencyNonResidentStrict: VkBool32,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
 pub struct VkPhysicalDeviceProperties {
-    pub apiVersion:    u32,
+    pub apiVersion: u32,
     pub driverVersion: u32,
-    pub vendorID:      u32,
-    pub deviceID:      u32,
-    pub deviceType:    u32,
-    pub deviceName:    [i8; 256],
+    pub vendorID: u32,
+    pub deviceID: u32,
+    pub deviceType: u32,
+    pub deviceName: [i8; 256],
     pub pipelineCacheUUID: [u8; 16],
-    // Limits and sparse properties follow — we just allocate enough space.
-    pub _limits_and_rest: [u8; 504 + 36],
+    pub limits: VkPhysicalDeviceLimits,
+    pub sparseProperties: VkPhysicalDeviceSparseProperties,
 }
 impl VkPhysicalDeviceProperties {
     pub fn zeroed() -> Self { unsafe { std::mem::zeroed() } }
+}
+
+
+#[repr(C)]
+pub struct VkFormatProperties {
+    pub linearTilingFeatures:  u32,
+    pub optimalTilingFeatures: u32,
+    pub bufferFeatures:        u32,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkMemoryType {
+    pub propertyFlags: u32,
+    pub heapIndex:     u32,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkMemoryHeap {
+    pub size:  VkDeviceSize,
+    pub flags: VkFlags,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkPhysicalDeviceMemoryProperties {
+    pub memoryTypeCount: u32,
+    pub memoryTypes:     [VkMemoryType; 32],
+    pub memoryHeapCount: u32,
+    pub memoryHeaps:     [VkMemoryHeap; 16],
+}
+
+#[repr(C)]
+pub struct VkMemoryRequirements {
+    pub size:            VkDeviceSize,
+    pub alignment:       VkDeviceSize,
+    pub memoryTypeBits:  u32,
+}
+
+#[repr(C)]
+pub struct VkMemoryAllocateInfo {
+    pub sType:           VkStructureType,
+    pub pNext:           *const c_void,
+    pub allocationSize:  VkDeviceSize,
+    pub memoryTypeIndex: u32,
+}
+
+#[repr(C)]
+pub struct VkBufferCreateInfo {
+    pub sType:                 VkStructureType,
+    pub pNext:                 *const c_void,
+    pub flags:                 VkFlags,
+    pub size:                  VkDeviceSize,
+    pub usage:                 VkBufferUsageFlags,
+    pub sharingMode:           VkSharingMode,
+    pub queueFamilyIndexCount: u32,
+    pub pQueueFamilyIndices:   *const u32,
+}
+
+#[repr(C)]
+pub struct VkImageCreateInfo {
+    pub sType:                 VkStructureType,
+    pub pNext:                 *const c_void,
+    pub flags:                 VkFlags,
+    pub imageType:             i32,
+    pub format:                VkFormat,
+    pub extent:                VkExtent3D,
+    pub mipLevels:             u32,
+    pub arrayLayers:           u32,
+    pub samples:               VkSampleCountFlagBits,
+    pub tiling:                i32,
+    pub usage:                 VkImageUsageFlags,
+    pub sharingMode:           VkSharingMode,
+    pub queueFamilyIndexCount: u32,
+    pub pQueueFamilyIndices:   *const u32,
+    pub initialLayout:         VkImageLayout,
+}
+
+#[repr(C)]
+pub struct VkShaderModuleCreateInfo {
+    pub sType:    VkStructureType,
+    pub pNext:    *const c_void,
+    pub flags:    VkFlags,
+    pub codeSize: usize,
+    pub pCode:    *const u32,
+}
+
+#[repr(C)]
+pub struct VkPushConstantRange {
+    pub stageFlags: VkShaderStageFlags,
+    pub offset:     u32,
+    pub size:       u32,
+}
+
+#[repr(C)]
+pub struct VkPipelineLayoutCreateInfo {
+    pub sType:                  VkStructureType,
+    pub pNext:                  *const c_void,
+    pub flags:                  VkFlags,
+    pub setLayoutCount:         u32,
+    pub pSetLayouts:            *const VkDescriptorSetLayout,
+    pub pushConstantRangeCount: u32,
+    pub pPushConstantRanges:    *const VkPushConstantRange,
+}
+
+#[repr(C)]
+pub struct VkPipelineShaderStageCreateInfo {
+    pub sType:               VkStructureType,
+    pub pNext:               *const c_void,
+    pub flags:               VkFlags,
+    pub stage:               VkShaderStageFlags,
+    pub module:              VkShaderModule,
+    pub pName:               *const i8,
+    pub pSpecializationInfo: *const c_void,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkVertexInputBindingDescription {
+    pub binding:   u32,
+    pub stride:    u32,
+    pub inputRate: u32,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkVertexInputAttributeDescription {
+    pub location: u32,
+    pub binding:  u32,
+    pub format:   VkFormat,
+    pub offset:   u32,
+}
+
+#[repr(C)]
+pub struct VkPipelineVertexInputStateCreateInfo {
+    pub sType:                           VkStructureType,
+    pub pNext:                           *const c_void,
+    pub flags:                           VkFlags,
+    pub vertexBindingDescriptionCount:   u32,
+    pub pVertexBindingDescriptions:      *const VkVertexInputBindingDescription,
+    pub vertexAttributeDescriptionCount: u32,
+    pub pVertexAttributeDescriptions:    *const VkVertexInputAttributeDescription,
+}
+
+#[repr(C)]
+pub struct VkPipelineInputAssemblyStateCreateInfo {
+    pub sType:                  VkStructureType,
+    pub pNext:                  *const c_void,
+    pub flags:                  VkFlags,
+    pub topology:               i32,
+    pub primitiveRestartEnable: VkBool32,
+}
+
+#[repr(C)]
+pub struct VkViewport {
+    pub x:        f32,
+    pub y:        f32,
+    pub width:    f32,
+    pub height:   f32,
+    pub minDepth: f32,
+    pub maxDepth: f32,
+}
+
+#[repr(C)]
+pub struct VkPipelineViewportStateCreateInfo {
+    pub sType:         VkStructureType,
+    pub pNext:         *const c_void,
+    pub flags:         VkFlags,
+    pub viewportCount: u32,
+    pub pViewports:    *const VkViewport,
+    pub scissorCount:  u32,
+    pub pScissors:     *const VkRect2D,
+}
+
+#[repr(C)]
+pub struct VkPipelineRasterizationStateCreateInfo {
+    pub sType:                   VkStructureType,
+    pub pNext:                   *const c_void,
+    pub flags:                   VkFlags,
+    pub depthClampEnable:        VkBool32,
+    pub rasterizerDiscardEnable: VkBool32,
+    pub polygonMode:             i32,
+    pub cullMode:                u32,
+    pub frontFace:               i32,
+    pub depthBiasEnable:         VkBool32,
+    pub depthBiasConstantFactor: f32,
+    pub depthBiasClamp:          f32,
+    pub depthBiasSlopeFactor:    f32,
+    pub lineWidth:               f32,
+}
+
+#[repr(C)]
+pub struct VkPipelineMultisampleStateCreateInfo {
+    pub sType:                 VkStructureType,
+    pub pNext:                 *const c_void,
+    pub flags:                 VkFlags,
+    pub rasterizationSamples:  VkSampleCountFlagBits,
+    pub sampleShadingEnable:   VkBool32,
+    pub minSampleShading:      f32,
+    pub pSampleMask:           *const u32,
+    pub alphaToCoverageEnable: VkBool32,
+    pub alphaToOneEnable:      VkBool32,
+}
+
+#[repr(C)] #[derive(Clone, Copy)]
+pub struct VkStencilOpState {
+    pub failOp:      i32,
+    pub passOp:      i32,
+    pub depthFailOp: i32,
+    pub compareOp:   i32,
+    pub compareMask: u32,
+    pub writeMask:   u32,
+    pub reference:   u32,
+}
+
+#[repr(C)]
+pub struct VkPipelineDepthStencilStateCreateInfo {
+    pub sType:                 VkStructureType,
+    pub pNext:                 *const c_void,
+    pub flags:                 VkFlags,
+    pub depthTestEnable:       VkBool32,
+    pub depthWriteEnable:      VkBool32,
+    pub depthCompareOp:        i32,
+    pub depthBoundsTestEnable: VkBool32,
+    pub stencilTestEnable:     VkBool32,
+    pub front:                 VkStencilOpState,
+    pub back:                  VkStencilOpState,
+    pub minDepthBounds:        f32,
+    pub maxDepthBounds:        f32,
+}
+
+#[repr(C)]
+pub struct VkPipelineColorBlendAttachmentState {
+    pub blendEnable:         VkBool32,
+    pub srcColorBlendFactor: i32,
+    pub dstColorBlendFactor: i32,
+    pub colorBlendOp:        i32,
+    pub srcAlphaBlendFactor: i32,
+    pub dstAlphaBlendFactor: i32,
+    pub alphaBlendOp:        i32,
+    pub colorWriteMask:      u32,
+}
+
+#[repr(C)]
+pub struct VkPipelineColorBlendStateCreateInfo {
+    pub sType:           VkStructureType,
+    pub pNext:           *const c_void,
+    pub flags:           VkFlags,
+    pub logicOpEnable:   VkBool32,
+    pub logicOp:         i32,
+    pub attachmentCount: u32,
+    pub pAttachments:    *const VkPipelineColorBlendAttachmentState,
+    pub blendConstants:  [f32; 4],
+}
+
+#[repr(C)]
+pub struct VkPipelineDynamicStateCreateInfo {
+    pub sType:             VkStructureType,
+    pub pNext:             *const c_void,
+    pub flags:             VkFlags,
+    pub dynamicStateCount: u32,
+    pub pDynamicStates:    *const i32,
+}
+
+#[repr(C)]
+pub struct VkGraphicsPipelineCreateInfo {
+    pub sType:               VkStructureType,
+    pub pNext:               *const c_void,
+    pub flags:               VkFlags,
+    pub stageCount:          u32,
+    pub pStages:             *const VkPipelineShaderStageCreateInfo,
+    pub pVertexInputState:   *const VkPipelineVertexInputStateCreateInfo,
+    pub pInputAssemblyState: *const VkPipelineInputAssemblyStateCreateInfo,
+    pub pTessellationState:  *const c_void,
+    pub pViewportState:      *const VkPipelineViewportStateCreateInfo,
+    pub pRasterizationState: *const VkPipelineRasterizationStateCreateInfo,
+    pub pMultisampleState:   *const VkPipelineMultisampleStateCreateInfo,
+    pub pDepthStencilState:  *const VkPipelineDepthStencilStateCreateInfo,
+    pub pColorBlendState:    *const VkPipelineColorBlendStateCreateInfo,
+    pub pDynamicState:       *const VkPipelineDynamicStateCreateInfo,
+    pub layout:              VkPipelineLayout,
+    pub renderPass:          VkRenderPass,
+    pub subpass:             u32,
+    pub basePipelineHandle:  VkPipeline,
+    pub basePipelineIndex:   i32,
 }
 
 // ── Function pointer types ────────────────────────────────────────────────────
@@ -545,6 +895,58 @@ pub type PFN_vkQueuePresentKHR =
     unsafe extern "system" fn(queue: VkQueue, pPresentInfo: *const VkPresentInfoKHR) -> VkResult;
 pub type PFN_vkResetCommandBuffer =
     unsafe extern "system" fn(commandBuffer: VkCommandBuffer, flags: VkFlags) -> VkResult;
+pub type PFN_vkGetPhysicalDeviceMemoryProperties =
+    unsafe extern "system" fn(physicalDevice: VkPhysicalDevice, pMemoryProperties: *mut VkPhysicalDeviceMemoryProperties);
+pub type PFN_vkGetPhysicalDeviceFormatProperties =
+    unsafe extern "system" fn(physicalDevice: VkPhysicalDevice, format: VkFormat, pFormatProperties: *mut VkFormatProperties);
+pub type PFN_vkCreateShaderModule =
+    unsafe extern "system" fn(device: VkDevice, pCreateInfo: *const VkShaderModuleCreateInfo, pAllocator: *const c_void, pShaderModule: *mut VkShaderModule) -> VkResult;
+pub type PFN_vkDestroyShaderModule =
+    unsafe extern "system" fn(device: VkDevice, shaderModule: VkShaderModule, pAllocator: *const c_void);
+pub type PFN_vkCreatePipelineLayout =
+    unsafe extern "system" fn(device: VkDevice, pCreateInfo: *const VkPipelineLayoutCreateInfo, pAllocator: *const c_void, pPipelineLayout: *mut VkPipelineLayout) -> VkResult;
+pub type PFN_vkDestroyPipelineLayout =
+    unsafe extern "system" fn(device: VkDevice, pipelineLayout: VkPipelineLayout, pAllocator: *const c_void);
+pub type PFN_vkCreateGraphicsPipelines =
+    unsafe extern "system" fn(device: VkDevice, pipelineCache: u64, createInfoCount: u32, pCreateInfos: *const VkGraphicsPipelineCreateInfo, pAllocator: *const c_void, pPipelines: *mut VkPipeline) -> VkResult;
+pub type PFN_vkDestroyPipeline =
+    unsafe extern "system" fn(device: VkDevice, pipeline: VkPipeline, pAllocator: *const c_void);
+pub type PFN_vkCreateBuffer =
+    unsafe extern "system" fn(device: VkDevice, pCreateInfo: *const VkBufferCreateInfo, pAllocator: *const c_void, pBuffer: *mut VkBuffer) -> VkResult;
+pub type PFN_vkDestroyBuffer =
+    unsafe extern "system" fn(device: VkDevice, buffer: VkBuffer, pAllocator: *const c_void);
+pub type PFN_vkGetBufferMemoryRequirements =
+    unsafe extern "system" fn(device: VkDevice, buffer: VkBuffer, pMemoryRequirements: *mut VkMemoryRequirements);
+pub type PFN_vkAllocateMemory =
+    unsafe extern "system" fn(device: VkDevice, pAllocateInfo: *const VkMemoryAllocateInfo, pAllocator: *const c_void, pMemory: *mut VkDeviceMemory) -> VkResult;
+pub type PFN_vkFreeMemory =
+    unsafe extern "system" fn(device: VkDevice, memory: VkDeviceMemory, pAllocator: *const c_void);
+pub type PFN_vkBindBufferMemory =
+    unsafe extern "system" fn(device: VkDevice, buffer: VkBuffer, memory: VkDeviceMemory, memoryOffset: VkDeviceSize) -> VkResult;
+pub type PFN_vkMapMemory =
+    unsafe extern "system" fn(device: VkDevice, memory: VkDeviceMemory, offset: VkDeviceSize, size: VkDeviceSize, flags: VkFlags, ppData: *mut *mut c_void) -> VkResult;
+pub type PFN_vkUnmapMemory =
+    unsafe extern "system" fn(device: VkDevice, memory: VkDeviceMemory);
+pub type PFN_vkCreateImage =
+    unsafe extern "system" fn(device: VkDevice, pCreateInfo: *const VkImageCreateInfo, pAllocator: *const c_void, pImage: *mut VkImage) -> VkResult;
+pub type PFN_vkDestroyImage =
+    unsafe extern "system" fn(device: VkDevice, image: VkImage, pAllocator: *const c_void);
+pub type PFN_vkGetImageMemoryRequirements =
+    unsafe extern "system" fn(device: VkDevice, image: VkImage, pMemoryRequirements: *mut VkMemoryRequirements);
+pub type PFN_vkBindImageMemory =
+    unsafe extern "system" fn(device: VkDevice, image: VkImage, memory: VkDeviceMemory, memoryOffset: VkDeviceSize) -> VkResult;
+pub type PFN_vkCmdBindPipeline =
+    unsafe extern "system" fn(commandBuffer: VkCommandBuffer, pipelineBindPoint: VkPipelineBindPoint, pipeline: VkPipeline);
+pub type PFN_vkCmdSetViewport =
+    unsafe extern "system" fn(commandBuffer: VkCommandBuffer, firstViewport: u32, viewportCount: u32, pViewports: *const VkViewport);
+pub type PFN_vkCmdSetScissor =
+    unsafe extern "system" fn(commandBuffer: VkCommandBuffer, firstScissor: u32, scissorCount: u32, pScissors: *const VkRect2D);
+pub type PFN_vkCmdBindVertexBuffers =
+    unsafe extern "system" fn(commandBuffer: VkCommandBuffer, firstBinding: u32, bindingCount: u32, pBuffers: *const VkBuffer, pOffsets: *const VkDeviceSize);
+pub type PFN_vkCmdPushConstants =
+    unsafe extern "system" fn(commandBuffer: VkCommandBuffer, layout: VkPipelineLayout, stageFlags: VkShaderStageFlags, offset: u32, size: u32, pValues: *const c_void);
+pub type PFN_vkCmdDraw =
+    unsafe extern "system" fn(commandBuffer: VkCommandBuffer, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32);
 
 // ── API version helper ────────────────────────────────────────────────────────
 pub const fn vk_make_version(major: u32, minor: u32, patch: u32) -> u32 {
