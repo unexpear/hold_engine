@@ -1,4 +1,4 @@
-﻿//! Depth target, host vertex buffers, and the demo graphics pipelines.
+//! Depth target, host vertex buffers, and the demo graphics pipelines.
 use std::ffi::c_void;
 use std::ptr::null_mut;
 
@@ -81,9 +81,13 @@ pub(super) unsafe fn create_depth(
 
     let mut req = std::mem::zeroed::<VkMemoryRequirements>();
     (vk.get_image_memory_requirements)(dev, image, &mut req);
-    let type_index = find_memory_type(mem_props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-        .or_else(|| find_memory_type(mem_props, req.memoryTypeBits, 0))
-        .expect("No memory type for depth image");
+    let type_index = find_memory_type(
+        mem_props,
+        req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    )
+    .or_else(|| find_memory_type(mem_props, req.memoryTypeBits, 0))
+    .expect("No memory type for depth image");
     let alloc = VkMemoryAllocateInfo {
         sType: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         pNext: null_mut(),
@@ -163,7 +167,12 @@ pub(super) unsafe fn create_host_buffer(
     let mut mapped: *mut c_void = null_mut();
     let r = (vk.map_memory)(dev, memory, 0, u64::MAX, 0, &mut mapped);
     assert_eq!(r, VK_SUCCESS, "vkMapMemory failed: {}", r);
-    HostBuf { buffer, memory, ptr: mapped as *mut u8, cap: size }
+    HostBuf {
+        buffer,
+        memory,
+        ptr: mapped as *mut u8,
+        cap: size,
+    }
 }
 
 pub(super) unsafe fn create_demo_pipelines(
@@ -193,13 +202,23 @@ pub(super) unsafe fn create_demo_pipelines(
     let r = (vk.create_pipeline_layout)(dev, &layout_ci, null_mut(), &mut layout);
     assert_eq!(r, VK_SUCCESS, "vkCreatePipelineLayout failed: {}", r);
 
-    let binding = VkVertexInputBindingDescription { binding: 0, stride: 24, inputRate: 0 };
+    let binding = VkVertexInputBindingDescription {
+        binding: 0,
+        stride: 24,
+        inputRate: 0,
+    };
     let attrs = [
         VkVertexInputAttributeDescription {
-            location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0,
+            location: 0,
+            binding: 0,
+            format: VK_FORMAT_R32G32B32_SFLOAT,
+            offset: 0,
         },
         VkVertexInputAttributeDescription {
-            location: 1, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 12,
+            location: 1,
+            binding: 0,
+            format: VK_FORMAT_R32G32B32_SFLOAT,
+            offset: 12,
         },
     ];
     let vertex_input = VkPipelineVertexInputStateCreateInfo {
@@ -292,12 +311,34 @@ pub(super) unsafe fn create_demo_pipelines(
     let line_ia = assembly(VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
 
     let tri = graphics_pipeline(
-        vk, dev, layout, render_pass,
-        &tri_stages, &vertex_input, &tri_ia, &viewport, &raster, &multisample, &depth_on, &blend, &dynamic,
+        vk,
+        dev,
+        layout,
+        render_pass,
+        &tri_stages,
+        &vertex_input,
+        &tri_ia,
+        &viewport,
+        &raster,
+        &multisample,
+        &depth_on,
+        &blend,
+        &dynamic,
     );
     let line = graphics_pipeline(
-        vk, dev, layout, render_pass,
-        &line_stages, &vertex_input, &line_ia, &viewport, &raster, &multisample, &depth_off, &blend, &dynamic,
+        vk,
+        dev,
+        layout,
+        render_pass,
+        &line_stages,
+        &vertex_input,
+        &line_ia,
+        &viewport,
+        &raster,
+        &multisample,
+        &depth_off,
+        &blend,
+        &dynamic,
     );
 
     (vk.destroy_shader_module)(dev, vs, null_mut());
@@ -306,7 +347,11 @@ pub(super) unsafe fn create_demo_pipelines(
     (layout, tri, line)
 }
 
-fn stage(stage: VkShaderStageFlags, module: VkShaderModule, name: *const i8) -> VkPipelineShaderStageCreateInfo {
+fn stage(
+    stage: VkShaderStageFlags,
+    module: VkShaderModule,
+    name: *const i8,
+) -> VkPipelineShaderStageCreateInfo {
     VkPipelineShaderStageCreateInfo {
         sType: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         pNext: null_mut(),
@@ -328,7 +373,11 @@ fn assembly(topology: i32) -> VkPipelineInputAssemblyStateCreateInfo {
     }
 }
 
-fn depth_state(test: VkBool32, write: VkBool32, stencil: VkStencilOpState) -> VkPipelineDepthStencilStateCreateInfo {
+fn depth_state(
+    test: VkBool32,
+    write: VkBool32,
+    stencil: VkStencilOpState,
+) -> VkPipelineDepthStencilStateCreateInfo {
     VkPipelineDepthStencilStateCreateInfo {
         sType: VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         pNext: null_mut(),
@@ -359,6 +408,7 @@ unsafe fn shader_module(vk: &Vk, dev: VkDevice, code: &[u32]) -> VkShaderModule 
     module
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn graphics_pipeline(
     vk: &Vk,
     dev: VkDevice,

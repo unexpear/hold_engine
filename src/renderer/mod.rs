@@ -1,10 +1,13 @@
-pub mod software;
 pub mod opengl;
+pub mod opengl_shaders;
+pub mod software;
 pub mod vulkan;
 
-pub use software::SoftwareRenderer;
 pub use opengl::OpenGLRenderer;
+pub use software::SoftwareRenderer;
 pub use vulkan::VulkanRenderer;
+
+use crate::math::{Mat4, Vec3};
 
 // ── Color ─────────────────────────────────────────────────────────────────────
 
@@ -17,21 +20,28 @@ pub struct Color {
 }
 
 impl Color {
-    pub const BLACK:   Self = Self::new(0.0, 0.0, 0.0, 1.0);
-    pub const WHITE:   Self = Self::new(1.0, 1.0, 1.0, 1.0);
-    pub const RED:     Self = Self::new(1.0, 0.0, 0.0, 1.0);
-    pub const GREEN:   Self = Self::new(0.0, 1.0, 0.0, 1.0);
-    pub const BLUE:    Self = Self::new(0.0, 0.0, 1.0, 1.0);
-    pub const YELLOW:  Self = Self::new(1.0, 1.0, 0.0, 1.0);
-    pub const CYAN:    Self = Self::new(0.0, 1.0, 1.0, 1.0);
+    pub const BLACK: Self = Self::new(0.0, 0.0, 0.0, 1.0);
+    pub const WHITE: Self = Self::new(1.0, 1.0, 1.0, 1.0);
+    pub const RED: Self = Self::new(1.0, 0.0, 0.0, 1.0);
+    pub const GREEN: Self = Self::new(0.0, 1.0, 0.0, 1.0);
+    pub const BLUE: Self = Self::new(0.0, 0.0, 1.0, 1.0);
+    pub const YELLOW: Self = Self::new(1.0, 1.0, 0.0, 1.0);
+    pub const CYAN: Self = Self::new(0.0, 1.0, 1.0, 1.0);
     pub const MAGENTA: Self = Self::new(1.0, 0.0, 1.0, 1.0);
     pub const TRANSPARENT: Self = Self::new(0.0, 0.0, 0.0, 0.0);
 
-    #[inline] pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self { Self { r, g, b, a } }
-    #[inline] pub fn rgb(r: f32, g: f32, b: f32) -> Self { Self { r, g, b, a: 1.0 } }
+    #[inline]
+    pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+    #[inline]
+    pub fn rgb(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
 
     /// Pack to 0x00RRGGBB (format expected by GDI DIB with BI_RGB, 32bpp, little-endian).
-    #[inline] pub fn to_bgra_u32(self) -> u32 {
+    #[inline]
+    pub fn to_bgra_u32(self) -> u32 {
         let r = (self.r.clamp(0.0, 1.0) * 255.0) as u32;
         let g = (self.g.clamp(0.0, 1.0) * 255.0) as u32;
         let b = (self.b.clamp(0.0, 1.0) * 255.0) as u32;
@@ -52,7 +62,7 @@ impl Color {
 
 /// All rendering backends implement this trait.
 pub trait Renderer {
-    fn width(&self)  -> u32;
+    fn width(&self) -> u32;
     fn height(&self) -> u32;
 
     /// Called when the window is resized.
@@ -66,6 +76,37 @@ pub trait Renderer {
 
     /// Present the rendered frame to the screen.
     fn end_frame(&mut self);
+
+    /// Draw a batch of world-space debug line segments.
+    ///
+    /// `vp` is the combined view-projection matrix.  Each backend projects
+    /// endpoints through `vp` in its own way — software uses its CPU
+    /// rasterizer, OpenGL issues a `GL_LINES` draw call.
+    ///
+    /// This is a no-op for backends that do not support debug visualization.
+    fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
+        let _ = (lines, vp);
+    }
+}
+
+// ── Debug draw primitive ──────────────────────────────────────────────────────
+
+/// A single 3-D line segment for editor debug visualization.
+///
+/// Passed to [`Renderer::render_debug_lines`] in batches.  Both endpoints are
+/// in world space; the renderer projects them through the supplied VP matrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DebugLine {
+    pub start: Vec3,
+    pub end: Vec3,
+    pub color: Color,
+}
+
+impl DebugLine {
+    #[inline]
+    pub fn new(start: Vec3, end: Vec3, color: Color) -> Self {
+        Self { start, end, color }
+    }
 }
 
 // ── Backend selector ──────────────────────────────────────────────────────────
@@ -75,22 +116,4 @@ pub enum BackendKind {
     Software,
     OpenGL,
     Vulkan,
-}
-
-use crate::math::{Mat4, Vec3};
-
-/// Immediate-mode draws the software demo already uses.
-/// draw_triangle_3d* takes model-space vertices and an OpenGL-convention MVP.
-/// draw_line is screen space: origin top-left, Y down, no depth test.
-pub trait Draw3d: Renderer {
-    fn draw_triangle_3d(&mut self, v0: Vec3, v1: Vec3, v2: Vec3, color: Color, mvp: &Mat4);
-
-    fn draw_triangle_3d_shaded(
-        &mut self,
-        v0: Vec3, v1: Vec3, v2: Vec3,
-        c0: Color, c1: Color, c2: Color,
-        mvp: &Mat4,
-    );
-
-    fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color);
 }

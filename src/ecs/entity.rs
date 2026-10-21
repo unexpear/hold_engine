@@ -5,7 +5,7 @@
 /// handles to despawned entities can be detected cheaply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Entity {
-    pub index:      u32,
+    pub index: u32,
     pub generation: u32,
 }
 

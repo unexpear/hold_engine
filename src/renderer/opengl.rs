@@ -1,40 +1,236 @@
-#![allow(dead_code, unused_macros)]
 //! OpenGL renderer backend.
 //!
 //! Sets up a WGL context on the window's DC, then loads OpenGL function
 //! pointers at runtime — no `gl` crate needed.
 //!
-//! Rendering primitives will be added here (VAO/VBO/shaders) as the engine grows.
+//! Supports uploading meshes (VAO/VBO/EBO), compiling GLSL shaders,
+//! uploading RGBA8 textures, and issuing indexed draw calls.
 
+use super::{opengl_shaders, Color, DebugLine, Renderer};
+use crate::assets::mesh::MeshData;
+use crate::assets::mesh::Vertex;
+use crate::assets::types::{GpuMesh, GpuTexture, Texture, TextureFormat};
+use crate::math::{Mat4, Vec3};
+use crate::platform::ffi::*;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
-use crate::platform::ffi::*;
-use super::{Color, Renderer};
 
-// ── OpenGL types ──────────────────────────────────────────────────────────────
+// ── OpenGL primitive types ────────────────────────────────────────────────────
 
-type GLuint    = u32;
-type GLint     = i32;
-type GLfloat   = f32;
-type GLenum    = u32;
-type GLbitfield= u32;
+type GLuint = u32;
+type GLint = i32;
+type GLfloat = f32;
+type GLenum = u32;
+type GLbitfield = u32;
 type GLboolean = u8;
-type GLsizei   = i32;
-type GLchar    = i8;
+type GLsizei = i32;
+type GLsizeiptr = isize;
+type GLchar = i8;
 
-const GL_COLOR_BUFFER_BIT: GLbitfield = 0x00004000;
-const GL_DEPTH_BUFFER_BIT: GLbitfield = 0x00000100;
-const GL_DEPTH_TEST:       GLenum     = 0x0B71;
-const GL_TRUE:             GLboolean  = 1;
-const GL_FALSE:            GLboolean  = 0;
+// ── Core clear/enable constants ───────────────────────────────────────────────
+
+const GL_COLOR_BUFFER_BIT: GLbitfield = 0x0000_4000;
+const GL_DEPTH_BUFFER_BIT: GLbitfield = 0x0000_0100;
+const GL_DEPTH_TEST: GLenum = 0x0B71;
+#[allow(dead_code)]
+const GL_TRUE: GLboolean = 1;
+#[allow(dead_code)]
+const GL_FALSE: GLboolean = 0;
+
+// ── Buffer / draw constants ───────────────────────────────────────────────────
+
+const GL_ARRAY_BUFFER: GLenum = 0x8892;
+const GL_ELEMENT_ARRAY_BUFFER: GLenum = 0x8893;
+const GL_STATIC_DRAW: GLenum = 0x88B4;
+#[allow(dead_code)]
+const GL_DYNAMIC_DRAW: GLenum = 0x88B8;
+
+const GL_LINES: GLenum = 0x0001;
+const GL_TRIANGLES: GLenum = 0x0004;
+#[allow(dead_code)]
+const GL_UNSIGNED_SHORT: GLenum = 0x1403;
+#[allow(dead_code)]
+const GL_UNSIGNED_INT: GLenum = 0x1405;
+const GL_FLOAT: GLenum = 0x1406;
+
+// ── Shader constants ──────────────────────────────────────────────────────────
+
+const GL_VERTEX_SHADER: GLenum = 0x8B31;
+const GL_FRAGMENT_SHADER: GLenum = 0x8B30;
+const GL_COMPILE_STATUS: GLenum = 0x8B81;
+const GL_LINK_STATUS: GLenum = 0x8B82;
+const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
+
+// ── Texture constants ─────────────────────────────────────────────────────────
+
+const GL_TEXTURE_2D: GLenum = 0x0DE1;
+#[allow(dead_code)]
+const GL_TEXTURE0: GLenum = 0x84C0;
+const GL_RGBA: GLenum = 0x1908;
+#[allow(dead_code)]
+const GL_RGB: GLenum = 0x1907;
+const GL_UNSIGNED_BYTE: GLenum = 0x1401;
+const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
+const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
+const GL_LINEAR: GLint = 0x2601;
+const GL_LINEAR_MIPMAP_LINEAR: GLint = 0x2703;
+const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
+const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
+const GL_REPEAT: GLint = 0x2901;
+#[allow(dead_code)]
+const GL_CLAMP_TO_EDGE: GLint = 0x812F;
+
+// ── Depth / blend constants ───────────────────────────────────────────────────
+
+#[allow(dead_code)]
+const GL_LEQUAL: GLenum = 0x0203;
 
 // ── Function pointer types ────────────────────────────────────────────────────
 
+// Core clear / state
 type GlClearColor = unsafe extern "system" fn(GLfloat, GLfloat, GLfloat, GLfloat);
-type GlClear      = unsafe extern "system" fn(GLbitfield);
-type GlViewport   = unsafe extern "system" fn(GLint, GLint, GLsizei, GLsizei);
-type GlEnable     = unsafe extern "system" fn(GLenum);
-type GlDisable    = unsafe extern "system" fn(GLenum);
+type GlClear = unsafe extern "system" fn(GLbitfield);
+type GlViewport = unsafe extern "system" fn(GLint, GLint, GLsizei, GLsizei);
+type GlEnable = unsafe extern "system" fn(GLenum);
+#[allow(dead_code)]
+type GlDisable = unsafe extern "system" fn(GLenum);
+
+// VAO
+type GlGenVertexArrays = unsafe extern "system" fn(GLsizei, *mut GLuint);
+type GlBindVertexArray = unsafe extern "system" fn(GLuint);
+type GlDeleteVertexArrays = unsafe extern "system" fn(GLsizei, *const GLuint);
+
+// Buffer objects
+type GlGenBuffers = unsafe extern "system" fn(GLsizei, *mut GLuint);
+type GlBindBuffer = unsafe extern "system" fn(GLenum, GLuint);
+type GlBufferData = unsafe extern "system" fn(GLenum, GLsizeiptr, *const c_void, GLenum);
+type GlDeleteBuffers = unsafe extern "system" fn(GLsizei, *const GLuint);
+type GlVertexAttribPointer =
+    unsafe extern "system" fn(GLuint, GLint, GLenum, GLboolean, GLsizei, *const c_void);
+type GlEnableVertexAttribArray = unsafe extern "system" fn(GLuint);
+
+// Shaders
+type GlCreateShader = unsafe extern "system" fn(GLenum) -> GLuint;
+type GlShaderSource =
+    unsafe extern "system" fn(GLuint, GLsizei, *const *const GLchar, *const GLint);
+type GlCompileShader = unsafe extern "system" fn(GLuint);
+type GlGetShaderiv = unsafe extern "system" fn(GLuint, GLenum, *mut GLint);
+type GlGetShaderInfoLog = unsafe extern "system" fn(GLuint, GLsizei, *mut GLsizei, *mut GLchar);
+type GlDeleteShader = unsafe extern "system" fn(GLuint);
+type GlCreateProgram = unsafe extern "system" fn() -> GLuint;
+type GlAttachShader = unsafe extern "system" fn(GLuint, GLuint);
+type GlLinkProgram = unsafe extern "system" fn(GLuint);
+type GlGetProgramiv = unsafe extern "system" fn(GLuint, GLenum, *mut GLint);
+type GlGetProgramInfoLog = unsafe extern "system" fn(GLuint, GLsizei, *mut GLsizei, *mut GLchar);
+type GlUseProgram = unsafe extern "system" fn(GLuint);
+type GlDeleteProgram = unsafe extern "system" fn(GLuint);
+
+// Draw
+type GlDrawElements = unsafe extern "system" fn(GLenum, GLsizei, GLenum, *const c_void);
+type GlDrawArrays = unsafe extern "system" fn(GLenum, GLint, GLsizei);
+
+// Uniforms
+type GlGetUniformLocation = unsafe extern "system" fn(GLuint, *const GLchar) -> GLint;
+type GlUniformMatrix4fv = unsafe extern "system" fn(GLint, GLsizei, GLboolean, *const GLfloat);
+#[allow(dead_code)]
+type GlUniform1i = unsafe extern "system" fn(GLint, GLint);
+type GlUniform3fv = unsafe extern "system" fn(GLint, GLsizei, *const GLfloat);
+type GlUniform4fv = unsafe extern "system" fn(GLint, GLsizei, *const GLfloat);
+
+// Textures
+type GlGenTextures = unsafe extern "system" fn(GLsizei, *mut GLuint);
+type GlDeleteTextures = unsafe extern "system" fn(GLsizei, *const GLuint);
+type GlBindTexture = unsafe extern "system" fn(GLenum, GLuint);
+type GlTexImage2D = unsafe extern "system" fn(
+    GLenum,
+    GLint,
+    GLint,
+    GLsizei,
+    GLsizei,
+    GLint,
+    GLenum,
+    GLenum,
+    *const c_void,
+);
+type GlTexParameteri = unsafe extern "system" fn(GLenum, GLenum, GLint);
+type GlActiveTexture = unsafe extern "system" fn(GLenum);
+type GlGenerateMipmap = unsafe extern "system" fn(GLenum);
+type GlPixelStorei = unsafe extern "system" fn(GLenum, GLint);
+
+// State
+#[allow(dead_code)]
+type GlDepthFunc = unsafe extern "system" fn(GLenum);
+#[allow(dead_code)]
+type GlBlendFunc = unsafe extern "system" fn(GLenum, GLenum);
+#[allow(dead_code)]
+type GlBlendEquation = unsafe extern "system" fn(GLenum);
+
+// ── Module-level GL helpers ───────────────────────────────────────────────────
+
+/// Compile and link a GLSL program from vertex + fragment source.
+///
+/// Used during `OpenGLRenderer::new()` before `self` exists.  Panics on
+/// compile or link error so problems surface immediately.
+unsafe fn compile_gl_program(gl: &GlFns, vert_src: &str, frag_src: &str) -> GLuint {
+    let vert = compile_gl_stage(gl, GL_VERTEX_SHADER, vert_src);
+    let frag = compile_gl_stage(gl, GL_FRAGMENT_SHADER, frag_src);
+
+    let program = (gl.create_program)();
+    (gl.attach_shader)(program, vert);
+    (gl.attach_shader)(program, frag);
+    (gl.link_program)(program);
+
+    let mut status: GLint = 0;
+    (gl.get_programiv)(program, GL_LINK_STATUS, &mut status);
+    if status == 0 {
+        let mut log_len: GLint = 0;
+        (gl.get_programiv)(program, GL_INFO_LOG_LENGTH, &mut log_len);
+        let mut log = vec![0u8; log_len as usize];
+        (gl.get_program_info_log)(
+            program,
+            log_len,
+            null_mut(),
+            log.as_mut_ptr() as *mut GLchar,
+        );
+        panic!(
+            "[GL] Line program link error:\n{}",
+            String::from_utf8_lossy(&log)
+        );
+    }
+
+    (gl.delete_shader)(vert);
+    (gl.delete_shader)(frag);
+    program
+}
+
+unsafe fn compile_gl_stage(gl: &GlFns, kind: GLenum, src: &str) -> GLuint {
+    let shader = (gl.create_shader)(kind);
+    let ptr = src.as_ptr() as *const GLchar;
+    let length = src.len() as GLint;
+    (gl.shader_source)(shader, 1, &ptr, &length);
+    (gl.compile_shader)(shader);
+
+    let mut status: GLint = 0;
+    (gl.get_shaderiv)(shader, GL_COMPILE_STATUS, &mut status);
+    if status == 0 {
+        let mut log_len: GLint = 0;
+        (gl.get_shaderiv)(shader, GL_INFO_LOG_LENGTH, &mut log_len);
+        let mut log = vec![0u8; log_len as usize];
+        (gl.get_shader_info_log)(shader, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
+        let stage = if kind == GL_VERTEX_SHADER {
+            "vertex"
+        } else {
+            "fragment"
+        };
+        panic!(
+            "[GL] {} shader compile error:\n{}",
+            stage,
+            String::from_utf8_lossy(&log)
+        );
+    }
+    shader
+}
 
 // ── GL function loader ────────────────────────────────────────────────────────
 
@@ -52,7 +248,9 @@ unsafe fn load_gl_fn(name: &str, opengl32: HMODULE) -> *const c_void {
         return ptr;
     }
     // Fall back to opengl32.dll for legacy core functions.
-    if opengl32.is_null() { return null_mut(); }
+    if opengl32.is_null() {
+        return null_mut();
+    }
     GetProcAddress(opengl32, cname.as_ptr())
 }
 
@@ -73,44 +271,239 @@ macro_rules! gl_fn {
 // ── Loaded GL functions ───────────────────────────────────────────────────────
 
 struct GlFns {
+    // Core clear / state
     clear_color: GlClearColor,
-    clear:       GlClear,
-    viewport:    GlViewport,
-    enable:      GlEnable,
+    clear: GlClear,
+    viewport: GlViewport,
+    enable: GlEnable,
+
+    // VAO
+    gen_vertex_arrays: GlGenVertexArrays,
+    bind_vertex_array: GlBindVertexArray,
+    delete_vertex_arrays: GlDeleteVertexArrays,
+
+    // Buffer objects
+    gen_buffers: GlGenBuffers,
+    bind_buffer: GlBindBuffer,
+    buffer_data: GlBufferData,
+    delete_buffers: GlDeleteBuffers,
+    vertex_attrib_pointer: GlVertexAttribPointer,
+    enable_vertex_attrib_array: GlEnableVertexAttribArray,
+
+    // Shaders
+    create_shader: GlCreateShader,
+    shader_source: GlShaderSource,
+    compile_shader: GlCompileShader,
+    get_shaderiv: GlGetShaderiv,
+    get_shader_info_log: GlGetShaderInfoLog,
+    delete_shader: GlDeleteShader,
+    create_program: GlCreateProgram,
+    attach_shader: GlAttachShader,
+    link_program: GlLinkProgram,
+    get_programiv: GlGetProgramiv,
+    get_program_info_log: GlGetProgramInfoLog,
+    use_program: GlUseProgram,
+    delete_program: GlDeleteProgram,
+
+    // Draw
+    draw_elements: GlDrawElements,
+    draw_arrays: GlDrawArrays,
+
+    // Uniforms
+    get_uniform_location: GlGetUniformLocation,
+    uniform_matrix4fv: GlUniformMatrix4fv,
+    uniform1i: GlUniform1i,
+    uniform3fv: GlUniform3fv,
+    uniform4fv: GlUniform4fv,
+
+    // Textures
+    gen_textures: GlGenTextures,
+    delete_textures: GlDeleteTextures,
+    bind_texture: GlBindTexture,
+    tex_image2d: GlTexImage2D,
+    tex_parameteri: GlTexParameteri,
+    active_texture: GlActiveTexture,
+    generate_mipmap: GlGenerateMipmap,
+    pixel_storei: GlPixelStorei,
 }
 
 impl GlFns {
     unsafe fn load(opengl32: HMODULE) -> Self {
-        let clear_color = std::mem::transmute::<*const c_void, GlClearColor>(
-            load_gl_fn("glClearColor", opengl32)
-        );
-        let clear = std::mem::transmute::<*const c_void, GlClear>(
-            load_gl_fn("glClear", opengl32)
-        );
-        let viewport = std::mem::transmute::<*const c_void, GlViewport>(
-            load_gl_fn("glViewport", opengl32)
-        );
-        let enable = std::mem::transmute::<*const c_void, GlEnable>(
-            load_gl_fn("glEnable", opengl32)
-        );
-        Self { clear_color, clear, viewport, enable }
+        // ── Core — always present ──────────────────────────────────────────────
+        let clear_color = std::mem::transmute::<*const c_void, GlClearColor>(load_gl_fn(
+            "glClearColor",
+            opengl32,
+        ));
+        let clear = std::mem::transmute::<*const c_void, GlClear>(load_gl_fn("glClear", opengl32));
+        let viewport =
+            std::mem::transmute::<*const c_void, GlViewport>(load_gl_fn("glViewport", opengl32));
+        let enable =
+            std::mem::transmute::<*const c_void, GlEnable>(load_gl_fn("glEnable", opengl32));
+
+        // ── Modern GL — unwrap: a missing entry means the driver is broken ─────
+        let gen_vertex_arrays = gl_fn!(opengl32, glGenVertexArrays, GlGenVertexArrays).unwrap();
+        let bind_vertex_array = gl_fn!(opengl32, glBindVertexArray, GlBindVertexArray).unwrap();
+        let delete_vertex_arrays =
+            gl_fn!(opengl32, glDeleteVertexArrays, GlDeleteVertexArrays).unwrap();
+
+        let gen_buffers = gl_fn!(opengl32, glGenBuffers, GlGenBuffers).unwrap();
+        let bind_buffer = gl_fn!(opengl32, glBindBuffer, GlBindBuffer).unwrap();
+        let buffer_data = gl_fn!(opengl32, glBufferData, GlBufferData).unwrap();
+        let delete_buffers = gl_fn!(opengl32, glDeleteBuffers, GlDeleteBuffers).unwrap();
+        let vertex_attrib_pointer =
+            gl_fn!(opengl32, glVertexAttribPointer, GlVertexAttribPointer).unwrap();
+        let enable_vertex_attrib_array = gl_fn!(
+            opengl32,
+            glEnableVertexAttribArray,
+            GlEnableVertexAttribArray
+        )
+        .unwrap();
+
+        let create_shader = gl_fn!(opengl32, glCreateShader, GlCreateShader).unwrap();
+        let shader_source = gl_fn!(opengl32, glShaderSource, GlShaderSource).unwrap();
+        let compile_shader = gl_fn!(opengl32, glCompileShader, GlCompileShader).unwrap();
+        let get_shaderiv = gl_fn!(opengl32, glGetShaderiv, GlGetShaderiv).unwrap();
+        let get_shader_info_log = gl_fn!(opengl32, glGetShaderInfoLog, GlGetShaderInfoLog).unwrap();
+        let delete_shader = gl_fn!(opengl32, glDeleteShader, GlDeleteShader).unwrap();
+        let create_program = gl_fn!(opengl32, glCreateProgram, GlCreateProgram).unwrap();
+        let attach_shader = gl_fn!(opengl32, glAttachShader, GlAttachShader).unwrap();
+        let link_program = gl_fn!(opengl32, glLinkProgram, GlLinkProgram).unwrap();
+        let get_programiv = gl_fn!(opengl32, glGetProgramiv, GlGetProgramiv).unwrap();
+        let get_program_info_log =
+            gl_fn!(opengl32, glGetProgramInfoLog, GlGetProgramInfoLog).unwrap();
+        let use_program = gl_fn!(opengl32, glUseProgram, GlUseProgram).unwrap();
+        let delete_program = gl_fn!(opengl32, glDeleteProgram, GlDeleteProgram).unwrap();
+
+        let draw_elements = gl_fn!(opengl32, glDrawElements, GlDrawElements).unwrap();
+        let draw_arrays = gl_fn!(opengl32, glDrawArrays, GlDrawArrays).unwrap();
+
+        let get_uniform_location =
+            gl_fn!(opengl32, glGetUniformLocation, GlGetUniformLocation).unwrap();
+        let uniform_matrix4fv = gl_fn!(opengl32, glUniformMatrix4fv, GlUniformMatrix4fv).unwrap();
+        let uniform1i = gl_fn!(opengl32, glUniform1i, GlUniform1i).unwrap();
+        let uniform3fv = gl_fn!(opengl32, glUniform3fv, GlUniform3fv).unwrap();
+        let uniform4fv = gl_fn!(opengl32, glUniform4fv, GlUniform4fv).unwrap();
+
+        // Texture functions are GL 1.1 core — fall back to opengl32.dll automatically.
+        let gen_textures = gl_fn!(opengl32, glGenTextures, GlGenTextures).unwrap();
+        let delete_textures = gl_fn!(opengl32, glDeleteTextures, GlDeleteTextures).unwrap();
+        let bind_texture = gl_fn!(opengl32, glBindTexture, GlBindTexture).unwrap();
+        let tex_image2d = gl_fn!(opengl32, glTexImage2D, GlTexImage2D).unwrap();
+        let tex_parameteri = gl_fn!(opengl32, glTexParameteri, GlTexParameteri).unwrap();
+        let active_texture = gl_fn!(opengl32, glActiveTexture, GlActiveTexture).unwrap();
+        let generate_mipmap = gl_fn!(opengl32, glGenerateMipmap, GlGenerateMipmap).unwrap();
+        let pixel_storei = gl_fn!(opengl32, glPixelStorei, GlPixelStorei).unwrap();
+
+        Self {
+            clear_color,
+            clear,
+            viewport,
+            enable,
+            gen_vertex_arrays,
+            bind_vertex_array,
+            delete_vertex_arrays,
+            gen_buffers,
+            bind_buffer,
+            buffer_data,
+            delete_buffers,
+            vertex_attrib_pointer,
+            enable_vertex_attrib_array,
+            create_shader,
+            shader_source,
+            compile_shader,
+            get_shaderiv,
+            get_shader_info_log,
+            delete_shader,
+            create_program,
+            attach_shader,
+            link_program,
+            get_programiv,
+            get_program_info_log,
+            use_program,
+            delete_program,
+            draw_elements,
+            draw_arrays,
+            get_uniform_location,
+            uniform_matrix4fv,
+            uniform1i,
+            uniform3fv,
+            uniform4fv,
+            gen_textures,
+            delete_textures,
+            bind_texture,
+            tex_image2d,
+            tex_parameteri,
+            active_texture,
+            generate_mipmap,
+            pixel_storei,
+        }
+    }
+}
+
+// ── Uniform location cache ────────────────────────────────────────────────────
+
+/// Cached `glGetUniformLocation` results for a single shader program.
+///
+/// Location queries are GL calls that can be slow; caching them per-program
+/// reduces per-draw overhead to a single `HashMap` lookup.
+///
+/// A location of `-1` means the uniform is not active in that program (the
+/// driver optimises it away or the shader doesn't use it) — callers must skip
+/// setting it.
+#[derive(Clone, Copy)]
+struct CachedUniforms {
+    mvp: GLint,
+    model: GLint,
+    color: GLint,
+    light_dir: GLint,
+    view_pos: GLint,
+    ambient: GLint,
+    texture: GLint,
+}
+
+impl CachedUniforms {
+    /// Query all known uniform locations from `program`.
+    unsafe fn load(gl: &GlFns, program: GLuint) -> Self {
+        macro_rules! loc {
+            ($name:expr) => {
+                (gl.get_uniform_location)(program, $name.as_ptr() as *const GLchar)
+            };
+        }
+        Self {
+            mvp: loc!(b"u_mvp\0"),
+            model: loc!(b"u_model\0"),
+            color: loc!(b"u_color\0"),
+            light_dir: loc!(b"u_light_dir\0"),
+            view_pos: loc!(b"u_view_pos\0"),
+            ambient: loc!(b"u_ambient\0"),
+            texture: loc!(b"u_texture\0"),
+        }
     }
 }
 
 // ── OpenGLRenderer ────────────────────────────────────────────────────────────
 
 pub struct OpenGLRenderer {
-    hwnd:     HWND,
-    hdc:      HDC,
-    hglrc:    HGLRC,
+    hwnd: HWND,
+    hdc: HDC,
+    hglrc: HGLRC,
     opengl32: HMODULE,
-    width:    u32,
-    height:   u32,
-    gl:       GlFns,
+    width: u32,
+    height: u32,
+    gl: GlFns,
+    /// Uniform location cache keyed by GL program ID.
+    /// Populated lazily on first draw with each program.
+    uniform_cache: HashMap<u32, CachedUniforms>,
+    /// Compiled line-shader program (position + per-vertex colour).
+    line_program: GLuint,
+    /// VAO and VBO for batched debug line segments (updated each frame).
+    line_vao: GLuint,
+    line_vbo: GLuint,
 }
 
 impl OpenGLRenderer {
     /// Create a WGL context on `hwnd`. Panics if the driver doesn't support GL.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Self {
         unsafe {
             let hdc = GetDC(hwnd);
@@ -118,14 +511,14 @@ impl OpenGLRenderer {
 
             // Choose a pixel format that supports OpenGL + double buffering.
             let pfd = PIXELFORMATDESCRIPTOR {
-                nSize:       std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as WORD,
-                nVersion:    1,
-                dwFlags:     PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
-                iPixelType:  PFD_TYPE_RGBA,
-                cColorBits:  32,
-                cDepthBits:  24,
-                cStencilBits:8,
-                iLayerType:  PFD_MAIN_PLANE,
+                nSize: std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as WORD,
+                nVersion: 1,
+                dwFlags: PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+                iPixelType: PFD_TYPE_RGBA,
+                cColorBits: 32,
+                cDepthBits: 24,
+                cStencilBits: 8,
+                iLayerType: PFD_MAIN_PLANE,
                 ..PIXELFORMATDESCRIPTOR::zeroed()
             };
 
@@ -153,24 +546,579 @@ impl OpenGLRenderer {
             // Enable depth test by default.
             (gl.enable)(GL_DEPTH_TEST);
 
-            Self { hwnd, hdc, hglrc, opengl32, width, height, gl }
+            // ── Compile line shader ────────────────────────────────────────────
+            let line_program =
+                compile_gl_program(&gl, opengl_shaders::LINE_VERT, opengl_shaders::LINE_FRAG);
+
+            // ── Allocate persistent line VAO + VBO ────────────────────────────
+            // Vertex layout: [x y z r g b a] (7 × f32 = 28 bytes per vertex)
+            let mut line_vao: GLuint = 0;
+            (gl.gen_vertex_arrays)(1, &mut line_vao);
+            (gl.bind_vertex_array)(line_vao);
+
+            let mut line_vbo: GLuint = 0;
+            (gl.gen_buffers)(1, &mut line_vbo);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, line_vbo);
+
+            let stride = 7_i32 * 4; // 28 bytes
+                                    // location 0 — position (vec3, offset 0)
+            (gl.vertex_attrib_pointer)(
+                0,
+                3,
+                GL_FLOAT,
+                GL_FALSE,
+                stride,
+                std::ptr::null::<c_void>(),
+            );
+            (gl.enable_vertex_attrib_array)(0);
+            // location 1 — colour (vec4, offset 12)
+            (gl.vertex_attrib_pointer)(1, 4, GL_FLOAT, GL_FALSE, stride, 12 as *const c_void);
+            (gl.enable_vertex_attrib_array)(1);
+
+            (gl.bind_vertex_array)(0);
+
+            Self {
+                hwnd,
+                hdc,
+                hglrc,
+                opengl32,
+                width,
+                height,
+                gl,
+                uniform_cache: HashMap::new(),
+                line_program,
+                line_vao,
+                line_vbo,
+            }
         }
     }
 
     /// Returns the WGL rendering context handle (for extension setup).
-    pub fn hglrc(&self) -> HGLRC { self.hglrc }
+    pub fn hglrc(&self) -> HGLRC {
+        self.hglrc
+    }
     /// Returns the device context handle.
-    pub fn hdc(&self) -> HDC { self.hdc }
+    pub fn hdc(&self) -> HDC {
+        self.hdc
+    }
+
+    // ── Geometry upload ───────────────────────────────────────────────────────
+
+    /// Upload geometry to the GPU.  Returns `(vao, vbo, ebo)`.
+    ///
+    /// The caller is responsible for storing these IDs (e.g. in a [`GpuMesh`])
+    /// and passing them to [`Self::draw_vao`] and [`Self::delete_vao`].
+    pub fn upload_mesh_raw(&self, vertices: &[Vertex], indices: &[u32]) -> (u32, u32, u32) {
+        unsafe {
+            let gl = &self.gl;
+
+            let mut vao: GLuint = 0;
+            (gl.gen_vertex_arrays)(1, &mut vao);
+            (gl.bind_vertex_array)(vao);
+
+            let mut bufs: [GLuint; 2] = [0; 2];
+            (gl.gen_buffers)(2, bufs.as_mut_ptr());
+            let vbo = bufs[0];
+            let ebo = bufs[1];
+
+            // Upload vertex data.
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, vbo);
+            (gl.buffer_data)(
+                GL_ARRAY_BUFFER,
+                std::mem::size_of_val(vertices) as GLsizeiptr,
+                vertices.as_ptr() as *const c_void,
+                GL_STATIC_DRAW,
+            );
+
+            // Upload index data.
+            (gl.bind_buffer)(GL_ELEMENT_ARRAY_BUFFER, ebo);
+            (gl.buffer_data)(
+                GL_ELEMENT_ARRAY_BUFFER,
+                std::mem::size_of_val(indices) as GLsizeiptr,
+                indices.as_ptr() as *const c_void,
+                GL_STATIC_DRAW,
+            );
+
+            let stride = std::mem::size_of::<Vertex>() as GLsizei; // 32 bytes
+
+            // location 0 — position (vec3, byte offset 0)
+            (gl.vertex_attrib_pointer)(
+                0,
+                3,
+                GL_FLOAT,
+                GL_FALSE,
+                stride,
+                std::ptr::null::<c_void>(),
+            );
+            (gl.enable_vertex_attrib_array)(0);
+
+            // location 1 — normal (vec3, byte offset 12)
+            (gl.vertex_attrib_pointer)(1, 3, GL_FLOAT, GL_FALSE, stride, 12 as *const c_void);
+            (gl.enable_vertex_attrib_array)(1);
+
+            // location 2 — uv (vec2, byte offset 24)
+            (gl.vertex_attrib_pointer)(2, 2, GL_FLOAT, GL_FALSE, stride, 24 as *const c_void);
+            (gl.enable_vertex_attrib_array)(2);
+
+            // Unbind VAO so subsequent state changes don't corrupt it.
+            (gl.bind_vertex_array)(0);
+
+            (vao, vbo, ebo)
+        }
+    }
+
+    // ── Shader compilation ────────────────────────────────────────────────────
+
+    /// Compile and link a GLSL program.  Returns the GL program ID.
+    ///
+    /// Panics with the driver's info log on compile or link error so problems
+    /// surface immediately during development.
+    pub fn compile_shader_program(&self, vert_src: &str, frag_src: &str) -> u32 {
+        unsafe {
+            let gl = &self.gl;
+
+            let vert = self.compile_stage(GL_VERTEX_SHADER, vert_src);
+            let frag = self.compile_stage(GL_FRAGMENT_SHADER, frag_src);
+
+            let program = (gl.create_program)();
+            (gl.attach_shader)(program, vert);
+            (gl.attach_shader)(program, frag);
+            (gl.link_program)(program);
+
+            // Check link status.
+            let mut status: GLint = 0;
+            (gl.get_programiv)(program, GL_LINK_STATUS, &mut status);
+            if status == 0 {
+                let mut log_len: GLint = 0;
+                (gl.get_programiv)(program, GL_INFO_LOG_LENGTH, &mut log_len);
+                let mut log = vec![0u8; log_len as usize];
+                (gl.get_program_info_log)(
+                    program,
+                    log_len,
+                    null_mut(),
+                    log.as_mut_ptr() as *mut GLchar,
+                );
+                let msg = String::from_utf8_lossy(&log);
+                panic!("[GL] Program link error:\n{}", msg);
+            }
+
+            // Shaders are linked; individual objects are no longer needed.
+            (gl.delete_shader)(vert);
+            (gl.delete_shader)(frag);
+
+            program
+        }
+    }
+
+    /// Compile a single shader stage.  Panics on error.
+    unsafe fn compile_stage(&self, kind: GLenum, src: &str) -> GLuint {
+        let gl = &self.gl;
+        let shader = (gl.create_shader)(kind);
+
+        // glShaderSource expects an array of C string pointers + lengths.
+        let ptr = src.as_ptr() as *const GLchar;
+        let length = src.len() as GLint;
+        (gl.shader_source)(shader, 1, &ptr, &length);
+        (gl.compile_shader)(shader);
+
+        let mut status: GLint = 0;
+        (gl.get_shaderiv)(shader, GL_COMPILE_STATUS, &mut status);
+        if status == 0 {
+            let mut log_len: GLint = 0;
+            (gl.get_shaderiv)(shader, GL_INFO_LOG_LENGTH, &mut log_len);
+            let mut log = vec![0u8; log_len as usize];
+            (gl.get_shader_info_log)(shader, log_len, null_mut(), log.as_mut_ptr() as *mut GLchar);
+            let stage = if kind == GL_VERTEX_SHADER {
+                "vertex"
+            } else {
+                "fragment"
+            };
+            let msg = String::from_utf8_lossy(&log);
+            panic!("[GL] {} shader compile error:\n{}", stage, msg);
+        }
+
+        shader
+    }
+
+    // ── Texture upload ────────────────────────────────────────────────────────
+
+    /// Upload RGBA8 pixel data to a new 2-D GL texture.  Returns the GL texture ID.
+    ///
+    /// Mip-maps are generated automatically; linear filtering is set on all levels.
+    pub fn upload_texture_rgba8(&self, width: u32, height: u32, data: &[u8]) -> u32 {
+        debug_assert_eq!(
+            data.len(),
+            (width * height * 4) as usize,
+            "upload_texture_rgba8: data length mismatch"
+        );
+        unsafe {
+            let gl = &self.gl;
+
+            let mut tex: GLuint = 0;
+            (gl.gen_textures)(1, &mut tex);
+            (gl.bind_texture)(GL_TEXTURE_2D, tex);
+
+            // Ensure tightly packed rows.
+            (gl.pixel_storei)(0x0CF5 /* GL_UNPACK_ALIGNMENT */, 1);
+
+            (gl.tex_image2d)(
+                GL_TEXTURE_2D,
+                0,                // mip level
+                GL_RGBA as GLint, // internal format
+                width as GLsizei,
+                height as GLsizei,
+                0,       // border (must be 0)
+                GL_RGBA, // source format
+                GL_UNSIGNED_BYTE,
+                data.as_ptr() as *const c_void,
+            );
+
+            (gl.generate_mipmap)(GL_TEXTURE_2D);
+
+            (gl.tex_parameteri)(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR_MIPMAP_LINEAR,
+            );
+            (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+            (gl.bind_texture)(GL_TEXTURE_2D, 0);
+
+            tex
+        }
+    }
+
+    // ── Draw calls ────────────────────────────────────────────────────────────
+
+    /// Draw a VAO with a compiled shader program.
+    ///
+    /// Uniform locations are looked up once per program and cached, so
+    /// repeated draws with the same program pay only a single `HashMap`
+    /// lookup instead of a GL call per uniform.
+    ///
+    /// # Parameters
+    /// - `vao`         — vertex array object ID (from [`Self::upload_mesh_raw`])
+    /// - `index_count` — number of indices to draw
+    /// - `program`     — GL shader program ID (from [`Self::compile_shader_program`])
+    /// - `mvp`         — combined model-view-projection matrix
+    /// - `model`       — model matrix (world-space normal transform)
+    /// - `color`       — RGBA base colour / tint
+    /// - `light_dir`   — world-space directional light direction
+    /// - `view_pos`    — camera world-space position (for specular; ignored by flat shaders)
+    /// - `ambient`     — ambient light intensity 0..1 (ignored by flat shaders)
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_vao(
+        &mut self,
+        vao: u32,
+        index_count: u32,
+        program: u32,
+        mvp: &Mat4,
+        model: &Mat4,
+        color: Color,
+        light_dir: Vec3,
+        view_pos: Vec3,
+        ambient: f32,
+    ) {
+        let uniforms = self.cached_uniforms(program);
+        unsafe {
+            let gl = &self.gl;
+            (gl.use_program)(program);
+
+            if uniforms.mvp >= 0 {
+                (gl.uniform_matrix4fv)(
+                    uniforms.mvp,
+                    1,
+                    GL_FALSE,
+                    mvp.cols.as_ptr() as *const GLfloat,
+                );
+            }
+            if uniforms.model >= 0 {
+                (gl.uniform_matrix4fv)(
+                    uniforms.model,
+                    1,
+                    GL_FALSE,
+                    model.cols.as_ptr() as *const GLfloat,
+                );
+            }
+            if uniforms.color >= 0 {
+                (gl.uniform4fv)(
+                    uniforms.color,
+                    1,
+                    [color.r, color.g, color.b, color.a].as_ptr(),
+                );
+            }
+            if uniforms.light_dir >= 0 {
+                (gl.uniform3fv)(
+                    uniforms.light_dir,
+                    1,
+                    [light_dir.x, light_dir.y, light_dir.z].as_ptr(),
+                );
+            }
+            if uniforms.view_pos >= 0 {
+                (gl.uniform3fv)(
+                    uniforms.view_pos,
+                    1,
+                    [view_pos.x, view_pos.y, view_pos.z].as_ptr(),
+                );
+            }
+            if uniforms.ambient >= 0 {
+                // glUniform1f — load the function pointer type inline
+                type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
+                let ptr = load_gl_fn("glUniform1f", self.opengl32);
+                if !ptr.is_null() {
+                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(ptr);
+                    f(uniforms.ambient, ambient);
+                }
+            }
+
+            (gl.bind_vertex_array)(vao);
+            (gl.draw_elements)(
+                GL_TRIANGLES,
+                index_count as GLsizei,
+                GL_UNSIGNED_INT,
+                null_mut(),
+            );
+            (gl.bind_vertex_array)(0);
+        }
+    }
+
+    // ── Uniform cache helper ──────────────────────────────────────────────────
+
+    /// Return (and lazily populate) the cached uniform locations for `program`.
+    fn cached_uniforms(&mut self, program: u32) -> CachedUniforms {
+        if !self.uniform_cache.contains_key(&program) {
+            let cached = unsafe { CachedUniforms::load(&self.gl, program) };
+            self.uniform_cache.insert(program, cached);
+        }
+        self.uniform_cache[&program]
+    }
+
+    /// Evict a program's cached uniform locations.  Call after
+    /// [`delete_program`](Self::delete_program) so stale entries don't linger.
+    pub fn invalidate_uniform_cache(&mut self, program: u32) {
+        self.uniform_cache.remove(&program);
+    }
+
+    // ── Cleanup helpers ───────────────────────────────────────────────────────
+
+    /// Upload a [`Texture`] to the GPU and return a [`GpuTexture`].
+    ///
+    /// The texture is converted to RGBA8 if it is not already.
+    pub fn upload_texture(&self, tex: &Texture) -> GpuTexture {
+        // Convert to RGBA8 if needed.
+        let rgba: std::borrow::Cow<'_, [u8]> = match tex.format {
+            TextureFormat::Rgba8 => std::borrow::Cow::Borrowed(&tex.data),
+            TextureFormat::Rgb8 => {
+                let mut out = Vec::with_capacity((tex.width * tex.height * 4) as usize);
+                for chunk in tex.data.chunks_exact(3) {
+                    out.push(chunk[0]);
+                    out.push(chunk[1]);
+                    out.push(chunk[2]);
+                    out.push(255);
+                }
+                std::borrow::Cow::Owned(out)
+            }
+            TextureFormat::R8 => {
+                let mut out = Vec::with_capacity((tex.width * tex.height * 4) as usize);
+                for &b in &tex.data {
+                    out.push(b);
+                    out.push(b);
+                    out.push(b);
+                    out.push(255);
+                }
+                std::borrow::Cow::Owned(out)
+            }
+        };
+        let id = self.upload_texture_rgba8(tex.width, tex.height, &rgba);
+        GpuTexture {
+            id,
+            width: tex.width,
+            height: tex.height,
+        }
+    }
+
+    /// Draw a textured mesh with Blinn-Phong lighting.
+    ///
+    /// Binds `texture` to unit 0, sets `u_texture`, then sets the same
+    /// uniforms as [`draw_vao`](Self::draw_vao).  Uniform locations are cached.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_mesh_textured(
+        &mut self,
+        mesh: &GpuMesh,
+        texture: &GpuTexture,
+        program: u32,
+        mvp: &Mat4,
+        model: &Mat4,
+        color: Color,
+        light_dir: Vec3,
+        view_pos: Vec3,
+        ambient: f32,
+    ) {
+        let uniforms = self.cached_uniforms(program);
+        unsafe {
+            let gl = &self.gl;
+            (gl.use_program)(program);
+
+            (gl.active_texture)(GL_TEXTURE0);
+            (gl.bind_texture)(GL_TEXTURE_2D, texture.id);
+
+            if uniforms.texture >= 0 {
+                (gl.uniform1i)(uniforms.texture, 0);
+            }
+            if uniforms.mvp >= 0 {
+                (gl.uniform_matrix4fv)(
+                    uniforms.mvp,
+                    1,
+                    GL_FALSE,
+                    mvp.cols.as_ptr() as *const GLfloat,
+                );
+            }
+            if uniforms.model >= 0 {
+                (gl.uniform_matrix4fv)(
+                    uniforms.model,
+                    1,
+                    GL_FALSE,
+                    model.cols.as_ptr() as *const GLfloat,
+                );
+            }
+            if uniforms.color >= 0 {
+                (gl.uniform4fv)(
+                    uniforms.color,
+                    1,
+                    [color.r, color.g, color.b, color.a].as_ptr(),
+                );
+            }
+            if uniforms.light_dir >= 0 {
+                (gl.uniform3fv)(
+                    uniforms.light_dir,
+                    1,
+                    [light_dir.x, light_dir.y, light_dir.z].as_ptr(),
+                );
+            }
+            if uniforms.view_pos >= 0 {
+                (gl.uniform3fv)(
+                    uniforms.view_pos,
+                    1,
+                    [view_pos.x, view_pos.y, view_pos.z].as_ptr(),
+                );
+            }
+            if uniforms.ambient >= 0 {
+                type GlUniform1f = unsafe extern "system" fn(GLint, GLfloat);
+                let ptr = load_gl_fn("glUniform1f", self.opengl32);
+                if !ptr.is_null() {
+                    let f = std::mem::transmute::<*const c_void, GlUniform1f>(ptr);
+                    f(uniforms.ambient, ambient);
+                }
+            }
+
+            (gl.bind_vertex_array)(mesh.vao);
+            (gl.draw_elements)(
+                GL_TRIANGLES,
+                mesh.index_count as GLsizei,
+                GL_UNSIGNED_INT,
+                null_mut(),
+            );
+            (gl.bind_vertex_array)(0);
+            (gl.bind_texture)(GL_TEXTURE_2D, 0);
+        }
+    }
+
+    /// Free a GPU texture previously created by [`Self::upload_texture`].
+    pub fn free_texture(&self, tex: GpuTexture) {
+        self.delete_texture(tex.id);
+    }
+
+    /// Delete the GPU buffers and VAO for a mesh previously created by
+    /// [`Self::upload_mesh_raw`].
+    pub fn delete_vao(&self, vao: u32, vbo: u32, ebo: u32) {
+        unsafe {
+            let gl = &self.gl;
+            (gl.delete_vertex_arrays)(1, &vao);
+            let bufs = [vbo, ebo];
+            (gl.delete_buffers)(2, bufs.as_ptr());
+        }
+    }
+
+    /// Delete a compiled shader program and evict its cached uniform locations.
+    pub fn delete_program(&mut self, program: u32) {
+        self.uniform_cache.remove(&program);
+        unsafe {
+            (self.gl.delete_program)(program);
+        }
+    }
+
+    /// Delete a texture previously created by [`Self::upload_texture_rgba8`].
+    pub fn delete_texture(&self, tex_id: u32) {
+        unsafe {
+            (self.gl.delete_textures)(1, &tex_id);
+        }
+    }
+
+    // ---- MeshData convenience methods ------------------------------------
+
+    /// Upload a MeshData (from OBJ or procedural) and return a drawable GpuMesh.
+    pub fn upload_mesh(&self, mesh: &MeshData) -> GpuMesh {
+        let (vao, vbo, ebo) = self.upload_mesh_raw(&mesh.vertices, &mesh.indices);
+        GpuMesh {
+            vao,
+            vbo,
+            ebo,
+            index_count: mesh.indices.len() as u32,
+        }
+    }
+
+    /// Draw a [`GpuMesh`] with a compiled shader program.
+    ///
+    /// Forwards all parameters to [`draw_vao`](Self::draw_vao).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_mesh(
+        &mut self,
+        mesh: &GpuMesh,
+        program: u32,
+        mvp: &Mat4,
+        model: &Mat4,
+        color: Color,
+        light_dir: Vec3,
+        view_pos: Vec3,
+        ambient: f32,
+    ) {
+        self.draw_vao(
+            mesh.vao,
+            mesh.index_count,
+            program,
+            mvp,
+            model,
+            color,
+            light_dir,
+            view_pos,
+            ambient,
+        );
+    }
+
+    /// Free all GPU resources owned by a GpuMesh.
+    pub fn free_mesh(&self, mesh: GpuMesh) {
+        self.delete_vao(mesh.vao, mesh.vbo, mesh.ebo);
+    }
 }
 
+// ── Renderer trait impl ───────────────────────────────────────────────────────
+
 impl Renderer for OpenGLRenderer {
-    fn width(&self)  -> u32 { self.width }
-    fn height(&self) -> u32 { self.height }
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
 
     fn resize(&mut self, width: u32, height: u32) {
-        self.width  = width;
+        self.width = width;
         self.height = height;
-        unsafe { (self.gl.viewport)(0, 0, width as GLsizei, height as GLsizei); }
+        unsafe {
+            (self.gl.viewport)(0, 0, width as GLsizei, height as GLsizei);
+        }
     }
 
     fn begin_frame(&mut self) {}
@@ -183,13 +1131,76 @@ impl Renderer for OpenGLRenderer {
     }
 
     fn end_frame(&mut self) {
-        unsafe { SwapBuffers(self.hdc); }
+        unsafe {
+            SwapBuffers(self.hdc);
+        }
+    }
+
+    fn render_debug_lines(&mut self, lines: &[DebugLine], vp: &Mat4) {
+        if lines.is_empty() {
+            return;
+        }
+
+        // Build flat vertex buffer: [x y z r g b a] × 2 per line.
+        let mut verts: Vec<f32> = Vec::with_capacity(lines.len() * 14);
+        for line in lines {
+            verts.extend_from_slice(&[
+                line.start.x,
+                line.start.y,
+                line.start.z,
+                line.color.r,
+                line.color.g,
+                line.color.b,
+                line.color.a,
+            ]);
+            verts.extend_from_slice(&[
+                line.end.x,
+                line.end.y,
+                line.end.z,
+                line.color.r,
+                line.color.g,
+                line.color.b,
+                line.color.a,
+            ]);
+        }
+
+        unsafe {
+            let gl = &self.gl;
+
+            (gl.bind_vertex_array)(self.line_vao);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, self.line_vbo);
+            (gl.buffer_data)(
+                GL_ARRAY_BUFFER,
+                (verts.len() * std::mem::size_of::<f32>()) as GLsizeiptr,
+                verts.as_ptr() as *const c_void,
+                GL_DYNAMIC_DRAW,
+            );
+
+            (gl.use_program)(self.line_program);
+
+            // Upload VP matrix.
+            let u_vp =
+                (gl.get_uniform_location)(self.line_program, c"u_vp".as_ptr() as *const GLchar);
+            if u_vp >= 0 {
+                (gl.uniform_matrix4fv)(u_vp, 1, GL_FALSE, vp.cols.as_ptr() as *const GLfloat);
+            }
+
+            (gl.draw_arrays)(GL_LINES, 0, (lines.len() * 2) as GLsizei);
+            (gl.bind_vertex_array)(0);
+        }
     }
 }
+
+// ── Drop ─────────────────────────────────────────────────────────────────────
 
 impl Drop for OpenGLRenderer {
     fn drop(&mut self) {
         unsafe {
+            // Free line rendering resources.
+            (self.gl.delete_buffers)(1, &self.line_vbo);
+            (self.gl.delete_vertex_arrays)(1, &self.line_vao);
+            (self.gl.delete_program)(self.line_program);
+
             wglMakeCurrent(null_mut(), null_mut());
             wglDeleteContext(self.hglrc);
             ReleaseDC(self.hwnd, self.hdc);

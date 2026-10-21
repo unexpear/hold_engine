@@ -8,14 +8,9 @@ use crate::assets::{AssetPool, Handle};
 /// Maintains one [`AssetPool<T>`] per asset type, stored as type-erased
 /// `Box<dyn Any>` values keyed by [`TypeId`].  All pool access is
 /// zero-overhead when the type is known at the call site.
+#[derive(Default)]
 pub struct AssetStore {
     pools: HashMap<TypeId, Box<dyn Any>>,
-}
-
-impl Default for AssetStore {
-    fn default() -> Self {
-        Self { pools: HashMap::new() }
-    }
 }
 
 impl AssetStore {
@@ -68,6 +63,15 @@ impl AssetStore {
         self.pools
             .get(&TypeId::of::<T>())?
             .downcast_ref::<AssetPool<T>>()
+    }
+
+    /// Mutable access to the underlying pool for `T`.
+    ///
+    /// Returns `None` if no assets of type `T` have been inserted yet.
+    pub fn pool_mut<T: 'static>(&mut self) -> Option<&mut AssetPool<T>> {
+        self.pools
+            .get_mut(&TypeId::of::<T>())?
+            .downcast_mut::<AssetPool<T>>()
     }
 
     // ------------------------------------------------------------------

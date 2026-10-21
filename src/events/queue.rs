@@ -2,6 +2,12 @@ pub struct EventQueue<E> {
     events: Vec<E>,
 }
 
+impl<E> Default for EventQueue<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E> EventQueue<E> {
     pub fn new() -> Self {
         Self { events: Vec::new() }

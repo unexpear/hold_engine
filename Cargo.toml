@@ -1,14 +1,22 @@
 [package]
-name = "forge_engine"
+name = "hold_engine"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
+[[example]]
 name = "demo"
-path = "src/main.rs"
+path = "examples/demo.rs"
+
+[[example]]
+name = "editor_host"
+path = "examples/editor_host.rs"
+
+[[example]]
+name = "editor_shell"
+path = "examples/editor_shell.rs"
 
 [lib]
-name = "forge"
+name = "hold"
 path = "src/lib.rs"
 
 [profile.dev]
